@@ -1,8 +1,12 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { createClient, Session } from "@supabase/supabase-js";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 type Resume = { id: number; title: string; source_text: string };
 type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; status: string; submission_reference?: string; submitted_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; created_at: string };
@@ -23,6 +27,9 @@ const applicationStatuses = ["draft", "ready_to_apply", "applied"] as const;
 const statusLabels: Record<string, string> = { draft: "Draft", ready_to_apply: "Ready", applied: "Applied" };
 
 export default function Home() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(!supabase);
+  const [authNotice, setAuthNotice] = useState("");
   const [profile, setProfile] = useState<Profile | null>(null);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
@@ -44,12 +51,18 @@ export default function Home() {
   const [adWarnings, setAdWarnings] = useState<string[]>([]);
   const [confirmedApplication, setConfirmedApplication] = useState<number | null>(null);
 
+  async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+    const headers = new Headers(init.headers);
+    if (session?.access_token) headers.set("Authorization", `Bearer ${session.access_token}`);
+    return window.fetch(input, { ...init, headers });
+  }
+
   async function refresh() {
     const [profileResponse, resumeResponse, applicationResponse, backupResponse] = await Promise.all([
-      fetch(`${api}/profile`),
-      fetch(`${api}/resumes`),
-      fetch(`${api}/applications`),
-      fetch(`${api}/backups`),
+      authenticatedFetch(`${api}/profile`),
+      authenticatedFetch(`${api}/resumes`),
+      authenticatedFetch(`${api}/applications`),
+      authenticatedFetch(`${api}/backups`),
     ]);
     if (profileResponse.ok) setProfile(await profileResponse.json());
     if (resumeResponse.ok) setResumes(await resumeResponse.json());
@@ -58,14 +71,48 @@ export default function Home() {
   }
 
   useEffect(() => {
-    fetch(`${api}/health`)
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthReady(true);
+    });
+    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthReady(true);
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!authReady || (supabase && !session)) return;
+    authenticatedFetch(`${api}/health`)
       .then((response) => response.json())
       .then((health) => setNotice(health.ai_configured
         ? "Ready. Add a job and generate your application pack."
         : "Add an API key locally before generating application materials."))
       .catch(() => setNotice("The local service is not running. Start the app and refresh this page."));
     refresh();
-  }, []);
+  }, [authReady, session?.access_token]);
+
+  async function signIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    const form = new FormData(event.currentTarget);
+    setAuthNotice("Signing in…");
+    const { error } = await supabase.auth.signInWithPassword({
+      email: String(form.get("email") || "").trim(),
+      password: String(form.get("password") || ""),
+    });
+    setAuthNotice(error ? error.message : "");
+  }
+
+  async function signOut() {
+    if (supabase) await supabase.auth.signOut();
+    setProfile(null);
+    setResumes([]);
+    setApplications([]);
+    setDocuments([]);
+  }
 
   const latestDocuments = useMemo(() => {
     const result: Record<string, GeneratedDocument> = {};
@@ -108,7 +155,7 @@ export default function Home() {
       postcode: value("postcode"), country: value("country") || "Australia", work_rights: value("work_rights"), availability_notice: value("availability_notice") || "not_specified",
       referees: [referee(1), referee(2)].filter((item): item is Referee => item !== null),
     };
-    const response = await fetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const result = await response.json();
     if (!response.ok) return setNotice(result.detail || "Could not save the applicant profile.");
     setProfile(result);
@@ -120,7 +167,7 @@ export default function Home() {
     const form = new FormData(event.currentTarget);
     const payload = { title: String(form.get("title")), source_text: String(form.get("source_text")) };
     const current = resumes[0];
-    const response = await fetch(current ? `${api}/resumes/${current.id}` : `${api}/resumes`, {
+    const response = await authenticatedFetch(current ? `${api}/resumes/${current.id}` : `${api}/resumes`, {
       method: current ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -132,7 +179,7 @@ export default function Home() {
   async function uploadResume(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setResumeUploadState("uploading");
-    const response = await fetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
+    const response = await authenticatedFetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
     const result = await response.json();
     if (!response.ok) {
       setResumeUploadState("error");
@@ -147,7 +194,7 @@ export default function Home() {
     if (!jobFields.job_url.trim()) return setNotice("Paste the job link first.");
     setJobImportState("importing");
     try {
-      const response = await fetch(`${api}/applications/import-url`, {
+      const response = await authenticatedFetch(`${api}/applications/import-url`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_url: jobFields.job_url.trim() }),
@@ -178,7 +225,7 @@ export default function Home() {
     if (!rawJobAd.trim()) return setNotice("Paste the full job advertisement first.");
     setAdParseState("parsing");
     try {
-      const response = await fetch(`${api}/applications/parse-ad`, {
+      const response = await authenticatedFetch(`${api}/applications/parse-ad`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ raw_text: rawJobAd }),
@@ -210,7 +257,7 @@ export default function Home() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const payload = jobFields;
-    const response = await fetch(`${api}/applications`, {
+    const response = await authenticatedFetch(`${api}/applications`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -240,7 +287,7 @@ export default function Home() {
       selection_criteria: String(form.get("selection_criteria") || "").trim(),
       submission_reference: String(form.get("submission_reference") || "").trim(),
     };
-    const response = await fetch(`${api}/applications/${selectedApplication}`, {
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -257,7 +304,7 @@ export default function Home() {
     setSelectedApplication(id);
     setConfirmedApplication(null);
     setQualityResult(null);
-    const response = await fetch(`${api}/applications/${id}/documents`);
+    const response = await authenticatedFetch(`${api}/applications/${id}/documents`);
     const loaded = response.ok ? await response.json() : [];
     setDocuments(loaded);
     const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
@@ -268,16 +315,17 @@ export default function Home() {
     if (!selectedApplication || !resumes.length) return;
     const application = applications.find((item) => item.id === selectedApplication);
     const documentTypes = application?.selection_criteria?.trim() ? packTypes : packTypes.slice(0, 2);
+    const packId = crypto.randomUUID();
     setBusy(true);
     const created: GeneratedDocument[] = [];
     try {
       for (let index = 0; index < documentTypes.length; index += 1) {
         const documentType = documentTypes[index];
         setNotice(`Creating application pack: ${index + 1} of ${documentTypes.length} — ${labels[documentType]}…`);
-        const response = await fetch(`${api}/generate`, {
+        const response = await authenticatedFetch(`${api}/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ application_id: selectedApplication, document_type: documentType }),
+          body: JSON.stringify({ application_id: selectedApplication, document_type: documentType, pack_id: packId }),
           signal: AbortSignal.timeout(100_000),
         });
         const result = await response.json();
@@ -286,7 +334,7 @@ export default function Home() {
       }
       setDocuments((current) => [...created.reverse(), ...current]);
       setActiveType("tailored_resume");
-      const checkResponse = await fetch(`${api}/applications/${selectedApplication}/quality-check`);
+      const checkResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
       if (checkResponse.ok) {
         const check = await checkResponse.json() as QualityResult;
         setQualityResult(check);
@@ -307,7 +355,7 @@ export default function Home() {
   async function saveDraft() {
     if (!activeDocument) return;
     setDraftSaveState("saving");
-    const response = await fetch(`${api}/documents/${activeDocument.id}`, {
+    const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content: draftText }),
@@ -325,7 +373,7 @@ export default function Home() {
 
   async function runFinalCheck() {
     if (!selectedApplication) return null;
-    const response = await fetch(`${api}/applications/${selectedApplication}/quality-check`);
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
     const result = await response.json();
     if (!response.ok) {
       setNotice(result.detail || "Could not run the final check.");
@@ -357,10 +405,10 @@ export default function Home() {
       window.alert(message);
       return;
     }
-    const response = await fetch(`${api}/applications/${selectedApplication}/prepare-submission`, { method: "POST" });
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/prepare-submission`, { method: "POST" });
     const result = await response.json();
     if (!response.ok) return setNotice(result.detail || "Add the job application link before continuing.");
-    const statusResponse = await fetch(`${api}/applications/${selectedApplication}/status`, {
+    const statusResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/status`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "ready_to_apply" }),
@@ -388,7 +436,7 @@ export default function Home() {
   async function markApplied() {
     if (!selectedApplication) return;
     const application = applications.find((item) => item.id === selectedApplication);
-    const response = await fetch(`${api}/applications/${selectedApplication}/submission`, {
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/submission`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ submission_reference: application?.submission_reference || null }),
@@ -402,7 +450,7 @@ export default function Home() {
   }
 
   async function updateApplicationStatus(application: Application, status: string) {
-    const response = await fetch(`${api}/applications/${application.id}/status`, {
+    const response = await authenticatedFetch(`${api}/applications/${application.id}/status`, {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
     });
     const result = await response.json();
@@ -412,7 +460,7 @@ export default function Home() {
   }
 
   async function createLocalBackup() {
-    const response = await fetch(`${api}/backups`, { method: "POST" });
+    const response = await authenticatedFetch(`${api}/backups`, { method: "POST" });
     const result = await response.json();
     if (!response.ok) return setNotice(result.detail || "Could not create the backup.");
     setBackups((current) => [result, ...current]);
@@ -422,7 +470,7 @@ export default function Home() {
   async function restoreLocalBackup(backup: Backup) {
     const confirmed = window.confirm(`Restore ${backup.filename}? This replaces the current profile, resumes, jobs and generated documents. A safety backup will be created first.`);
     if (!confirmed) return;
-    const response = await fetch(`${api}/backups/${encodeURIComponent(backup.filename)}/restore`, {
+    const response = await authenticatedFetch(`${api}/backups/${encodeURIComponent(backup.filename)}/restore`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
     });
     const result = await response.json();
@@ -433,14 +481,28 @@ export default function Home() {
     setNotice(`Backup restored: ${backup.filename}`);
   }
 
-  function downloadDocument(format: "docx" | "pdf") {
+  async function downloadDocument(format: "docx" | "pdf") {
     if (!activeDocument) return;
-    window.open(`${api}/documents/${activeDocument.id}/export?format=${format}`, "_blank", "noopener,noreferrer");
+    const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}/export?format=${format}`);
+    if (!response.ok) return setNotice("Could not download this document.");
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${labels[activeType] || "Document"}.${format}`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
-  function downloadPack(format: "docx" | "pdf") {
+  async function downloadPack(format: "docx" | "pdf") {
     if (!selectedApplication) return;
-    window.open(`${api}/applications/${selectedApplication}/export-pack?format=${format}`, "_blank", "noopener,noreferrer");
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/export-pack?format=${format}`);
+    if (!response.ok) return setNotice("Could not download the application pack.");
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Application_Pack_${format.toUpperCase()}.zip`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   const selected = applications.find((application) => application.id === selectedApplication);
@@ -449,11 +511,30 @@ export default function Home() {
   const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, applications.filter((application) => application.status === status).length])), [applications]);
   const filteredApplications = statusFilter === "all" ? applications : applications.filter((application) => application.status === statusFilter);
 
+  if (!authReady) return <main><section className="panel"><p>Preparing secure sign-in…</p></section></main>;
+
+  if (supabase && !session) return <main>
+    <header>
+      <p className="eyebrow">JOB APPLICATION ASSISTANT · PRIVATE BETA</p>
+      <h1>Sign in to your application workspace.</h1>
+      <p>Access is limited to invited beta testers.</p>
+    </header>
+    <section className="panel">
+      <form onSubmit={signIn} className="formBody compactForm">
+        <label className="full">Email<input name="email" type="email" autoComplete="email" required /></label>
+        <label className="full">Password<input name="password" type="password" autoComplete="current-password" required /></label>
+        <button type="submit">Sign in</button>
+        {authNotice && <p className="notice">{authNotice}</p>}
+      </form>
+    </section>
+  </main>;
+
   return <main>
     <header>
       <p className="eyebrow">JOB APPLICATION ASSISTANT</p>
       <h1>From job description to application pack.</h1>
       <p>Keep one truthful Master Resume, add a job, and let AI prepare the materials for your review.</p>
+      {supabase && <button type="button" className="secondary" onClick={signOut}>Sign out</button>}
     </header>
     <p className="notice">{notice}</p>
 

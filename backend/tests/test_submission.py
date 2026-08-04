@@ -2,12 +2,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.database import get_session
+from app.auth import get_current_user
 from app.main import app, auto_polish_cover_letter, enforce_profile_contact, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication
 from app import backup
@@ -33,6 +35,33 @@ class SubmissionRecordTests(unittest.TestCase):
             polished,
             "Please accept my application for the Project Administrator position.",
         )
+
+    def test_online_user_cannot_list_or_update_another_users_application(self):
+        owner_id = uuid4()
+        other_user_id = uuid4()
+        with Session(self.engine) as session:
+            owned = JobApplication(
+                user_id=owner_id,
+                company="Private Employer",
+                position_title="Private Role",
+                job_description="Private description",
+            )
+            session.add(owned)
+            session.commit()
+            session.refresh(owned)
+            owned_id = owned.id
+
+        app.dependency_overrides[get_current_user] = lambda: other_user_id
+
+        listed = self.client.get("/applications")
+        updated = self.client.patch(
+            f"/applications/{owned_id}",
+            json={"company": "Changed Employer"},
+        )
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertNotIn(owned_id, [item["id"] for item in listed.json()])
+        self.assertEqual(updated.status_code, 404)
 
     def test_auto_polish_uses_notice_period_without_inventing_date(self):
         profile = ApplicantProfile(

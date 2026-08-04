@@ -1,18 +1,21 @@
 from datetime import datetime
 from io import BytesIO
 import re
+from uuid import UUID
 from zipfile import ZIP_DEFLATED, ZipFile
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, generate_draft
+from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .config import settings
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_text, import_job_url, parse_job_ad_text
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, GeneratedDocument, GeneratedDocumentUpdate, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -43,18 +46,74 @@ def health():
     }
 
 
+def select_for_user(model, user_id: UUID | None):
+    statement = select(model)
+    return statement.where(model.user_id == user_id) if user_id is not None else statement
+
+
+def get_for_user(session: Session, model, record_id: int, user_id: UUID | None):
+    record = session.get(model, record_id)
+    if not record or (user_id is not None and record.user_id != user_id):
+        return None
+    return record
+
+
+def require_local_mode() -> None:
+    if settings.deployment_mode.strip().lower() == "online":
+        raise HTTPException(404, "Local backup tools are not available in the online beta.")
+
+
+def check_generation_quota(session: Session, user_id: UUID | None, pack_id: UUID | None) -> bool:
+    """Return True when a new online pack usage record must be created."""
+    if settings.deployment_mode.strip().lower() != "online":
+        return False
+    if user_id is None or pack_id is None:
+        raise HTTPException(400, "A generation pack identifier is required in online mode.")
+    existing = session.exec(
+        select(GenerationUsage).where(
+            GenerationUsage.user_id == user_id,
+            GenerationUsage.pack_id == pack_id,
+        )
+    ).first()
+    if existing:
+        return False
+
+    now = datetime.utcnow()
+    start_of_day = datetime(now.year, now.month, now.day)
+    start_of_month = datetime(now.year, now.month, 1)
+    daily_count = session.exec(
+        select(func.count(GenerationUsage.id)).where(
+            GenerationUsage.user_id == user_id,
+            GenerationUsage.generated_at >= start_of_day,
+        )
+    ).one()
+    global_monthly_count = session.exec(
+        select(func.count(GenerationUsage.id)).where(
+            GenerationUsage.generated_at >= start_of_month,
+        )
+    ).one()
+    if daily_count >= settings.daily_pack_limit_per_user:
+        raise HTTPException(429, "Today's beta limit has been reached. Please try again tomorrow.")
+    if global_monthly_count >= settings.monthly_pack_limit_global:
+        raise HTTPException(429, "The beta's monthly AI limit has been reached. Generation is paused.")
+    return True
+
+
 @app.get("/backups")
 def get_backups():
+    require_local_mode()
     return list_backups()
 
 
 @app.post("/backups")
 def make_backup(session: Session = Depends(get_session)):
+    require_local_mode()
     return create_backup(session)
 
 
 @app.get("/backups/{filename}/download")
 def download_backup(filename: str):
+    require_local_mode()
     try:
         path, _ = read_backup(filename)
     except FileNotFoundError:
@@ -70,6 +129,7 @@ def download_backup(filename: str):
 
 @app.post("/backups/{filename}/restore")
 def restore_saved_backup(filename: str, payload: RestoreBackupRequest, session: Session = Depends(get_session)):
+    require_local_mode()
     if not payload.confirm:
         raise HTTPException(400, "Explicit confirmation is required before restoring a backup.")
     create_backup(session)
@@ -82,7 +142,7 @@ def restore_saved_backup(filename: str, payload: RestoreBackupRequest, session: 
 
 
 def profile_response(profile: ApplicantProfile, referees: list[Referee]) -> ApplicantProfileResponse:
-    values = profile.model_dump(exclude={"created_at"})
+    values = profile.model_dump(exclude={"created_at", "user_id"})
     values["referees"] = [
         referee.model_dump(exclude={"id", "profile_id", "display_order"})
         for referee in referees
@@ -187,12 +247,15 @@ def auto_polish_cover_letter(
 
 
 @app.get("/profile", response_model=ApplicantProfileResponse | None)
-def get_profile(session: Session = Depends(get_session)):
-    profile = session.exec(select(ApplicantProfile).order_by(ApplicantProfile.id)).first()
+def get_profile(
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     if not profile:
         return None
     referees = session.exec(
-        select(Referee)
+        select_for_user(Referee, user_id)
         .where(Referee.profile_id == profile.id)
         .order_by(Referee.display_order)
     ).all()
@@ -200,10 +263,14 @@ def get_profile(session: Session = Depends(get_session)):
 
 
 @app.put("/profile", response_model=ApplicantProfileResponse)
-def save_profile(payload: ApplicantProfilePayload, session: Session = Depends(get_session)):
+def save_profile(
+    payload: ApplicantProfilePayload,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
     if len(payload.referees) > 2:
         raise HTTPException(400, "A maximum of two referees can be saved.")
-    profile = session.exec(select(ApplicantProfile).order_by(ApplicantProfile.id)).first()
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     profile_values = payload.model_dump(exclude={"referees"})
     if profile:
         for key, value in profile_values.items():
@@ -211,15 +278,19 @@ def save_profile(payload: ApplicantProfilePayload, session: Session = Depends(ge
         profile.updated_at = datetime.utcnow()
     else:
         profile = ApplicantProfile.model_validate(profile_values)
+        profile.user_id = user_id
     session.add(profile)
     session.commit()
     session.refresh(profile)
 
-    existing_referees = session.exec(select(Referee).where(Referee.profile_id == profile.id)).all()
+    existing_referees = session.exec(
+        select_for_user(Referee, user_id).where(Referee.profile_id == profile.id)
+    ).all()
     for referee in existing_referees:
         session.delete(referee)
     for index, referee_payload in enumerate(payload.referees, start=1):
         referee = Referee(
+            user_id=user_id,
             profile_id=profile.id,
             display_order=index,
             **referee_payload.model_dump(),
@@ -227,7 +298,7 @@ def save_profile(payload: ApplicantProfilePayload, session: Session = Depends(ge
         session.add(referee)
     session.commit()
     referees = session.exec(
-        select(Referee)
+        select_for_user(Referee, user_id)
         .where(Referee.profile_id == profile.id)
         .order_by(Referee.display_order)
     ).all()
@@ -235,8 +306,13 @@ def save_profile(payload: ApplicantProfilePayload, session: Session = Depends(ge
 
 
 @app.post("/resumes", response_model=Resume)
-def create_resume(payload: ResumeCreate, session: Session = Depends(get_session)):
+def create_resume(
+    payload: ResumeCreate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
     resume = Resume.model_validate(payload)
+    resume.user_id = user_id
     session.add(resume); session.commit(); session.refresh(resume)
     return resume
 
@@ -246,31 +322,40 @@ async def upload_resume(
     file: UploadFile = File(...),
     title: str = Form("Master Resume"),
     session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
 ):
     try:
         source_text = extract_resume_text(file.filename or "resume", await file.read())
     except ValueError as error:
         raise HTTPException(400, str(error))
-    current = session.exec(select(Resume).order_by(Resume.updated_at.desc())).first()
+    current = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if current:
         current.title = title.strip() or "Master Resume"
         current.source_text = source_text
         current.updated_at = datetime.utcnow()
         resume = current
     else:
-        resume = Resume(title=title.strip() or "Master Resume", source_text=source_text)
+        resume = Resume(user_id=user_id, title=title.strip() or "Master Resume", source_text=source_text)
     session.add(resume); session.commit(); session.refresh(resume)
     return resume
 
 
 @app.get("/resumes", response_model=list[Resume])
-def list_resumes(session: Session = Depends(get_session)):
-    return session.exec(select(Resume).order_by(Resume.updated_at.desc())).all()
+def list_resumes(
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    return session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).all()
 
 
 @app.patch("/resumes/{resume_id}", response_model=Resume)
-def update_resume(resume_id: int, payload: ResumeUpdate, session: Session = Depends(get_session)):
-    resume = session.get(Resume, resume_id)
+def update_resume(
+    resume_id: int,
+    payload: ResumeUpdate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    resume = get_for_user(session, Resume, resume_id, user_id)
     if not resume:
         raise HTTPException(404, "Resume not found.")
     values = payload.model_dump(exclude_unset=True)
@@ -282,14 +367,22 @@ def update_resume(resume_id: int, payload: ResumeUpdate, session: Session = Depe
 
 
 @app.post("/applications", response_model=JobApplication)
-def create_application(payload: JobApplicationCreate, session: Session = Depends(get_session)):
+def create_application(
+    payload: JobApplicationCreate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
     application = JobApplication.model_validate(payload)
+    application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
     return application
 
 
 @app.post("/applications/import-url", response_model=JobUrlImportResponse)
-def import_application_url(payload: JobUrlImportRequest):
+def import_application_url(
+    payload: JobUrlImportRequest,
+    _user_id: UUID | None = Depends(get_current_user),
+):
     try:
         return JobUrlImportResponse.model_validate(import_job_url(payload.job_url))
     except ValueError as error:
@@ -302,8 +395,12 @@ def import_application_url(payload: JobUrlImportRequest):
 
 
 @app.post("/applications/parse-ad", response_model=JobAdParseResponse)
-def parse_application_ad(payload: JobAdParseRequest, session: Session = Depends(get_session)):
-    previous_companies = [item.company for item in session.exec(select(JobApplication)).all()]
+def parse_application_ad(
+    payload: JobAdParseRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    previous_companies = [item.company for item in session.exec(select_for_user(JobApplication, user_id)).all()]
     try:
         return JobAdParseResponse.model_validate(parse_job_ad_text(payload.raw_text, previous_companies))
     except ValueError as error:
@@ -311,8 +408,11 @@ def parse_application_ad(payload: JobAdParseRequest, session: Session = Depends(
 
 
 @app.get("/applications", response_model=list[JobApplication])
-def list_applications(session: Session = Depends(get_session)):
-    return session.exec(select(JobApplication).order_by(JobApplication.updated_at.desc())).all()
+def list_applications(
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    return session.exec(select_for_user(JobApplication, user_id).order_by(JobApplication.updated_at.desc())).all()
 
 
 @app.patch("/applications/{application_id}", response_model=JobApplication)
@@ -320,8 +420,9 @@ def update_application(
     application_id: int,
     payload: JobApplicationUpdate,
     session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
 ):
-    application = session.get(JobApplication, application_id)
+    application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     values = payload.model_dump(exclude_unset=True)
@@ -344,8 +445,9 @@ def record_application_submission(
     application_id: int,
     payload: JobApplicationSubmissionUpdate,
     session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
 ):
-    application = session.get(JobApplication, application_id)
+    application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     reference = (payload.submission_reference or "").strip() or None
@@ -364,8 +466,9 @@ def update_application_status(
     application_id: int,
     payload: JobApplicationStatusUpdate,
     session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
 ):
-    application = session.get(JobApplication, application_id)
+    application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     application.status = payload.status
@@ -379,23 +482,31 @@ def update_application_status(
 
 
 @app.get("/applications/{application_id}/documents", response_model=list[GeneratedDocument])
-def list_generated_documents(application_id: int, session: Session = Depends(get_session)):
-    if not session.get(JobApplication, application_id):
+def list_generated_documents(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    if not get_for_user(session, JobApplication, application_id, user_id):
         raise HTTPException(404, "Application not found.")
     return session.exec(
-        select(GeneratedDocument)
+        select_for_user(GeneratedDocument, user_id)
         .where(GeneratedDocument.application_id == application_id)
         .order_by(GeneratedDocument.created_at.desc())
     ).all()
 
 
 @app.get("/applications/{application_id}/quality-check", response_model=QualityCheckResponse)
-def quality_check(application_id: int, session: Session = Depends(get_session)):
-    application = session.get(JobApplication, application_id)
+def quality_check(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     documents = session.exec(
-        select(GeneratedDocument)
+        select_for_user(GeneratedDocument, user_id)
         .where(GeneratedDocument.application_id == application_id)
         .order_by(GeneratedDocument.created_at.desc())
     ).all()
@@ -416,7 +527,7 @@ def quality_check(application_id: int, session: Session = Depends(get_session)):
                 document_type=document_type,
             ))
 
-    profile = session.exec(select(ApplicantProfile).order_by(ApplicantProfile.id)).first()
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     content_to_check = {key: value.content for key, value in latest.items() if key in required}
     cover = content_to_check.get("cover_letter", "")
     role_title = application.position_title.split(" - ", 1)[0].strip()
@@ -596,8 +707,13 @@ def quality_check(application_id: int, session: Session = Depends(get_session)):
 
 
 @app.patch("/documents/{document_id}", response_model=GeneratedDocument)
-def update_generated_document(document_id: int, payload: GeneratedDocumentUpdate, session: Session = Depends(get_session)):
-    document = session.get(GeneratedDocument, document_id)
+def update_generated_document(
+    document_id: int,
+    payload: GeneratedDocumentUpdate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    document = get_for_user(session, GeneratedDocument, document_id, user_id)
     if not document:
         raise HTTPException(404, "Generated document not found.")
     document.content = payload.content
@@ -606,11 +722,16 @@ def update_generated_document(document_id: int, payload: GeneratedDocumentUpdate
 
 
 @app.get("/documents/{document_id}/export")
-def export_generated_document(document_id: int, format: str = Query(pattern="^(docx|pdf)$"), session: Session = Depends(get_session)):
-    document = session.get(GeneratedDocument, document_id)
+def export_generated_document(
+    document_id: int,
+    format: str = Query(pattern="^(docx|pdf)$"),
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    document = get_for_user(session, GeneratedDocument, document_id, user_id)
     if not document:
         raise HTTPException(404, "Generated document not found.")
-    application = session.get(JobApplication, document.application_id)
+    application = get_for_user(session, JobApplication, document.application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     label = {
@@ -629,12 +750,17 @@ def export_generated_document(document_id: int, format: str = Query(pattern="^(d
 
 
 @app.get("/applications/{application_id}/export-pack")
-def export_application_pack(application_id: int, format: str = Query(pattern="^(docx|pdf)$"), session: Session = Depends(get_session)):
-    application = session.get(JobApplication, application_id)
+def export_application_pack(
+    application_id: int,
+    format: str = Query(pattern="^(docx|pdf)$"),
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     documents = session.exec(
-        select(GeneratedDocument)
+        select_for_user(GeneratedDocument, user_id)
         .where(GeneratedDocument.application_id == application_id)
         .order_by(GeneratedDocument.created_at.desc())
     ).all()
@@ -665,12 +791,17 @@ def export_application_pack(application_id: int, format: str = Query(pattern="^(
 
 
 @app.post("/generate", response_model=GeneratedDocument)
-def generate(payload: GenerateRequest, session: Session = Depends(get_session)):
-    application = session.get(JobApplication, payload.application_id)
-    master_resume = session.exec(select(Resume).order_by(Resume.updated_at.desc())).first()
+def generate(
+    payload: GenerateRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, payload.application_id, user_id)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
-    profile = session.exec(select(ApplicantProfile).order_by(ApplicantProfile.id)).first()
+    new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     profile_text = None
     if profile:
         profile_text = "\n".join(filter(None, [
@@ -699,14 +830,25 @@ def generate(payload: GenerateRequest, session: Session = Depends(get_session)):
         raise HTTPException(400, str(error))
     except AIServiceError as error:
         raise HTTPException(502, str(error))
-    document = GeneratedDocument(application_id=application.id, document_type=payload.document_type, content=content)
-    session.add(document); session.commit(); session.refresh(document)
+    document = GeneratedDocument(user_id=user_id, application_id=application.id, document_type=payload.document_type, content=content)
+    session.add(document)
+    if new_pack_usage and user_id is not None and payload.pack_id is not None:
+        session.add(GenerationUsage(
+            user_id=user_id,
+            application_id=application.id,
+            pack_id=payload.pack_id,
+        ))
+    session.commit(); session.refresh(document)
     return document
 
 
 @app.post("/applications/{application_id}/prepare-submission")
-def prepare_submission(application_id: int, session: Session = Depends(get_session)):
-    application = session.get(JobApplication, application_id)
+def prepare_submission(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
     if not application or not application.job_url:
         raise HTTPException(400, "A job URL is required before preparing a submission.")
     # V1 deliberately returns an explicit user-confirmed task. Platform-specific Playwright adapters come in phase 5.

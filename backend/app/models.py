@@ -191,6 +191,7 @@ class JobApplicationStatusUpdate(SQLModel):
 class GenerateRequest(SQLModel):
     application_id: int
     document_type: str  # tailored_resume | cover_letter | selection_criteria | ats_analysis
+    pack_id: UUID | None = None
 
 
 class GeneratedDocumentUpdate(SQLModel):
