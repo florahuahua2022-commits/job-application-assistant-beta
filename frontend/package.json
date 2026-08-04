@@ -1,0 +1,7 @@
+{
+  "name": "job-application-assistant-web",
+  "private": true,
+  "scripts": {"dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint"},
+  "dependencies": {"next": "16.2.12", "react": "19.2.8", "react-dom": "19.2.8"},
+  "devDependencies": {"typescript": "^5", "@types/node": "^22", "@types/react": "^19"}
+}

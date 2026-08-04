@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+node_modules/
+.pnpm-store/
+.next/
+backend/data/
+data/
+uploads/
+.env.local
+.env.*.local
+*.sqlite
+*.sqlite3
+docs/END_TO_END_VALIDATION_*.md

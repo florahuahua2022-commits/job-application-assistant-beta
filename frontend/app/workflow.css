@@ -1,0 +1,39 @@
+.uploadBox {
+  display: grid;
+  grid-template-columns: 1fr minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 14px;
+}
+.uploadBox input[type="file"] { margin: 0; }
+.uploadBox p { margin: .35rem 0 0; }
+.orDivider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: .8rem; margin: 18px 0 4px; }
+.orDivider::before, .orDivider::after { content: ""; height: 1px; background: var(--line); flex: 1; }
+.resumeTextForm { margin-top: 0; }
+.linkImportRow { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.linkImportRow input { margin-top: 6px; }
+.linkImportRow button { height: 46px; white-space: nowrap; }
+.saveStatus { text-align: right; font-size: .8rem; font-weight: 700; margin-top: 7px; color: var(--muted); }
+.saveStatus[data-state="dirty"] { color: #a15c00; }
+.saveStatus[data-state="saving"] { color: #366a9f; }
+.saveStatus[data-state="error"] { color: #b42318; }
+.saveStatus[data-state="saved"] { color: var(--accent); }
+.saveEdits.dirty, .saveEdits.error { background: #a15c00; }
+.saveEdits.saved { background: #dcefe8; color: var(--accent-dark); opacity: 1; }
+.fullAdBox { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf8; }
+.fullAdBox label { margin-top: 0; }
+.fullAdBox > button { margin-right: 10px; }
+.adWarnings { margin-top: 14px; padding: 12px 14px; border-left: 4px solid #b66a00; background: #fff4df; color: #713f00; }
+.adWarnings ul { margin: 8px 0 0; padding-left: 20px; }
+.confirmCard { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 16px 0; padding: 14px 16px; border: 1px solid #e1b86a; border-radius: 10px; background: #fff8e8; }
+.confirmCard.confirmed { border-color: #80bdab; background: #eaf6f1; }
+.confirmCard p { margin: .45rem 0 0; color: var(--muted); font-size: .87rem; line-height: 1.55; }
+.jobEditPanel { margin: 0 0 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf8; }
+.jobEditPanel > summary { font-weight: 700; color: var(--accent-dark); }
+.jobEditPanel > form { margin-top: 10px; }
+.selectedActions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 760px) {
+  .uploadBox, .linkImportRow { grid-template-columns: 1fr; }
+  .confirmCard { align-items: stretch; flex-direction: column; }
+  .selectedActions { width: 100%; }
+  .selectedActions button { flex: 1; }
+}

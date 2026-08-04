@@ -1,0 +1,589 @@
+"use client";
+
+import { FormEvent, useEffect, useMemo, useState } from "react";
+
+const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+type Resume = { id: number; title: string; source_text: string };
+type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; status: string; submission_reference?: string; submitted_at?: string };
+type GeneratedDocument = { id: number; document_type: string; content: string; created_at: string };
+type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
+type QualityResult = { ready: boolean; issues: QualityIssue[]; checked_documents: string[] };
+type Backup = { filename: string; size: number; created_at: string };
+type Referee = { organisation: string; name: string; position_title: string; phone: string; relationship: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string };
+type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; referees: Referee[]; updated_at: string };
+type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string };
+
+const packTypes = ["tailored_resume", "cover_letter", "selection_criteria"] as const;
+const labels: Record<string, string> = {
+  tailored_resume: "Tailored Resume",
+  cover_letter: "Cover Letter",
+  selection_criteria: "Selection Criteria",
+};
+const applicationStatuses = ["draft", "ready_to_apply", "applied"] as const;
+const statusLabels: Record<string, string> = { draft: "Draft", ready_to_apply: "Ready", applied: "Applied" };
+
+export default function Home() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [resumes, setResumes] = useState<Resume[]>([]);
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [notice, setNotice] = useState("Connecting to your local workspace…");
+  const [busy, setBusy] = useState(false);
+  const [selectedApplication, setSelectedApplication] = useState<number | null>(null);
+  const [documents, setDocuments] = useState<GeneratedDocument[]>([]);
+  const [activeType, setActiveType] = useState<string>("tailored_resume");
+  const [draftText, setDraftText] = useState("");
+  const [qualityResult, setQualityResult] = useState<QualityResult | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [backups, setBackups] = useState<Backup[]>([]);
+  const [resumeUploadState, setResumeUploadState] = useState("idle");
+  const [jobImportState, setJobImportState] = useState("idle");
+  const [jobFields, setJobFields] = useState<JobFields>({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "" });
+  const [draftSaveState, setDraftSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
+  const [rawJobAd, setRawJobAd] = useState("");
+  const [adParseState, setAdParseState] = useState("idle");
+  const [adWarnings, setAdWarnings] = useState<string[]>([]);
+  const [confirmedApplication, setConfirmedApplication] = useState<number | null>(null);
+
+  async function refresh() {
+    const [profileResponse, resumeResponse, applicationResponse, backupResponse] = await Promise.all([
+      fetch(`${api}/profile`),
+      fetch(`${api}/resumes`),
+      fetch(`${api}/applications`),
+      fetch(`${api}/backups`),
+    ]);
+    if (profileResponse.ok) setProfile(await profileResponse.json());
+    if (resumeResponse.ok) setResumes(await resumeResponse.json());
+    if (applicationResponse.ok) setApplications(await applicationResponse.json());
+    if (backupResponse.ok) setBackups(await backupResponse.json());
+  }
+
+  useEffect(() => {
+    fetch(`${api}/health`)
+      .then((response) => response.json())
+      .then((health) => setNotice(health.ai_configured
+        ? "Ready. Add a job and generate your application pack."
+        : "Add an API key locally before generating application materials."))
+      .catch(() => setNotice("The local service is not running. Start the app and refresh this page."));
+    refresh();
+  }, []);
+
+  const latestDocuments = useMemo(() => {
+    const result: Record<string, GeneratedDocument> = {};
+    for (const document of documents) {
+      if (!result[document.document_type]) result[document.document_type] = document;
+    }
+    return result;
+  }, [documents]);
+
+  const activeDocument = latestDocuments[activeType];
+  useEffect(() => {
+    setDraftText(activeDocument?.content || "");
+    setDraftSaveState("saved");
+  }, [activeDocument]);
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const value = (name: string) => String(form.get(name) || "").trim();
+    const referee = (number: number): Referee | null => {
+      const name = value(`referee_${number}_name`);
+      if (!name) return null;
+      return {
+        organisation: value(`referee_${number}_organisation`),
+        name,
+        position_title: value(`referee_${number}_position_title`),
+        phone: value(`referee_${number}_phone`),
+        relationship: value(`referee_${number}_relationship`),
+        email: value(`referee_${number}_email`),
+        postal_address: value(`referee_${number}_postal_address`),
+        suburb: value(`referee_${number}_suburb`),
+        state: value(`referee_${number}_state`) || "WA",
+        postcode: value(`referee_${number}_postcode`),
+        country: value(`referee_${number}_country`) || "Australia",
+      };
+    };
+    const payload = {
+      title: value("profile_title"), first_name: value("first_name"), last_name: value("last_name"), preferred_name: value("preferred_name"),
+      phone: value("phone"), email: value("email"), postal_address: value("postal_address"), suburb: value("suburb"), state: value("state") || "WA",
+      postcode: value("postcode"), country: value("country") || "Australia", work_rights: value("work_rights"), availability_notice: value("availability_notice") || "not_specified",
+      referees: [referee(1), referee(2)].filter((item): item is Referee => item !== null),
+    };
+    const response = await fetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not save the applicant profile.");
+    setProfile(result);
+    setNotice("Applicant profile saved locally. It can be reused for future applications.");
+  }
+
+  async function saveResume(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = { title: String(form.get("title")), source_text: String(form.get("source_text")) };
+    const current = resumes[0];
+    const response = await fetch(current ? `${api}/resumes/${current.id}` : `${api}/resumes`, {
+      method: current ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    setNotice(response.ok ? "Master Resume saved. You only need to update it when your experience changes." : "Could not save the Master Resume.");
+    if (response.ok) refresh();
+  }
+
+  async function uploadResume(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setResumeUploadState("uploading");
+    const response = await fetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
+    const result = await response.json();
+    if (!response.ok) {
+      setResumeUploadState("error");
+      return setNotice(result.detail || "Could not read this resume file.");
+    }
+    setResumeUploadState("saved");
+    await refresh();
+    setNotice("Master Resume uploaded and saved. The text is ready for AI tailoring.");
+  }
+
+  async function importJobLink() {
+    if (!jobFields.job_url.trim()) return setNotice("Paste the job link first.");
+    setJobImportState("importing");
+    try {
+      const response = await fetch(`${api}/applications/import-url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_url: jobFields.job_url.trim() }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        setJobImportState("error");
+        return setNotice(result.detail || "This job website could not be read automatically. You can still enter the details below.");
+      }
+      setJobFields((current) => ({
+        ...current,
+        company: result.company || current.company,
+        position_title: result.position_title || current.position_title,
+        job_description: result.job_description || current.job_description,
+        job_url: result.job_url || current.job_url,
+      }));
+      setJobImportState("done");
+      setNotice(result.source === "structured_job_posting"
+        ? "Job details imported. Please review them, then save the job."
+        : "The page supplied only partial details. Review and complete any blank fields before saving.");
+    } catch {
+      setJobImportState("error");
+      setNotice("The automatic reader could not connect. Your link is still in the form; paste the job details manually below.");
+    }
+  }
+
+  async function parseFullJobAd() {
+    if (!rawJobAd.trim()) return setNotice("Paste the full job advertisement first.");
+    setAdParseState("parsing");
+    try {
+      const response = await fetch(`${api}/applications/parse-ad`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw_text: rawJobAd }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        setAdParseState("error");
+        return setNotice(result.detail || "The job advertisement could not be separated.");
+      }
+      setJobFields((current) => ({
+        ...current,
+        company: result.company || current.company,
+        position_title: result.position_title || current.position_title,
+        job_description: result.job_description,
+        selection_criteria: result.selection_criteria || current.selection_criteria,
+      }));
+      setAdWarnings(result.warnings || []);
+      setAdParseState("done");
+      setNotice(result.warnings?.length
+        ? "Job details extracted, but warnings need your review before saving."
+        : "Job details extracted. Confirm the organisation and position title, then save the job.");
+    } catch {
+      setAdParseState("error");
+      setNotice("The job advertisement could not be processed. Your pasted text has not been removed.");
+    }
+  }
+
+  async function createApplication(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const payload = jobFields;
+    const response = await fetch(`${api}/applications`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) return setNotice("Could not save this job. Check the required fields and try again.");
+    const application = await response.json();
+    formElement.reset();
+    setJobFields({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "" });
+    setJobImportState("idle");
+    setRawJobAd("");
+    setAdWarnings([]);
+    setAdParseState("idle");
+    await refresh();
+    await openApplication(application.id);
+    setNotice("Job saved. Click Generate Application Pack when you are ready.");
+  }
+
+  async function updateSavedJob(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedApplication) return;
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      company: String(form.get("company") || "").trim(),
+      position_title: String(form.get("position_title") || "").trim(),
+      job_url: String(form.get("job_url") || "").trim(),
+      job_description: String(form.get("job_description") || "").trim(),
+      selection_criteria: String(form.get("selection_criteria") || "").trim(),
+      submission_reference: String(form.get("submission_reference") || "").trim(),
+    };
+    const response = await fetch(`${api}/applications/${selectedApplication}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not update the saved job details.");
+    setApplications((current) => current.map((application) => application.id === result.id ? result : application));
+    setConfirmedApplication(null);
+    setQualityResult(null);
+    setNotice("Saved job details updated. Confirm them again before generating or applying.");
+  }
+
+  async function openApplication(id: number) {
+    setSelectedApplication(id);
+    setConfirmedApplication(null);
+    setQualityResult(null);
+    const response = await fetch(`${api}/applications/${id}/documents`);
+    const loaded = response.ok ? await response.json() : [];
+    setDocuments(loaded);
+    const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
+    setActiveType(firstAvailable || "tailored_resume");
+  }
+
+  async function generatePack() {
+    if (!selectedApplication || !resumes.length) return;
+    const application = applications.find((item) => item.id === selectedApplication);
+    const documentTypes = application?.selection_criteria?.trim() ? packTypes : packTypes.slice(0, 2);
+    setBusy(true);
+    const created: GeneratedDocument[] = [];
+    try {
+      for (let index = 0; index < documentTypes.length; index += 1) {
+        const documentType = documentTypes[index];
+        setNotice(`Creating application pack: ${index + 1} of ${documentTypes.length} — ${labels[documentType]}…`);
+        const response = await fetch(`${api}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ application_id: selectedApplication, document_type: documentType }),
+          signal: AbortSignal.timeout(100_000),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || `${labels[documentType]} could not be generated.`);
+        created.push(result);
+      }
+      setDocuments((current) => [...created.reverse(), ...current]);
+      setActiveType("tailored_resume");
+      const checkResponse = await fetch(`${api}/applications/${selectedApplication}/quality-check`);
+      if (checkResponse.ok) {
+        const check = await checkResponse.json() as QualityResult;
+        setQualityResult(check);
+        setNotice(check.ready
+          ? "Application pack created and automatically checked. Confirm your personal facts, then continue."
+          : "Application pack created. The automatic check found items that still need attention.");
+      } else {
+        setNotice("Application pack created. Run Final Check before continuing.");
+      }
+    } catch (error) {
+      if (created.length) setDocuments((current) => [...created.reverse(), ...current]);
+      setNotice(error instanceof Error ? error.message : "The application pack could not be completed. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveDraft() {
+    if (!activeDocument) return;
+    setDraftSaveState("saving");
+    const response = await fetch(`${api}/documents/${activeDocument.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: draftText }),
+    });
+    if (!response.ok) {
+      setDraftSaveState("error");
+      return setNotice("Could not save your edits.");
+    }
+    const updated = await response.json();
+    setDocuments((current) => current.map((document) => document.id === updated.id ? updated : document));
+    setQualityResult(null);
+    setDraftSaveState("saved");
+    setNotice(`${labels[activeType]} edits saved.`);
+  }
+
+  async function runFinalCheck() {
+    if (!selectedApplication) return null;
+    const response = await fetch(`${api}/applications/${selectedApplication}/quality-check`);
+    const result = await response.json();
+    if (!response.ok) {
+      setNotice(result.detail || "Could not run the final check.");
+      return null;
+    }
+    setQualityResult(result);
+    setNotice(result.ready ? "Final check passed. Review any warnings, then continue to the application page." : "Final check found errors. Fix them before applying.");
+    return result as QualityResult;
+  }
+
+  async function reviewAndApply() {
+    if (!selectedApplication) return;
+    const application = applications.find((item) => item.id === selectedApplication);
+    if (!application?.job_url?.trim()) {
+      const message = "Add the application link under Edit saved job details before opening the employer page.";
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
+    if (!qualityResult) {
+      const message = "Run Final Check first and review its result before opening the employer page.";
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
+    if (!qualityResult.ready) {
+      const message = "Final Check still has errors. Fix them, save the changes, and run Final Check again.";
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
+    const response = await fetch(`${api}/applications/${selectedApplication}/prepare-submission`, { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Add the job application link before continuing.");
+    const statusResponse = await fetch(`${api}/applications/${selectedApplication}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "ready_to_apply" }),
+    });
+    if (statusResponse.ok) {
+      const updated = await statusResponse.json();
+      setApplications((current) => current.map((item) => item.id === updated.id ? updated : item));
+    }
+    setNotice("Application moved to Ready. Complete it in any browser, then return and click Mark as Applied.");
+    window.open(result.job_url, "_blank", "noopener,noreferrer");
+  }
+
+  async function copyApplicationLink() {
+    const application = applications.find((item) => item.id === selectedApplication);
+    if (!application?.job_url?.trim()) {
+      const message = "Add the application link under Edit saved job details first.";
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
+    await navigator.clipboard.writeText(application.job_url);
+    setNotice("Application link copied. Open it in Chrome or any browser you prefer.");
+  }
+
+  async function markApplied() {
+    if (!selectedApplication) return;
+    const application = applications.find((item) => item.id === selectedApplication);
+    const response = await fetch(`${api}/applications/${selectedApplication}/submission`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ submission_reference: application?.submission_reference || null }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not record the submitted application.");
+    setApplications((current) => current.map((application) => application.id === result.id ? result : application));
+    setNotice(result.submission_reference
+      ? `Application marked as Applied. Confirmation: ${result.submission_reference}`
+      : "Application marked as Applied and the submission date was recorded.");
+  }
+
+  async function updateApplicationStatus(application: Application, status: string) {
+    const response = await fetch(`${api}/applications/${application.id}/status`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not update the application status.");
+    setApplications((current) => current.map((item) => item.id === result.id ? result : item));
+    setNotice(`${result.position_title} moved to ${statusLabels[result.status]}.`);
+  }
+
+  async function createLocalBackup() {
+    const response = await fetch(`${api}/backups`, { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not create the backup.");
+    setBackups((current) => [result, ...current]);
+    setNotice("Local backup created. API keys and passwords were not included.");
+  }
+
+  async function restoreLocalBackup(backup: Backup) {
+    const confirmed = window.confirm(`Restore ${backup.filename}? This replaces the current profile, resumes, jobs and generated documents. A safety backup will be created first.`);
+    if (!confirmed) return;
+    const response = await fetch(`${api}/backups/${encodeURIComponent(backup.filename)}/restore`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not restore the backup.");
+    setSelectedApplication(null);
+    setDocuments([]);
+    await refresh();
+    setNotice(`Backup restored: ${backup.filename}`);
+  }
+
+  function downloadDocument(format: "docx" | "pdf") {
+    if (!activeDocument) return;
+    window.open(`${api}/documents/${activeDocument.id}/export?format=${format}`, "_blank", "noopener,noreferrer");
+  }
+
+  function downloadPack(format: "docx" | "pdf") {
+    if (!selectedApplication) return;
+    window.open(`${api}/applications/${selectedApplication}/export-pack?format=${format}`, "_blank", "noopener,noreferrer");
+  }
+
+  const selected = applications.find((application) => application.id === selectedApplication);
+  const requiredPackTypes = selected?.selection_criteria?.trim() ? packTypes : packTypes.slice(0, 2);
+  const packReady = requiredPackTypes.every((type) => latestDocuments[type]);
+  const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, applications.filter((application) => application.status === status).length])), [applications]);
+  const filteredApplications = statusFilter === "all" ? applications : applications.filter((application) => application.status === statusFilter);
+
+  return <main>
+    <header>
+      <p className="eyebrow">JOB APPLICATION ASSISTANT</p>
+      <h1>From job description to application pack.</h1>
+      <p>Keep one truthful Master Resume, add a job, and let AI prepare the materials for your review.</p>
+    </header>
+    <p className="notice">{notice}</p>
+
+    <section className="steps">
+      <details className="panel" open={!profile}>
+        <summary><span>0</span><div><strong>Applicant Profile</strong><small>{profile ? "Saved locally — reuse for future applications" : "Add contact, work rights and referees once"}</small></div></summary>
+        <form key={profile?.updated_at || "new-profile"} onSubmit={saveProfile} className="formBody compactForm">
+          <label>Title<input name="profile_title" defaultValue={profile?.title || "Ms"} /></label>
+          <label>First name<input name="first_name" defaultValue={profile?.first_name || ""} required /></label>
+          <label>Last name<input name="last_name" defaultValue={profile?.last_name || ""} required /></label>
+          <label>Preferred name<input name="preferred_name" defaultValue={profile?.preferred_name || ""} /></label>
+          <label>Phone<input name="phone" defaultValue={profile?.phone || ""} required /></label>
+          <label>Email<input name="email" type="email" defaultValue={profile?.email || ""} required /></label>
+          <label className="full">Postal address<input name="postal_address" defaultValue={profile?.postal_address || ""} /></label>
+          <label>Suburb<input name="suburb" defaultValue={profile?.suburb || ""} /></label>
+          <label>State<input name="state" defaultValue={profile?.state || "WA"} /></label>
+          <label>Postcode<input name="postcode" defaultValue={profile?.postcode || ""} /></label>
+          <label>Country<input name="country" defaultValue={profile?.country || "Australia"} /></label>
+          <label>Work rights<select name="work_rights" defaultValue={profile?.work_rights || "permanent_resident"}><option value="citizen">Australian citizen</option><option value="permanent_resident">Permanent resident</option><option value="visa">Visa holder</option></select></label>
+          <label>Availability<select name="availability_notice" defaultValue={profile?.availability_notice || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="two_weeks">Available after two weeks</option><option value="one_month">Available after one month</option><option value="negotiable">Start date negotiable</option></select></label>
+          {[1, 2].map((number) => { const saved = profile?.referees[number - 1]; return <fieldset className="full referee" key={number}><legend>Referee {number}</legend><div className="compactForm">
+            <label>Organisation<input name={`referee_${number}_organisation`} defaultValue={saved?.organisation || ""} /></label>
+            <label>Name<input name={`referee_${number}_name`} defaultValue={saved?.name || ""} /></label>
+            <label>Position<input name={`referee_${number}_position_title`} defaultValue={saved?.position_title || ""} /></label>
+            <label>Phone<input name={`referee_${number}_phone`} defaultValue={saved?.phone || ""} /></label>
+            <label>Relationship<input name={`referee_${number}_relationship`} defaultValue={saved?.relationship || ""} /></label>
+            <label>Email<input name={`referee_${number}_email`} type="email" defaultValue={saved?.email || ""} /></label>
+            <label className="full">Postal address<input name={`referee_${number}_postal_address`} defaultValue={saved?.postal_address || ""} /></label>
+            <label>Suburb<input name={`referee_${number}_suburb`} defaultValue={saved?.suburb || ""} /></label>
+            <label>State<input name={`referee_${number}_state`} defaultValue={saved?.state || "WA"} /></label>
+            <label>Postcode<input name={`referee_${number}_postcode`} defaultValue={saved?.postcode || ""} /></label>
+            <label>Country<input name={`referee_${number}_country`} defaultValue={saved?.country || "Australia"} /></label>
+          </div></fieldset>; })}
+          <button className="full">Save Applicant Profile</button>
+          <p className="helper full">Saved only in your local database. Passwords, verification codes and integrity declarations are never stored.</p>
+        </form>
+      </details>
+
+      <details className="panel">
+        <summary><span>↻</span><div><strong>Backup &amp; Restore</strong><small>Protect your local profile, resumes, jobs and generated documents</small></div></summary>
+        <div className="formBody backupPanel">
+          <div className="backupActions"><button type="button" onClick={createLocalBackup}>Create Backup</button><p className="helper">Backups stay on this computer and never include API keys, passwords or verification codes.</p></div>
+          <div className="backupList">{backups.length ? backups.map((backup) => <div className="backupRow" key={backup.filename}><div><strong>{new Date(backup.created_at).toLocaleString()}</strong><small>{Math.max(1, Math.round(backup.size / 1024))} KB · {backup.filename}</small></div><div><button type="button" className="secondary" onClick={() => window.open(`${api}/backups/${encodeURIComponent(backup.filename)}/download`, "_blank", "noopener,noreferrer")}>Download</button><button type="button" className="secondary" onClick={() => restoreLocalBackup(backup)}>Restore</button></div></div>) : <p className="helper">No backups yet.</p>}</div>
+        </div>
+      </details>
+
+      <details className="panel" open={!resumes.length}>
+        <summary><span>1</span><div><strong>Master Resume</strong><small>{resumes.length ? "Saved — edit only when needed" : "Add your real experience once"}</small></div></summary>
+        <form onSubmit={uploadResume} className="formBody uploadBox">
+          <div><strong>Upload your existing resume</strong><p className="helper">DOCX, PDF or TXT, up to 10 MB. Uploading replaces the current Master Resume.</p></div>
+          <input type="hidden" name="title" value="Master Resume" />
+          <input name="file" type="file" accept=".docx,.pdf,.txt" required />
+          <button disabled={resumeUploadState === "uploading"}>{resumeUploadState === "uploading" ? "Reading file…" : resumeUploadState === "saved" ? "Uploaded ✓" : "Upload Resume"}</button>
+        </form>
+        <div className="orDivider"><span>or paste and edit the text</span></div>
+        <form key={resumes[0]?.id || "new"} onSubmit={saveResume} className="formBody resumeTextForm">
+          <label>Resume title<input name="title" defaultValue={resumes[0]?.title || "Master Resume"} required /></label>
+          <label>Resume text<textarea name="source_text" defaultValue={resumes[0]?.source_text || ""} rows={14} required /></label>
+          <button>Save Master Resume</button>
+        </form>
+      </details>
+
+      <section className="panel">
+        <div className="stepHeading"><span>2</span><div><strong>Add a job</strong><small>Paste the JD and application link</small></div></div>
+        <form onSubmit={createApplication} className="formBody compactForm">
+          <div className="full fullAdBox">
+            <label>Paste full job advertisement<textarea rows={9} value={rawJobAd} onChange={(event) => { setRawJobAd(event.target.value); setAdParseState("idle"); }} placeholder="Copy the complete advertisement from SEEK or another job site and paste it here once." /></label>
+            <button type="button" onClick={parseFullJobAd} disabled={adParseState === "parsing"}>{adParseState === "parsing" ? "Separating details…" : adParseState === "done" ? "Details extracted ✓" : "Extract Job Details"}</button>
+            <p className="helper">This fills the organisation, position title, job description and selection criteria below. Review them before saving.</p>
+            {adWarnings.length > 0 && <div className="adWarnings"><strong>Check before saving</strong><ul>{adWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
+          </div>
+          <label>Organisation<input name="company" value={jobFields.company} onChange={(event) => setJobFields({ ...jobFields, company: event.target.value })} required /></label>
+          <label>Position title<input name="position_title" value={jobFields.position_title} onChange={(event) => setJobFields({ ...jobFields, position_title: event.target.value })} required /></label>
+          <label className="full">Application link<div className="linkImportRow"><input name="job_url" type="url" placeholder="https://example.com/job" value={jobFields.job_url} onChange={(event) => setJobFields({ ...jobFields, job_url: event.target.value })} /><button type="button" onClick={importJobLink} disabled={jobImportState === "importing"}>{jobImportState === "importing" ? "Reading…" : jobImportState === "done" ? "Imported ✓" : "Import Details"}</button></div></label>
+          <label className="full">Job description<textarea name="job_description" rows={8} value={jobFields.job_description} onChange={(event) => setJobFields({ ...jobFields, job_description: event.target.value })} required /></label>
+          <label className="full">Selection criteria <em>optional</em><textarea name="selection_criteria" rows={4} value={jobFields.selection_criteria} onChange={(event) => setJobFields({ ...jobFields, selection_criteria: event.target.value })} /></label>
+          <button className="full">Save Job</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <div className="stepHeading"><span>3</span><div><strong>Application Tracker</strong><small>Review and update every application in one place</small></div></div>
+        <div className="statusFilters">
+          <button type="button" className={statusFilter === "all" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("all")}><strong>{applications.length}</strong><small>All jobs</small></button>
+          {applicationStatuses.map((status) => <button type="button" key={status} className={statusFilter === status ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter(status)}><strong>{statusCounts[status] || 0}</strong><small>{statusLabels[status]}</small></button>)}
+        </div>
+        <div className="trackerList">
+          {filteredApplications.length ? filteredApplications.map((application) => <div className="trackerRow" key={application.id}>
+            <button type="button" className="trackerJob" onClick={() => openApplication(application.id)}><strong>{application.position_title}</strong><small>{application.company}{application.submitted_at ? ` · Applied ${new Date(application.submitted_at).toLocaleDateString()}` : ""}{application.submission_reference ? ` · ${application.submission_reference}` : ""}</small></button>
+            <select aria-label={`Status for ${application.position_title}`} value={application.status} onChange={(event) => updateApplicationStatus(application, event.target.value)}>{applicationStatuses.map((status) => <option value={status} key={status}>{statusLabels[status]}</option>)}</select>
+          </div>) : <p className="helper">No applications in this status.</p>}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="stepHeading"><span>4</span><div><strong>Generate, review and apply</strong><small>Creates CV and Cover Letter, plus Selection Criteria only when required</small></div></div>
+        <div className="applicationLayout">
+          <aside className="jobList">
+            {applications.length ? applications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
+              <strong>{application.position_title}</strong><small>{application.company} · {statusLabels[application.status] || application.status}</small>
+            </button>) : <p className="helper">Save a job to get started.</p>}
+          </aside>
+          <div className="reviewArea">
+            {selected ? <>
+              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || confirmedApplication !== selected.id} onClick={generatePack}>{busy ? "Creating pack…" : "Generate Application Pack"}</button></div></div>
+              <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
+                <div><strong>Confirm before generating</strong><p>Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}</p></div>
+                <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={() => setConfirmedApplication(selected.id)}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
+              </div>
+              <details className="jobEditPanel" key={`edit-${selected.id}`}>
+                <summary>Edit saved job details</summary>
+                <form onSubmit={updateSavedJob} className="compactForm">
+                  <label>Organisation<input name="company" defaultValue={selected.company} required /></label>
+                  <label>Position title<input name="position_title" defaultValue={selected.position_title} required /></label>
+                  <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
+                  <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
+                  <label className="full">Selection criteria <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} /></label>
+                  <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
+                  <button className="full">Save job changes</button>
+                </form>
+              </details>
+              {documents.length ? <>
+                <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
+                {activeDocument && <div className="editor"><textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
+              </> : <div className="emptyState"><strong>Your application pack will appear here.</strong><p>It includes a tailored resume and cover letter, plus selection criteria responses when the job requires them.</p></div>}
+            </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
+          </div>
+        </div>
+      </section>
+    </section>
+    <p className="safety">AI prepares drafts from your Master Resume only. You review the facts and make the final submission. Login and CAPTCHA are never bypassed.</p>
+  </main>;
+}

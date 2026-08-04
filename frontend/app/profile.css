@@ -1,0 +1,193 @@
+select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 11px 12px;
+  border: 1px solid #abb7b1;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+select:focus {
+  outline: 3px solid #cbe8df;
+  border-color: var(--accent);
+}
+
+.checkLabel {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+}
+
+.checkLabel input {
+  width: auto;
+  margin: 0;
+}
+
+.referee {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin: 14px 0 4px;
+  padding: 4px 14px 12px;
+}
+
+.referee legend {
+  font-weight: 800;
+  padding: 0 7px;
+}
+
+.qualityResult {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.qualityResult.pass {
+  background: #e8f3ef;
+  border-color: #9bcabd;
+}
+
+.qualityResult.fail {
+  background: #fff0ee;
+  border-color: #e4aaa2;
+}
+
+.qualityResult ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.qualityResult p {
+  margin: 6px 0 0;
+}
+
+.statusFilters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
+  gap: 8px;
+  margin: 20px 0 14px;
+}
+
+.statusCard {
+  display: grid;
+  gap: 3px;
+  background: #f3f5f3;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.statusCard strong {
+  font-size: 1.25rem;
+}
+
+.statusCard:hover,
+.statusCard.activeStatus {
+  background: var(--soft);
+  color: var(--ink);
+  border-color: #9bcabd;
+}
+
+.trackerList {
+  display: grid;
+  gap: 8px;
+}
+
+.trackerRow {
+  display: grid;
+  grid-template-columns: 1fr 170px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.trackerRow select {
+  margin: 0;
+}
+
+.trackerJob {
+  display: grid;
+  gap: 3px;
+  padding: 2px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.trackerJob:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+@media (max-width: 760px) {
+  .statusFilters {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .trackerRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+.backupPanel,
+.backupList {
+  display: grid;
+  gap: 10px;
+}
+
+.backupActions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.backupActions p {
+  margin: 0;
+}
+
+.backupRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.backupRow > div {
+  display: flex;
+  gap: 8px;
+}
+
+.backupRow > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.backupRow small {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .backupActions,
+  .backupRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .backupRow > div:last-child button {
+    flex: 1;
+  }
+}
