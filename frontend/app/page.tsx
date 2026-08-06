@@ -54,6 +54,7 @@ export default function Home() {
   const [authNotice, setAuthNotice] = useState("");
   const [passwordSetup, setPasswordSetup] = useState(false);
   const [authCallback, setAuthCallback] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
   const [profile, setProfile] = useState<Profile | null>(null);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
@@ -144,6 +145,22 @@ export default function Home() {
     setResumes([]);
     setApplications([]);
     setDocuments([]);
+  }
+
+  async function requestPasswordSetup() {
+    if (!supabase) return;
+    const email = loginEmail.trim();
+    if (!email) {
+      setAuthNotice("Enter your invited email address first.");
+      return;
+    }
+    setAuthNotice("Sending a secure password link…");
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    setAuthNotice(error
+      ? error.message
+      : "Check your email for a password setup link. The link may take a few minutes to arrive.");
   }
 
   async function setInitialPassword(event: FormEvent<HTMLFormElement>) {
@@ -595,9 +612,10 @@ export default function Home() {
     </header>
     <section className="panel">
       <form onSubmit={signIn} className="formBody compactForm">
-        <label className="full">Email<input name="email" type="email" autoComplete="email" required /></label>
+        <label className="full">Email<input name="email" type="email" autoComplete="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} required /></label>
         <label className="full">Password<input name="password" type="password" autoComplete="current-password" required /></label>
         <button type="submit">Sign in</button>
+        <button type="button" className="secondary" onClick={requestPasswordSetup}>Set or reset password</button>
         {authNotice && <p className="notice">{authNotice}</p>}
       </form>
     </section>
