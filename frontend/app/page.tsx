@@ -26,10 +26,34 @@ const labels: Record<string, string> = {
 const applicationStatuses = ["draft", "ready_to_apply", "applied"] as const;
 const statusLabels: Record<string, string> = { draft: "Draft", ready_to_apply: "Ready", applied: "Applied" };
 
+function invitationContext() {
+  if (typeof window === "undefined") return { isCallback: false, isPasswordSetup: false, error: "" };
+  const query = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const type = hash.get("type") || query.get("type");
+  const errorCode = hash.get("error_code") || query.get("error_code");
+  const errorDescription = hash.get("error_description") || query.get("error_description");
+  const isCallback = Boolean(query.get("code") || hash.get("access_token") || type || errorCode || errorDescription);
+  const expired = errorCode === "otp_expired" || /expired|invalid/i.test(errorDescription || "");
+  return {
+    isCallback,
+    isPasswordSetup: type === "invite" || type === "recovery",
+    error: expired
+      ? "This invitation link has expired or has already been used. Ask the administrator to send a new invitation."
+      : errorDescription ? `The invitation could not be accepted: ${errorDescription}` : "",
+  };
+}
+
+function clearAuthCallbackUrl() {
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
+
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState("");
+  const [passwordSetup, setPasswordSetup] = useState(false);
+  const [authCallback, setAuthCallback] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
@@ -72,12 +96,20 @@ export default function Home() {
 
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getSession().then(({ data }) => {
+    const context = invitationContext();
+    setAuthCallback(context.isCallback);
+    setPasswordSetup(context.isPasswordSetup);
+    if (context.error) setAuthNotice(context.error);
+    supabase.auth.getSession().then(({ data, error }) => {
       setSession(data.session);
+      if ((error || (context.isCallback && !data.session)) && !context.error) {
+        setAuthNotice("This invitation link is invalid or has expired. Ask the administrator to send a new invitation.");
+      }
       setAuthReady(true);
     });
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
+      if (event === "PASSWORD_RECOVERY") setPasswordSetup(true);
       setAuthReady(true);
     });
     return () => data.subscription.unsubscribe();
@@ -112,6 +144,32 @@ export default function Home() {
     setResumes([]);
     setApplications([]);
     setDocuments([]);
+  }
+
+  async function setInitialPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    const form = new FormData(event.currentTarget);
+    const password = String(form.get("new_password") || "");
+    const confirmation = String(form.get("confirm_password") || "");
+    if (password.length < 8) {
+      setAuthNotice("Use at least 8 characters for your password.");
+      return;
+    }
+    if (password !== confirmation) {
+      setAuthNotice("The passwords do not match.");
+      return;
+    }
+    setAuthNotice("Saving your password…");
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) {
+      setAuthNotice(error.message);
+      return;
+    }
+    clearAuthCallbackUrl();
+    setAuthCallback(false);
+    setPasswordSetup(false);
+    setAuthNotice("");
   }
 
   const latestDocuments = useMemo(() => {
@@ -513,11 +571,27 @@ export default function Home() {
 
   if (!authReady) return <main><section className="panel"><p>Preparing secure sign-in…</p></section></main>;
 
+  if (supabase && session && passwordSetup) return <main>
+    <header>
+      <p className="eyebrow">JOB APPLICATION ASSISTANT · PRIVATE BETA</p>
+      <h1>Set your password.</h1>
+      <p>Create a password to finish activating your invited account.</p>
+    </header>
+    <section className="panel">
+      <form onSubmit={setInitialPassword} className="formBody compactForm">
+        <label className="full">New password<input name="new_password" type="password" autoComplete="new-password" minLength={8} required /></label>
+        <label className="full">Confirm password<input name="confirm_password" type="password" autoComplete="new-password" minLength={8} required /></label>
+        <button type="submit">Save password</button>
+        {authNotice && <p className="notice">{authNotice}</p>}
+      </form>
+    </section>
+  </main>;
+
   if (supabase && !session) return <main>
     <header>
       <p className="eyebrow">JOB APPLICATION ASSISTANT · PRIVATE BETA</p>
       <h1>Sign in to your application workspace.</h1>
-      <p>Access is limited to invited beta testers.</p>
+      <p>{authCallback ? "Your invitation could not be completed." : "Access is limited to invited beta testers."}</p>
     </header>
     <section className="panel">
       <form onSubmit={signIn} className="formBody compactForm">
