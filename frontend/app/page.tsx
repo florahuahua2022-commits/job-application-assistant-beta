@@ -17,6 +17,7 @@ type Backup = { filename: string; size: number; created_at: string };
 type Referee = { organisation: string; name: string; position_title: string; phone: string; relationship: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string };
 type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; referees: Referee[]; updated_at: string };
 type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string };
+type ContactGuess = { full_name: string; phone: string; email: string };
 
 const packTypes = ["tailored_resume", "cover_letter", "selection_criteria"] as const;
 const labels: Record<string, string> = {
@@ -53,6 +54,7 @@ export default function Home() {
   const [confirmedApplication, setConfirmedApplication] = useState<number | null>(null);
   const [experiences, setExperiences] = useState<Experience[]>([]);
   const [resultPromptsShown, setResultPromptsShown] = useState<string[]>([]);
+  const [contactGuess, setContactGuess] = useState<ContactGuess>({ full_name: "", phone: "", email: "" });
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -140,34 +142,43 @@ export default function Home() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const value = (name: string) => String(form.get(name) || "").trim();
-    const referee = (number: number): Referee | null => {
-      const name = value(`referee_${number}_name`);
-      if (!name) return null;
-      return {
-        organisation: value(`referee_${number}_organisation`),
-        name,
-        position_title: value(`referee_${number}_position_title`),
-        phone: value(`referee_${number}_phone`),
-        relationship: value(`referee_${number}_relationship`),
-        email: value(`referee_${number}_email`),
-        postal_address: value(`referee_${number}_postal_address`),
-        suburb: value(`referee_${number}_suburb`),
-        state: value(`referee_${number}_state`) || "WA",
-        postcode: value(`referee_${number}_postcode`),
-        country: value(`referee_${number}_country`) || "Australia",
-      };
-    };
+    const nameParts = value("full_name").split(/\s+/).filter(Boolean);
     const payload = {
-      title: value("profile_title"), first_name: value("first_name"), last_name: value("last_name"), preferred_name: value("preferred_name"),
-      phone: value("phone"), email: value("email"), postal_address: value("postal_address"), suburb: value("suburb"), state: value("state") || "WA",
-      postcode: value("postcode"), country: value("country") || "Australia", work_rights: value("work_rights"), availability_notice: value("availability_notice") || "not_specified",
-      referees: [referee(1), referee(2)].filter((item): item is Referee => item !== null),
+      title: profile?.title || "", first_name: nameParts[0] || "", last_name: nameParts.slice(1).join(" ") || nameParts[0] || "", preferred_name: profile?.preferred_name || "",
+      phone: value("phone"), email: value("email"), postal_address: profile?.postal_address || "", suburb: profile?.suburb || "", state: profile?.state || "WA",
+      postcode: profile?.postcode || "", country: profile?.country || "Australia", work_rights: value("work_rights") || profile?.work_rights || "not_specified", availability_notice: value("availability_notice") || "not_specified",
+      referees: [],
     };
     const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const result = await response.json();
     if (!response.ok) return setNotice(result.detail || "Could not save the applicant profile.");
     setProfile(result);
-    setNotice("Applicant profile saved locally. It can be reused for future applications.");
+    setNotice("Contact details confirmed. You will not need to enter them again.");
+  }
+
+  function detectContact(sourceText: string): ContactGuess {
+    const lines = sourceText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const email = sourceText.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] || "";
+    const phone = sourceText.match(/(?<!\d)(?:\+?61[\s().-]*4|04)(?:[\s().-]*\d){8}(?!\d)/)?.[0]?.replace(/\s+/g, " ") || "";
+    const full_name = lines.slice(0, 12).find((line) => {
+      const words = line.split(/\s+/);
+      return words.length >= 2 && words.length <= 5 && !/[\d@|]/.test(line) && !/resume|curriculum|vitae|profile|summary/i.test(line);
+    }) || "";
+    return { full_name, phone, email };
+  }
+
+  async function saveDetectedContact(guess: ContactGuess) {
+    if (!guess.full_name || !guess.phone || !guess.email) return false;
+    const nameParts = guess.full_name.split(/\s+/).filter(Boolean);
+    const payload = {
+      title: "", first_name: nameParts[0], last_name: nameParts.slice(1).join(" ") || nameParts[0], preferred_name: "",
+      phone: guess.phone, email: guess.email, postal_address: "", suburb: "", state: "WA", postcode: "", country: "Australia",
+      work_rights: "not_specified", availability_notice: "not_specified", referees: [],
+    };
+    const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) return false;
+    setProfile(await response.json());
+    return true;
   }
 
   async function saveResume(event: FormEvent<HTMLFormElement>) {
@@ -208,8 +219,11 @@ export default function Home() {
       return setNotice(result.detail || "Could not read this resume file.");
     }
     setResumeUploadState("saved");
+    const guess = detectContact(result.source_text || "");
+    setContactGuess(guess);
+    const contactSaved = await saveDetectedContact(guess);
     await refresh();
-    setNotice("Master Resume uploaded and saved. The text is ready for AI tailoring.");
+    setNotice(contactSaved ? "CV uploaded. We found and saved your name, phone and email — please check them once." : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.");
   }
 
   async function importJobLink() {
@@ -564,37 +578,28 @@ export default function Home() {
 
     <section className="steps">
       <details className="panel" open={!profile}>
-        <summary><span>0</span><div><strong>Applicant Profile</strong><small>{profile ? "Saved locally — reuse for future applications" : "Add contact, work rights and referees once"}</small></div></summary>
-        <form key={profile?.updated_at || "new-profile"} onSubmit={saveProfile} className="formBody compactForm">
-          <label>Title<input name="profile_title" defaultValue={profile?.title || "Ms"} /></label>
-          <label>First name<input name="first_name" defaultValue={profile?.first_name || ""} required /></label>
-          <label>Last name<input name="last_name" defaultValue={profile?.last_name || ""} required /></label>
-          <label>Preferred name<input name="preferred_name" defaultValue={profile?.preferred_name || ""} /></label>
-          <label>Phone<input name="phone" defaultValue={profile?.phone || ""} required /></label>
-          <label>Email<input name="email" type="email" defaultValue={profile?.email || ""} required /></label>
-          <label className="full">Postal address<input name="postal_address" defaultValue={profile?.postal_address || ""} /></label>
-          <label>Suburb<input name="suburb" defaultValue={profile?.suburb || ""} /></label>
-          <label>State<input name="state" defaultValue={profile?.state || "WA"} /></label>
-          <label>Postcode<input name="postcode" defaultValue={profile?.postcode || ""} /></label>
-          <label>Country<input name="country" defaultValue={profile?.country || "Australia"} /></label>
-          <label>Work rights<select name="work_rights" defaultValue={profile?.work_rights || "permanent_resident"}><option value="citizen">Australian citizen</option><option value="permanent_resident">Permanent resident</option><option value="visa">Visa holder</option></select></label>
-          <label>Availability<select name="availability_notice" defaultValue={profile?.availability_notice || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="two_weeks">Available after two weeks</option><option value="one_month">Available after one month</option><option value="negotiable">Start date negotiable</option></select></label>
-          {[1, 2].map((number) => { const saved = profile?.referees[number - 1]; return <fieldset className="full referee" key={number}><legend>Referee {number}</legend><div className="compactForm">
-            <label>Organisation<input name={`referee_${number}_organisation`} defaultValue={saved?.organisation || ""} /></label>
-            <label>Name<input name={`referee_${number}_name`} defaultValue={saved?.name || ""} /></label>
-            <label>Position<input name={`referee_${number}_position_title`} defaultValue={saved?.position_title || ""} /></label>
-            <label>Phone<input name={`referee_${number}_phone`} defaultValue={saved?.phone || ""} /></label>
-            <label>Relationship<input name={`referee_${number}_relationship`} defaultValue={saved?.relationship || ""} /></label>
-            <label>Email<input name={`referee_${number}_email`} type="email" defaultValue={saved?.email || ""} /></label>
-            <label className="full">Postal address<input name={`referee_${number}_postal_address`} defaultValue={saved?.postal_address || ""} /></label>
-            <label>Suburb<input name={`referee_${number}_suburb`} defaultValue={saved?.suburb || ""} /></label>
-            <label>State<input name={`referee_${number}_state`} defaultValue={saved?.state || "WA"} /></label>
-            <label>Postcode<input name={`referee_${number}_postcode`} defaultValue={saved?.postcode || ""} /></label>
-            <label>Country<input name={`referee_${number}_country`} defaultValue={saved?.country || "Australia"} /></label>
-          </div></fieldset>; })}
-          <button className="full">Save Applicant Profile</button>
-          <p className="helper full">Saved only in your local database. Passwords, verification codes and integrity declarations are never stored.</p>
-        </form>
+        <summary><span>0</span><div><strong>Contact check</strong><small>{profile ? "Detected and saved — check once" : "Upload your CV and skip manual entry"}</small></div></summary>
+        {!resumes.length && <form onSubmit={uploadResume} className="formBody quickStartUpload">
+          <div><strong>Start by uploading your existing CV</strong><p className="helper">We will read your name, phone and email from DOCX, PDF or TXT.</p></div>
+          <input type="hidden" name="title" value="Master Resume" />
+          <input name="file" type="file" accept=".docx,.pdf,.txt" required />
+          <button disabled={resumeUploadState === "uploading"}>{resumeUploadState === "uploading" ? "Reading…" : "Upload & auto-fill"}</button>
+        </form>}
+        <div className="formBody">
+          {profile && <div className="contactConfirm"><div><small>Name</small><strong>{[profile.first_name, profile.last_name].filter(Boolean).join(" ")}</strong></div><div><small>Phone</small><strong>{profile.phone}</strong></div><div><small>Email</small><strong>{profile.email}</strong></div></div>}
+          <details className="quickProfileEdit" open={!profile}>
+            <summary>{profile ? "Something is wrong? Edit it" : "Check missing details"}</summary>
+            <form key={`${profile?.updated_at || "new"}-${contactGuess.email}`} onSubmit={saveProfile} className="compactForm">
+              <label className="full">Full name<input name="full_name" defaultValue={profile ? [profile.first_name, profile.last_name].filter(Boolean).join(" ") : contactGuess.full_name} required /></label>
+              <label>Phone<input name="phone" defaultValue={profile?.phone || contactGuess.phone} required /></label>
+              <label>Email<input name="email" type="email" defaultValue={profile?.email || contactGuess.email} required /></label>
+              <label>Work rights <em>optional</em><select name="work_rights" defaultValue={profile?.work_rights || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="citizen">Australian citizen</option><option value="permanent_resident">Permanent resident</option><option value="visa">Visa holder</option></select></label>
+              <label>Availability <em>optional</em><select name="availability_notice" defaultValue={profile?.availability_notice || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="two_weeks">Available after two weeks</option><option value="one_month">Available after one month</option><option value="negotiable">Start date negotiable</option></select></label>
+              <button className="full">Confirm details</button>
+            </form>
+          </details>
+          <p className="helper">References are not collected. Add them only if an employer asks later.</p>
+        </div>
       </details>
 
       <details className="panel">
@@ -607,12 +612,12 @@ export default function Home() {
 
       <details className="panel" open={!resumes.length}>
         <summary><span>1</span><div><strong>Master Resume</strong><small>{resumes.length ? "Saved — edit only when needed" : "Add your real experience once"}</small></div></summary>
-        <form onSubmit={uploadResume} className="formBody uploadBox">
+        {resumes.length > 0 && <form onSubmit={uploadResume} className="formBody uploadBox">
           <div><strong>Upload your existing resume</strong><p className="helper">DOCX, PDF or TXT, up to 10 MB. Uploading replaces the current Master Resume.</p></div>
           <input type="hidden" name="title" value="Master Resume" />
           <input name="file" type="file" accept=".docx,.pdf,.txt" required />
           <button disabled={resumeUploadState === "uploading"}>{resumeUploadState === "uploading" ? "Reading file…" : resumeUploadState === "saved" ? "Uploaded ✓" : "Upload Resume"}</button>
-        </form>
+        </form>}
         <div className="orDivider"><span>or paste and edit the text</span></div>
         <form key={resumes[0]?.id || "new"} onSubmit={saveResume} className="formBody resumeTextForm">
           <label>Resume title<input name="title" defaultValue={resumes[0]?.title || "Master Resume"} required /></label>

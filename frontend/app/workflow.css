@@ -40,8 +40,16 @@
 .resultMissing { display: flex !important; flex-direction: row !important; align-items: center; gap: 8px; }
 .resultMissing input { width: auto; margin: 0; }
 .dangerLink { justify-self: start; background: transparent !important; color: #a33b32 !important; border: 0 !important; padding-left: 0 !important; }
+.quickStartUpload { display: grid; grid-template-columns: 1fr minmax(220px, 1fr) auto; align-items: end; gap: 14px; }
+.contactConfirm { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.contactConfirm > div { display: grid; gap: 4px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf8; }
+.contactConfirm small { color: var(--muted); }
+.contactConfirm strong { overflow-wrap: anywhere; }
+.quickProfileEdit { margin-top: 14px; }
+.quickProfileEdit > summary { color: var(--accent-dark); font-weight: 700; cursor: pointer; }
+.quickProfileEdit form { margin-top: 12px; }
 @media (max-width: 760px) {
-  .uploadBox, .linkImportRow { grid-template-columns: 1fr; }
+  .uploadBox, .quickStartUpload, .linkImportRow, .contactConfirm { grid-template-columns: 1fr; }
   .confirmCard { align-items: stretch; flex-direction: column; }
   .selectedActions { width: 100%; }
   .selectedActions button { flex: 1; }
