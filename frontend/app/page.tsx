@@ -48,6 +48,34 @@ function clearAuthCallbackUrl() {
   window.history.replaceState({}, document.title, window.location.pathname);
 }
 
+const pricingPlans = [
+  { name: "Single Pack", credits: 1, price: "A$16.95", perCredit: "A$16.95 per credit" },
+  { name: "Starter Pack", credits: 8, price: "A$109.95", perCredit: "About A$13.74 per credit" },
+  { name: "Job Search Pack", credits: 18, price: "A$199", perCredit: "About A$11.06 per credit", featured: true },
+];
+
+function PricingPreview() {
+  return <section className="panel pricingSection">
+    <div className="pricingHeading">
+      <div><p className="eyebrow">PRICING PREVIEW</p><h2>Pay for application packs, not another subscription.</h2></div>
+      <span className="betaBadge">Free during private beta</span>
+    </div>
+    <p className="helper">At launch, every new account receives 2 free generation credits. A standard CV and cover letter pack uses 1 credit; a pack that includes Selection Criteria uses 2.</p>
+    <div className="pricingGrid">
+      {pricingPlans.map((plan) => <article className={plan.featured ? "priceCard featuredPrice" : "priceCard"} key={plan.name}>
+        {plan.featured && <span className="popularBadge">Most popular</span>}
+        <h3>{plan.name}</h3>
+        <strong className="price">{plan.price}</strong>
+        <p>{plan.credits} generation {plan.credits === 1 ? "credit" : "credits"}</p>
+        <small>{plan.perCredit}</small>
+        <button type="button" disabled>Available after beta</button>
+      </article>)}
+    </div>
+    <div className="referralNote"><strong>Invite a friend, earn 1 credit.</strong><span>The inviter receives 1 credit after the new user verifies their email and completes their first successful generation. Monthly limits apply.</span></div>
+    <p className="pricingFootnote">Prices are in AUD. International customers will be able to pay in their local currency at checkout. Existing beta testing remains free while we collect feedback.</p>
+  </section>;
+}
+
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(!supabase);
@@ -619,6 +647,7 @@ export default function Home() {
         {authNotice && <p className="notice">{authNotice}</p>}
       </form>
     </section>
+    <PricingPreview />
   </main>;
 
   return <main>
@@ -629,6 +658,7 @@ export default function Home() {
       {supabase && <button type="button" className="secondary" onClick={signOut}>Sign out</button>}
     </header>
     <p className="notice">{notice}</p>
+    {supabase && <PricingPreview />}
 
     <section className="steps">
       <details className="panel" open={!profile}>
