@@ -47,6 +47,7 @@ create table if not exists public.resume (
     user_id uuid not null references auth.users(id) on delete cascade,
     title text not null default 'Master Resume',
     source_text text not null,
+    experiences_json text not null default '[]',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     unique (id, user_id)
@@ -75,6 +76,8 @@ create table if not exists public.generateddocument (
     application_id bigint not null,
     document_type text not null check (document_type in ('tailored_resume', 'cover_letter', 'selection_criteria', 'ats_analysis')),
     content text not null,
+    used_experiences_json text not null default '[]',
+    closing_styles_json text not null default '[]',
     created_at timestamptz not null default now(),
     foreign key (application_id, user_id) references public.jobapplication(id, user_id) on delete cascade
 );
@@ -94,6 +97,11 @@ create index if not exists generateddocument_user_id_idx on public.generateddocu
 create index if not exists generateddocument_application_id_idx on public.generateddocument(application_id);
 create index if not exists generationusage_user_generated_idx on public.generationusage(user_id, generated_at);
 create unique index if not exists generationusage_user_pack_idx on public.generationusage(user_id, pack_id);
+
+-- Safe upgrades for beta databases created before structured experience capture.
+alter table public.resume add column if not exists experiences_json text not null default '[]';
+alter table public.generateddocument add column if not exists used_experiences_json text not null default '[]';
+alter table public.generateddocument add column if not exists closing_styles_json text not null default '[]';
 
 alter table public.applicantprofile enable row level security;
 alter table public.referee enable row level security;

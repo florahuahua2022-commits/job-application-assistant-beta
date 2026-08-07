@@ -18,8 +18,21 @@ engine = create_engine(database_url, connect_args=connect_args)
 
 def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(engine)
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            if "resume" in table_names:
+                resume_columns = {column["name"] for column in inspector.get_columns("resume")}
+                if "experiences_json" not in resume_columns:
+                    connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT NOT NULL DEFAULT '[]'"))
+            if "generateddocument" in table_names:
+                document_columns = {column["name"] for column in inspector.get_columns("generateddocument")}
+                if "used_experiences_json" not in document_columns:
+                    connection.execute(text("ALTER TABLE generateddocument ADD COLUMN used_experiences_json TEXT NOT NULL DEFAULT '[]'"))
+                if "closing_styles_json" not in document_columns:
+                    connection.execute(text("ALTER TABLE generateddocument ADD COLUMN closing_styles_json TEXT NOT NULL DEFAULT '[]'"))
     if engine.dialect.name == "sqlite":
-        inspector = inspect(engine)
         existing = {column["name"] for column in inspector.get_columns("jobapplication")}
         with engine.begin() as connection:
             connection.execute(text("UPDATE jobapplication SET status = 'applied' WHERE status IN ('interview', 'rejected', 'offer')"))
@@ -27,6 +40,14 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN submission_reference VARCHAR"))
             if "submitted_at" not in existing:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN submitted_at DATETIME"))
+            resume_columns = {column["name"] for column in inspector.get_columns("resume")}
+            if "experiences_json" not in resume_columns:
+                connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT DEFAULT '[]'"))
+            document_columns = {column["name"] for column in inspector.get_columns("generateddocument")}
+            if "used_experiences_json" not in document_columns:
+                connection.execute(text("ALTER TABLE generateddocument ADD COLUMN used_experiences_json TEXT DEFAULT '[]'"))
+            if "closing_styles_json" not in document_columns:
+                connection.execute(text("ALTER TABLE generateddocument ADD COLUMN closing_styles_json TEXT DEFAULT '[]'"))
             for table_name in ("applicantprofile", "referee", "resume", "jobapplication", "generateddocument"):
                 if table_name in inspector.get_table_names():
                     columns = {column["name"] for column in inspector.get_columns(table_name)}
