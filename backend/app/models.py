@@ -15,6 +15,7 @@ class Resume(SQLModel, table=True):
     user_id: UUID | None = Field(default=None, index=True)
     title: str = "Master Resume"
     source_text: str
+    experiences_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -79,6 +80,8 @@ class GeneratedDocument(SQLModel, table=True):
     application_id: int = Field(foreign_key="jobapplication.id")
     document_type: str
     content: str
+    used_experiences_json: str = "[]"
+    closing_styles_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -93,6 +96,7 @@ class GenerationUsage(SQLModel, table=True):
 class ResumeCreate(SQLModel):
     title: str = "Master Resume"
     source_text: str
+    experiences_json: str = "[]"
 
 
 class RefereePayload(SQLModel):
@@ -134,6 +138,7 @@ class ApplicantProfileResponse(ApplicantProfilePayload):
 class ResumeUpdate(SQLModel):
     title: str | None = None
     source_text: str | None = None
+    experiences_json: str | None = None
 
 
 class JobApplicationCreate(SQLModel):

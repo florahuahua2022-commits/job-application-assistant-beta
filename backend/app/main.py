@@ -1,5 +1,6 @@
 from datetime import datetime
 from io import BytesIO
+import json
 import re
 from uuid import UUID
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -802,6 +803,18 @@ def generate(
         raise HTTPException(400, "Create a Master Resume and job application first.")
     new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    used_experiences = "[]"
+    used_closing_styles = "[]"
+    if payload.document_type == "cover_letter":
+        prior_selection = session.exec(
+            select_for_user(GeneratedDocument, user_id)
+            .where(GeneratedDocument.application_id == application.id)
+            .where(GeneratedDocument.document_type == "selection_criteria")
+            .order_by(GeneratedDocument.created_at.desc())
+        ).first()
+        if prior_selection:
+            used_experiences = prior_selection.used_experiences_json or "[]"
+            used_closing_styles = prior_selection.closing_styles_json or "[]"
     profile_text = None
     if profile:
         profile_text = "\n".join(filter(None, [
@@ -821,6 +834,9 @@ def generate(
             profile_text,
             application.position_title,
             application.company,
+            master_resume.experiences_json or "[]",
+            used_experiences,
+            used_closing_styles,
         )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
@@ -830,7 +846,25 @@ def generate(
         raise HTTPException(400, str(error))
     except AIServiceError as error:
         raise HTTPException(502, str(error))
-    document = GeneratedDocument(user_id=user_id, application_id=application.id, document_type=payload.document_type, content=content)
+    metadata = {"used_experiences": [], "closing_styles": []}
+    if payload.document_type == "selection_criteria":
+        match = re.search(r"<!--\s*GENERATION_META\s+(\{.*?\})\s*-->", content, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(1))
+                metadata["used_experiences"] = parsed.get("used_experiences", [])
+                metadata["closing_styles"] = parsed.get("closing_styles", [])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+            content = content[:match.start()].rstrip()
+    document = GeneratedDocument(
+        user_id=user_id,
+        application_id=application.id,
+        document_type=payload.document_type,
+        content=content,
+        used_experiences_json=json.dumps(metadata["used_experiences"]),
+        closing_styles_json=json.dumps(metadata["closing_styles"]),
+    )
     session.add(document)
     if new_pack_usage and user_id is not None and payload.pack_id is not None:
         session.add(GenerationUsage(
