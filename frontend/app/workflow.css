@@ -37,3 +37,24 @@
   .selectedActions { width: 100%; }
   .selectedActions button { flex: 1; }
 }
+
+.pricingSection { margin: 24px 0; }
+.pricingHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.pricingHeading .eyebrow { margin: 0 0 8px; }
+.pricingHeading h2 { margin: 0; font: 700 clamp(1.55rem, 3vw, 2.2rem)/1.12 Georgia, serif; }
+.betaBadge, .popularBadge { display: inline-flex; border-radius: 999px; background: var(--soft); color: var(--accent-dark); font-size: .76rem; font-weight: 800; padding: 7px 10px; white-space: nowrap; }
+.pricingGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 22px 0 16px; }
+.priceCard { position: relative; display: grid; align-content: start; gap: 8px; border: 1px solid var(--line); border-radius: 12px; padding: 20px; background: #f8faf8; }
+.priceCard.featuredPrice { border: 2px solid var(--accent); background: var(--soft); }
+.priceCard h3, .priceCard p { margin: 0; }
+.priceCard .price { font: 700 2rem/1 Georgia, serif; margin-top: 8px; }
+.priceCard button { margin-top: 14px; }
+.popularBadge { position: absolute; right: 12px; top: 12px; background: var(--accent); color: #fff; }
+.referralNote { display: flex; justify-content: space-between; gap: 20px; padding: 14px 16px; border-radius: 10px; background: #fff8e8; border: 1px solid #e1b86a; }
+.referralNote span { color: var(--muted); font-size: .86rem; max-width: 680px; }
+.pricingFootnote { color: var(--muted); font-size: .78rem; margin: 14px 0 0; }
+@media (max-width: 760px) {
+  .pricingHeading, .referralNote { flex-direction: column; }
+  .pricingGrid { grid-template-columns: 1fr; }
+  .betaBadge { white-space: normal; }
+}
