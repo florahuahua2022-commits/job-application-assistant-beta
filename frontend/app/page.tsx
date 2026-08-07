@@ -7,7 +7,8 @@ const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
-type Resume = { id: number; title: string; source_text: string };
+type Experience = { id: string; role_title: string; organization: string; responsibility: string; context: string; result: string; no_result_data: boolean };
+type Resume = { id: number; title: string; source_text: string; experiences_json?: string };
 type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; status: string; submission_reference?: string; submitted_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; created_at: string };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
@@ -19,70 +20,17 @@ type JobFields = { company: string; position_title: string; job_url: string; job
 
 const packTypes = ["tailored_resume", "cover_letter", "selection_criteria"] as const;
 const labels: Record<string, string> = {
-  tailored_resume: "Tailored Resume",
+  tailored_resume: "Tailored CV",
   cover_letter: "Cover Letter",
   selection_criteria: "Selection Criteria",
 };
 const applicationStatuses = ["draft", "ready_to_apply", "applied"] as const;
 const statusLabels: Record<string, string> = { draft: "Draft", ready_to_apply: "Ready", applied: "Applied" };
 
-function invitationContext() {
-  if (typeof window === "undefined") return { isCallback: false, isPasswordSetup: false, error: "" };
-  const query = new URLSearchParams(window.location.search);
-  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const type = hash.get("type") || query.get("type");
-  const errorCode = hash.get("error_code") || query.get("error_code");
-  const errorDescription = hash.get("error_description") || query.get("error_description");
-  const isCallback = Boolean(query.get("code") || hash.get("access_token") || type || errorCode || errorDescription);
-  const expired = errorCode === "otp_expired" || /expired|invalid/i.test(errorDescription || "");
-  return {
-    isCallback,
-    isPasswordSetup: type === "invite" || type === "recovery",
-    error: expired
-      ? "This invitation link has expired or has already been used. Ask the administrator to send a new invitation."
-      : errorDescription ? `The invitation could not be accepted: ${errorDescription}` : "",
-  };
-}
-
-function clearAuthCallbackUrl() {
-  window.history.replaceState({}, document.title, window.location.pathname);
-}
-
-const pricingPlans = [
-  { name: "Single Pack", credits: 1, price: "A$16.95", perCredit: "A$16.95 per credit" },
-  { name: "Starter Pack", credits: 8, price: "A$109.95", perCredit: "About A$13.74 per credit" },
-  { name: "Job Search Pack", credits: 18, price: "A$199", perCredit: "About A$11.06 per credit", featured: true },
-];
-
-function PricingPreview() {
-  return <section className="panel pricingSection">
-    <div className="pricingHeading">
-      <div><p className="eyebrow">PRICING PREVIEW</p><h2>Pay for application packs, not another subscription.</h2></div>
-      <span className="betaBadge">Free during private beta</span>
-    </div>
-    <p className="helper">At launch, every new account receives 2 free generation credits. A standard CV and cover letter pack uses 1 credit; a pack that includes Selection Criteria uses 2.</p>
-    <div className="pricingGrid">
-      {pricingPlans.map((plan) => <article className={plan.featured ? "priceCard featuredPrice" : "priceCard"} key={plan.name}>
-        {plan.featured && <span className="popularBadge">Most popular</span>}
-        <h3>{plan.name}</h3>
-        <strong className="price">{plan.price}</strong>
-        <p>{plan.credits} generation {plan.credits === 1 ? "credit" : "credits"}</p>
-        <small>{plan.perCredit}</small>
-        <button type="button" disabled>Available after beta</button>
-      </article>)}
-    </div>
-    <div className="referralNote"><strong>Invite a friend, earn 1 credit.</strong><span>The inviter receives 1 credit after the new user verifies their email and completes their first successful generation. Monthly limits apply.</span></div>
-    <p className="pricingFootnote">Prices are in AUD. International customers will be able to pay in their local currency at checkout. Existing beta testing remains free while we collect feedback.</p>
-  </section>;
-}
-
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState("");
-  const [passwordSetup, setPasswordSetup] = useState(false);
-  const [authCallback, setAuthCallback] = useState(false);
-  const [loginEmail, setLoginEmail] = useState("");
   const [profile, setProfile] = useState<Profile | null>(null);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
@@ -103,6 +51,8 @@ export default function Home() {
   const [adParseState, setAdParseState] = useState("idle");
   const [adWarnings, setAdWarnings] = useState<string[]>([]);
   const [confirmedApplication, setConfirmedApplication] = useState<number | null>(null);
+  const [experiences, setExperiences] = useState<Experience[]>([]);
+  const [resultPromptsShown, setResultPromptsShown] = useState<string[]>([]);
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -125,20 +75,12 @@ export default function Home() {
 
   useEffect(() => {
     if (!supabase) return;
-    const context = invitationContext();
-    setAuthCallback(context.isCallback);
-    setPasswordSetup(context.isPasswordSetup);
-    if (context.error) setAuthNotice(context.error);
-    supabase.auth.getSession().then(({ data, error }) => {
+    supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
-      if ((error || (context.isCallback && !data.session)) && !context.error) {
-        setAuthNotice("This invitation link is invalid or has expired. Ask the administrator to send a new invitation.");
-      }
       setAuthReady(true);
     });
-    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
+    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
-      if (event === "PASSWORD_RECOVERY") setPasswordSetup(true);
       setAuthReady(true);
     });
     return () => data.subscription.unsubscribe();
@@ -154,6 +96,11 @@ export default function Home() {
       .catch(() => setNotice("The local service is not running. Start the app and refresh this page."));
     refresh();
   }, [authReady, session?.access_token]);
+
+  useEffect(() => {
+    if (!resumes[0]) return;
+    try { setExperiences(JSON.parse(resumes[0].experiences_json || "[]")); } catch { setExperiences([]); }
+  }, [resumes]);
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -173,48 +120,6 @@ export default function Home() {
     setResumes([]);
     setApplications([]);
     setDocuments([]);
-  }
-
-  async function requestPasswordSetup() {
-    if (!supabase) return;
-    const email = loginEmail.trim();
-    if (!email) {
-      setAuthNotice("Enter your invited email address first.");
-      return;
-    }
-    setAuthNotice("Sending a secure password link…");
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: window.location.origin,
-    });
-    setAuthNotice(error
-      ? error.message
-      : "Check your email for a password setup link. The link may take a few minutes to arrive.");
-  }
-
-  async function setInitialPassword(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!supabase) return;
-    const form = new FormData(event.currentTarget);
-    const password = String(form.get("new_password") || "");
-    const confirmation = String(form.get("confirm_password") || "");
-    if (password.length < 8) {
-      setAuthNotice("Use at least 8 characters for your password.");
-      return;
-    }
-    if (password !== confirmation) {
-      setAuthNotice("The passwords do not match.");
-      return;
-    }
-    setAuthNotice("Saving your password…");
-    const { error } = await supabase.auth.updateUser({ password });
-    if (error) {
-      setAuthNotice(error.message);
-      return;
-    }
-    clearAuthCallbackUrl();
-    setAuthCallback(false);
-    setPasswordSetup(false);
-    setAuthNotice("");
   }
 
   const latestDocuments = useMemo(() => {
@@ -268,7 +173,7 @@ export default function Home() {
   async function saveResume(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const payload = { title: String(form.get("title")), source_text: String(form.get("source_text")) };
+    const payload = { title: String(form.get("title")), source_text: String(form.get("source_text")), experiences_json: JSON.stringify(experiences) };
     const current = resumes[0];
     const response = await authenticatedFetch(current ? `${api}/resumes/${current.id}` : `${api}/resumes`, {
       method: current ? "PATCH" : "POST",
@@ -277,6 +182,20 @@ export default function Home() {
     });
     setNotice(response.ok ? "Master Resume saved. You only need to update it when your experience changes." : "Could not save the Master Resume.");
     if (response.ok) refresh();
+  }
+
+  function addExperience() {
+    setExperiences((current) => [...current, { id: crypto.randomUUID(), role_title: "", organization: "", responsibility: "", context: "", result: "", no_result_data: false }]);
+  }
+
+  function updateExperience(id: string, field: keyof Experience, value: string | boolean) {
+    setExperiences((current) => current.map((item) => item.id === id ? { ...item, [field]: value } : item));
+  }
+
+  function promptForResult(experience: Experience) {
+    if (experience.result.trim() || experience.no_result_data || resultPromptsShown.includes(experience.id)) return;
+    setResultPromptsShown((current) => [...current, experience.id]);
+    setNotice("Does this experience have a measurable result? A rough range is fine. If not, tick ‘No result data available’.");
   }
 
   async function uploadResume(event: FormEvent<HTMLFormElement>) {
@@ -417,7 +336,9 @@ export default function Home() {
   async function generatePack() {
     if (!selectedApplication || !resumes.length) return;
     const application = applications.find((item) => item.id === selectedApplication);
-    const documentTypes = application?.selection_criteria?.trim() ? packTypes : packTypes.slice(0, 2);
+    const documentTypes = application?.selection_criteria?.trim()
+      ? (["tailored_resume", "selection_criteria", "cover_letter"] as const)
+      : packTypes.slice(0, 2);
     const packId = crypto.randomUUID();
     setBusy(true);
     const created: GeneratedDocument[] = [];
@@ -616,49 +537,30 @@ export default function Home() {
 
   if (!authReady) return <main><section className="panel"><p>Preparing secure sign-in…</p></section></main>;
 
-  if (supabase && session && passwordSetup) return <main>
-    <header>
-      <p className="eyebrow">JOB APPLICATION ASSISTANT · PRIVATE BETA</p>
-      <h1>Set your password.</h1>
-      <p>Create a password to finish activating your invited account.</p>
-    </header>
-    <section className="panel">
-      <form onSubmit={setInitialPassword} className="formBody compactForm">
-        <label className="full">New password<input name="new_password" type="password" autoComplete="new-password" minLength={8} required /></label>
-        <label className="full">Confirm password<input name="confirm_password" type="password" autoComplete="new-password" minLength={8} required /></label>
-        <button type="submit">Save password</button>
-        {authNotice && <p className="notice">{authNotice}</p>}
-      </form>
-    </section>
-  </main>;
-
   if (supabase && !session) return <main>
     <header>
       <p className="eyebrow">JOB APPLICATION ASSISTANT · PRIVATE BETA</p>
       <h1>Sign in to your application workspace.</h1>
-      <p>{authCallback ? "Your invitation could not be completed." : "Access is limited to invited beta testers."}</p>
+      <p>Access is limited to invited beta testers.</p>
     </header>
     <section className="panel">
       <form onSubmit={signIn} className="formBody compactForm">
-        <label className="full">Email<input name="email" type="email" autoComplete="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} required /></label>
+        <label className="full">Email<input name="email" type="email" autoComplete="email" required /></label>
         <label className="full">Password<input name="password" type="password" autoComplete="current-password" required /></label>
         <button type="submit">Sign in</button>
-        <button type="button" className="secondary" onClick={requestPasswordSetup}>Set or reset password</button>
         {authNotice && <p className="notice">{authNotice}</p>}
       </form>
     </section>
-    <PricingPreview />
   </main>;
 
   return <main>
     <header>
       <p className="eyebrow">JOB APPLICATION ASSISTANT</p>
-      <h1>From job description to application pack.</h1>
-      <p>Keep one truthful Master Resume, add a job, and let AI prepare the materials for your review.</p>
+      <h1>From job description to a tailored CV and cover letter.</h1>
+      <p>Keep one truthful Master CV, add a job, and prepare the two documents most applications need. Selection Criteria is added only when the employer asks for it.</p>
       {supabase && <button type="button" className="secondary" onClick={signOut}>Sign out</button>}
     </header>
     <p className="notice">{notice}</p>
-    {supabase && <PricingPreview />}
 
     <section className="steps">
       <details className="panel" open={!profile}>
@@ -715,6 +617,22 @@ export default function Home() {
         <form key={resumes[0]?.id || "new"} onSubmit={saveResume} className="formBody resumeTextForm">
           <label>Resume title<input name="title" defaultValue={resumes[0]?.title || "Master Resume"} required /></label>
           <label>Resume text<textarea name="source_text" defaultValue={resumes[0]?.source_text || ""} rows={14} required /></label>
+          <div className="experienceBuilder">
+            <div className="experienceHeader"><div><strong>Structured work experiences</strong><p className="helper">These facts help Selection Criteria use STAR naturally and prevent invented results.</p></div><button type="button" className="secondary" onClick={addExperience}>Add experience</button></div>
+            {experiences.map((experience, index) => <fieldset className="experienceCard" key={experience.id}><legend>Experience {index + 1}</legend>
+              <div className="compactForm">
+                <label>Role title<input value={experience.role_title} onChange={(event) => updateExperience(experience.id, "role_title", event.target.value)} required /></label>
+                <label>Organisation<input value={experience.organization} onChange={(event) => updateExperience(experience.id, "organization", event.target.value)} required /></label>
+                <label className="full">What did you do? <em>Action</em><textarea rows={3} value={experience.responsibility} onChange={(event) => updateExperience(experience.id, "responsibility", event.target.value)} required /></label>
+                <label className="full">Background or problem <em>Situation · optional</em><textarea rows={2} value={experience.context} onChange={(event) => updateExperience(experience.id, "context", event.target.value)} /></label>
+                <label className="full">Result or outcome <em>exact figure or rough range</em><textarea rows={2} value={experience.result} disabled={experience.no_result_data} onBlur={() => promptForResult(experience)} onChange={(event) => updateExperience(experience.id, "result", event.target.value)} placeholder="e.g. processed about 20–30 cases per week, shortened turnaround time, or improved accuracy" /></label>
+                <label className="resultMissing full"><input type="checkbox" checked={experience.no_result_data} onChange={(event) => updateExperience(experience.id, "no_result_data", event.target.checked)} /> No result data available</label>
+                <p className="metricPrompt full">Does this experience have specific numbers—volume, time saved, accuracy, financial value or satisfaction score? An approximate range is useful too, such as “about 20–30 per week”.</p>
+                <button type="button" className="dangerLink" onClick={() => setExperiences((current) => current.filter((item) => item.id !== experience.id))}>Remove experience</button>
+              </div>
+            </fieldset>)}
+            {!experiences.length && <p className="helper">Add each relevant role as a separate experience. You can still keep the full resume text above.</p>}
+          </div>
           <button>Save Master Resume</button>
         </form>
       </details>
@@ -752,7 +670,7 @@ export default function Home() {
       </section>
 
       <section className="panel">
-        <div className="stepHeading"><span>4</span><div><strong>Generate, review and apply</strong><small>Creates CV and Cover Letter, plus Selection Criteria only when required</small></div></div>
+        <div className="stepHeading"><span>4</span><div><strong>Generate, review and apply</strong><small>Creates your tailored CV and Cover Letter; Selection Criteria is optional</small></div></div>
         <div className="applicationLayout">
           <aside className="jobList">
             {applications.length ? applications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
@@ -781,7 +699,7 @@ export default function Home() {
               {documents.length ? <>
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
                 {activeDocument && <div className="editor"><textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
-              </> : <div className="emptyState"><strong>Your application pack will appear here.</strong><p>It includes a tailored resume and cover letter, plus selection criteria responses when the job requires them.</p></div>}
+              </> : <div className="emptyState"><strong>Your CV and cover letter will appear here.</strong><p>If the saved job includes Selection Criteria, those responses will be added as an optional third document.</p></div>}
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
           </div>
         </div>
