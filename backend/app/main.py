@@ -17,6 +17,7 @@ from .config import settings
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
+from .job_model import build_job_model, validate_job_model
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
 from .quality import find_writing_quality_issues
 
@@ -60,6 +61,14 @@ def serialise_ckb(source_text: str, experiences_json: str) -> str:
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(ckb, ensure_ascii=False)
+
+
+def serialise_job_model(job_description: str, selection_criteria: str | None, position_title: str, company: str) -> str:
+    model = build_job_model(job_description, selection_criteria, position_title, company)
+    errors = validate_job_model(model)
+    if errors:
+        raise HTTPException(400, errors[0])
+    return json.dumps(model, ensure_ascii=False)
 
 
 def _content_words(value: str) -> list[str]:
@@ -600,7 +609,11 @@ def create_application(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    application = JobApplication.model_validate(payload)
+    values = payload.model_dump()
+    values["job_model_json"] = serialise_job_model(
+        values["job_description"], values.get("selection_criteria"), values["position_title"], values["company"]
+    )
+    application = JobApplication.model_validate(values)
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
     return application
@@ -661,6 +674,10 @@ def update_application(
         if key in {"job_url", "selection_criteria", "submission_reference"} and isinstance(value, str) and not value.strip():
             value = None
         setattr(application, key, value.strip() if isinstance(value, str) else value)
+    if any(key in values for key in {"company", "position_title", "job_description", "selection_criteria"}):
+        application.job_model_json = serialise_job_model(
+            application.job_description, application.selection_criteria, application.position_title, application.company
+        )
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()
@@ -1095,6 +1112,14 @@ def generate(
         master_resume.ckb_json = ckb_source_json
         session.add(master_resume)
         session.commit()
+    job_model_json = application.job_model_json or "{}"
+    if job_model_json.strip() in {"", "{}"}:
+        job_model_json = serialise_job_model(
+            application.job_description, application.selection_criteria, application.position_title, application.company
+        )
+        application.job_model_json = job_model_json
+        session.add(application)
+        session.commit()
     try:
         content = generate_draft(
             master_resume.source_text,
@@ -1107,6 +1132,7 @@ def generate(
             ckb_source_json,
             used_experiences,
             used_closing_styles,
+            job_model_json,
         )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
