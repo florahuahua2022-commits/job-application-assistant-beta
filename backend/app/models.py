@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import Enum
-from uuid import UUID
+from uuid import UUID, uuid4
 from sqlmodel import Field, SQLModel
 
 
@@ -91,6 +91,8 @@ class GeneratedDocument(SQLModel, table=True):
     content: str
     structured_content_json: str = "{}"
     reviewer_json: str = "{}"
+    run_id: str = Field(default_factory=lambda: str(uuid4()), index=True)
+    trace_json: str = "{}"
     used_experiences_json: str = "[]"
     closing_styles_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)
