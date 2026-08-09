@@ -179,6 +179,18 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("## Work Experience", prompt)
         self.assertIn("no more than two pages", prompt)
 
+    def test_resume_prompt_uses_curation_plan_and_declares_used_evidence(self):
+        plan = '{"schema_version":"1.0","selected_evidence":[{"evidence_id":"EV1","curation_action":"feature"}],"maximum_pages":2}'
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as provider:
+            ai.generate_draft("Resume", "Job description", "tailored_resume", resume_plan_json=plan)
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("RESUME CURATION PLAN", prompt)
+        self.assertIn("Every evidence ID must exist in RESUME CURATION PLAN", prompt)
+        self.assertIn("GENERATION_META", prompt)
+
     def test_builds_ranked_evidence_pack_from_structured_experience(self):
         experiences = '[{"id":"EV-project","role_title":"Project Officer","organization":"Agency","responsibility":"Managed stakeholder workshops","result":"Delivered the project on time"},{"id":"EV-retail","role_title":"Assistant","organization":"Shop","responsibility":"Processed sales"}]'
 
