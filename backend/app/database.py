@@ -26,6 +26,8 @@ def create_db_and_tables() -> None:
                 resume_columns = {column["name"] for column in inspector.get_columns("resume")}
                 if "experiences_json" not in resume_columns:
                     connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT NOT NULL DEFAULT '[]'"))
+                if "ckb_json" not in resume_columns:
+                    connection.execute(text("ALTER TABLE resume ADD COLUMN ckb_json TEXT NOT NULL DEFAULT '[]'"))
             if "generateddocument" in table_names:
                 document_columns = {column["name"] for column in inspector.get_columns("generateddocument")}
                 if "used_experiences_json" not in document_columns:
@@ -43,6 +45,8 @@ def create_db_and_tables() -> None:
             resume_columns = {column["name"] for column in inspector.get_columns("resume")}
             if "experiences_json" not in resume_columns:
                 connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT DEFAULT '[]'"))
+            if "ckb_json" not in resume_columns:
+                connection.execute(text("ALTER TABLE resume ADD COLUMN ckb_json TEXT DEFAULT '[]'"))
             document_columns = {column["name"] for column in inspector.get_columns("generateddocument")}
             if "used_experiences_json" not in document_columns:
                 connection.execute(text("ALTER TABLE generateddocument ADD COLUMN used_experiences_json TEXT DEFAULT '[]'"))

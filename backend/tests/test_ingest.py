@@ -94,6 +94,9 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(result[0]["role_title"], "Project Coordinator")
         self.assertEqual(result[0]["organization"], "Bright Energy Pty Ltd")
         self.assertIn("project schedules", result[0]["responsibility"])
+        self.assertTrue(result[0]["evidence_id"].startswith("EV"))
+        self.assertIn("Project Coordinator", result[0]["source_text"])
+        self.assertEqual(result[0]["fact_verification"], "explicit")
         self.assertEqual(result[1]["role_title"], "Administration Officer")
         self.assertEqual(result[1]["organization"], "Example Council")
 
