@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_selection_criteria_batch
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -788,6 +788,32 @@ def quality_check(
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     content_to_check = {key: value.content for key, value in latest.items() if key in required}
+    selection_document = latest.get("selection_criteria")
+    if selection_document and (selection_document.reviewer_json or "{}").strip() not in {"", "{}"}:
+        try:
+            reviewer = json.loads(selection_document.reviewer_json)
+        except json.JSONDecodeError:
+            reviewer = {"status": "fail", "results": []}
+        if reviewer.get("status") == "fail":
+            reviewer_issues = [
+                issue
+                for result in reviewer.get("results") or []
+                for issue in result.get("issues") or []
+            ]
+            if reviewer_issues:
+                for issue in reviewer_issues:
+                    issues.append(QualityCheckIssue(
+                        severity="error",
+                        code=f"reviewer_{issue.get('type', 'finding')}",
+                        message=str(issue.get("description") or "The Selection Criteria Reviewer found a material issue."),
+                        document_type="selection_criteria",
+                    ))
+            else:
+                issues.append(QualityCheckIssue(
+                    severity="error", code="reviewer_failed",
+                    message="The Selection Criteria Reviewer did not pass this document. Regenerate or review it manually.",
+                    document_type="selection_criteria",
+                ))
     cover = content_to_check.get("cover_letter", "")
     tailored_resume = content_to_check.get("tailored_resume", "")
     role_title = application.position_title.split(" - ", 1)[0].strip()
@@ -1151,8 +1177,10 @@ def generate(
             session.add(application)
             session.commit()
         selection_bundle = None
+        selection_review = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
+            selection_review = review_selection_criteria_batch(ckb_source_json, selection_plan_json, selection_bundle)
             content = selection_bundle["content"]
         else:
             content = generate_draft(
@@ -1210,6 +1238,7 @@ def generate(
         document_type=payload.document_type,
         content=content,
         structured_content_json=json.dumps(selection_bundle or {}, ensure_ascii=False),
+        reviewer_json=json.dumps(selection_review or {}, ensure_ascii=False),
         used_experiences_json=json.dumps(metadata["used_experiences"]),
         closing_styles_json=json.dumps(metadata["closing_styles"]),
     )

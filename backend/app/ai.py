@@ -6,6 +6,7 @@ from openai import OpenAI, OpenAIError
 from .config import settings
 from .evidence_matcher import matched_evidence_pack, normalise_match_result, validate_match_result
 from .selection_logic import hard_validate_response
+from .reviewer import normalise_review_result, validate_review_result
 
 
 EVIDENCE_STOP_WORDS = {
@@ -268,6 +269,58 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
         "used_experiences": used_ids,
         "actual_total_word_count": sum(item["word_count"] for item in responses),
     }
+
+
+def review_selection_criteria_batch(ckb_json: str, selection_plan_json: str, bundle: dict) -> dict:
+    try:
+        ckb = json.loads(ckb_json or "[]")
+        plan = json.loads(selection_plan_json or "{}")
+    except json.JSONDecodeError as error:
+        raise ValueError("CKB or Selection Plan JSON is invalid.") from error
+    criteria_ids = [str(item.get("criteria_id")) for item in plan.get("items") or []]
+    if not criteria_ids or len(bundle.get("responses") or []) != len(criteria_ids):
+        raise ValueError("The Reviewer package is incomplete.")
+    package = [
+        {"criterion": plan_item, "response": response}
+        for plan_item, response in zip(plan["items"], bundle["responses"])
+    ]
+    prompt = f"""You are the factual quality Reviewer for a batch of Australian government Selection Criteria responses. Do not rewrite, improve or repair any response. Only verify and flag issues.
+
+For every criterion, check only these issue types:
+- unsupported_claim
+- unsupported_inference
+- fabricated_figure
+- evidence_mismatch
+- internal_inconsistency
+- jd_wording_repeated
+- ai_tone
+- declared_evidence_unused
+- unmatched_evidence_used
+
+Do not evaluate exact word counts, JSON structure, evidence reuse percentages or employer share; deterministic application logic already checks them. A stylistic preference alone must not fail a response.
+
+BATCH PACKAGE:
+{json.dumps(package, ensure_ascii=False)}
+
+FULL CAREER KNOWLEDGE BASE WITH SOURCE TEXT:
+{json.dumps(ckb, ensure_ascii=False)}
+
+Return JSON only:
+{{"results":[{{"criteria_id":"...","status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"..."}}],"recommendation":"optional guidance"}}]}}
+
+Return every criteria_id exactly once. Use pass with an empty issues array when no material issue exists."""
+    last_error = ""
+    for _attempt in range(2):
+        try:
+            raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            result = normalise_review_result(raw, criteria_ids)
+            errors = validate_review_result(result, criteria_ids)
+            if not errors:
+                return result
+            last_error = errors[0]
+        except (OpenAIError, ValueError) as error:
+            last_error = str(error)
+    raise AIServiceError(f"Batch Reviewer failed validation: {last_error or 'unknown error'}")
 
 
 def _finalise_date(content: str) -> str:

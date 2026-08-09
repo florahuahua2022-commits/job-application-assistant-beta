@@ -85,6 +85,7 @@ class GeneratedDocument(SQLModel, table=True):
     document_type: str
     content: str
     structured_content_json: str = "{}"
+    reviewer_json: str = "{}"
     used_experiences_json: str = "[]"
     closing_styles_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)
