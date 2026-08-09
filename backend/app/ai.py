@@ -393,6 +393,65 @@ Use pass with an empty issues array when there is no material issue."""
     raise AIServiceError(f"Cover Letter Reviewer failed validation: {last_error or 'unknown error'}")
 
 
+def review_tailored_resume(
+    ckb_json: str,
+    job_model_json: str,
+    resume_plan_json: str,
+    content: str,
+) -> dict:
+    try:
+        ckb = json.loads(ckb_json or "[]")
+        job_model = json.loads(job_model_json or "{}")
+        plan = json.loads(resume_plan_json or "{}")
+    except json.JSONDecodeError as error:
+        raise ValueError("Resume Reviewer inputs are invalid.") from error
+    if not content.strip() or not plan.get("selected_evidence"):
+        raise ValueError("The Resume Reviewer package is incomplete.")
+    prompt = f"""You are the factual and relevance Reviewer for an ATS-friendly Australian government tailored CV. Do not rewrite, improve or repair the CV. Only verify and flag material issues.
+
+{government_writing_rules(target_english_variant())}
+
+Check only these issue types:
+- unsupported_claim
+- unsupported_inference
+- fabricated_figure
+- evidence_mismatch
+- internal_inconsistency
+- contradiction
+- unmatched_evidence_used
+- requirement_omission
+- jd_wording_repeated
+- ai_tone
+- style_only
+
+Check that roles, employers, dates, responsibilities, skills and outcomes remain traceable to CKB source_text. Check whether the curation reflects the Resume Plan and the strongest job-relevant evidence. Do not penalise factual compression or reordering. A style_only preference must never cause failure by itself. Do not calculate exact word counts or required headings; application logic already checks them.
+
+SHARED JOB MODEL:
+{json.dumps(job_model, ensure_ascii=False)}
+
+RESUME CURATION PLAN:
+{json.dumps(plan, ensure_ascii=False)}
+
+FULL CKB WITH SOURCE TEXT:
+{json.dumps(ckb, ensure_ascii=False)}
+
+FINAL TAILORED CV:
+{content}
+
+Return JSON only:
+{{"status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"CV phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+
+Use pass with an empty issues array when there is no material issue."""
+    last_error = ""
+    for _attempt in range(2):
+        try:
+            raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            return normalise_document_review(raw, "tailored_resume")
+        except (OpenAIError, ValueError) as error:
+            last_error = str(error)
+    raise AIServiceError(f"Resume Reviewer failed validation: {last_error or 'unknown error'}")
+
+
 def _finalise_date(content: str) -> str:
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
