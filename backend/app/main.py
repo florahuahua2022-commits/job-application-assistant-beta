@@ -17,6 +17,7 @@ from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
+from .quality import find_writing_quality_issues
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -742,6 +743,13 @@ def quality_check(
                 severity="warning",
                 code="unconfirmed_availability",
                 message=f"The document states immediate or prompt availability, but the profile indicates {expected}. Confirm or revise this statement.",
+                document_type=document_type,
+            ))
+        for code, message in find_writing_quality_issues(content):
+            issues.append(QualityCheckIssue(
+                severity="warning",
+                code=code,
+                message=message,
                 document_type=document_type,
             ))
 
