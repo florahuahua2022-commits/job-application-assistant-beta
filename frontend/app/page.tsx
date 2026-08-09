@@ -18,6 +18,7 @@ type Referee = { organisation: string; name: string; position_title: string; pho
 type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; referees: Referee[]; updated_at: string };
 type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string };
 type ContactGuess = { full_name: string; phone: string; email: string };
+type SelectionCriteriaAccess = { unlimited: boolean; included_credits: number; referral_credits: number; used_credits: number; remaining_credits: number | null; referral_code: string | null; referral_claimed: boolean };
 
 const packTypes = ["tailored_resume", "cover_letter", "selection_criteria"] as const;
 const labels: Record<string, string> = {
@@ -55,6 +56,8 @@ export default function Home() {
   const [experiences, setExperiences] = useState<Experience[]>([]);
   const [resultPromptsShown, setResultPromptsShown] = useState<string[]>([]);
   const [contactGuess, setContactGuess] = useState<ContactGuess>({ full_name: "", phone: "", email: "" });
+  const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
+  const [referralCode, setReferralCode] = useState("");
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -63,16 +66,18 @@ export default function Home() {
   }
 
   async function refresh() {
-    const [profileResponse, resumeResponse, applicationResponse, backupResponse] = await Promise.all([
+    const [profileResponse, resumeResponse, applicationResponse, backupResponse, selectionAccessResponse] = await Promise.all([
       authenticatedFetch(`${api}/profile`),
       authenticatedFetch(`${api}/resumes`),
       authenticatedFetch(`${api}/applications`),
       authenticatedFetch(`${api}/backups`),
+      authenticatedFetch(`${api}/selection-criteria/access`),
     ]);
     if (profileResponse.ok) setProfile(await profileResponse.json());
     if (resumeResponse.ok) setResumes(await resumeResponse.json());
     if (applicationResponse.ok) setApplications(await applicationResponse.json());
     if (backupResponse.ok) setBackups(await backupResponse.json());
+    if (selectionAccessResponse.ok) setSelectionAccess(await selectionAccessResponse.json());
   }
 
   useEffect(() => {
@@ -350,9 +355,19 @@ export default function Home() {
   async function generatePack() {
     if (!selectedApplication || !resumes.length) return;
     const application = applications.find((item) => item.id === selectedApplication);
-    const documentTypes = application?.selection_criteria?.trim()
+    const includesSelectionCriteria = Boolean(application?.selection_criteria?.trim());
+    const documentTypes = includesSelectionCriteria
       ? (["tailored_resume", "selection_criteria", "cover_letter"] as const)
       : packTypes.slice(0, 2);
+    if (includesSelectionCriteria) {
+      const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
+      if (!accessResponse.ok) return setNotice("Could not verify Selection Criteria access. Please try again.");
+      const currentAccess = await accessResponse.json() as SelectionCriteriaAccess;
+      setSelectionAccess(currentAccess);
+      if (!currentAccess.unlimited && !currentAccess.remaining_credits) {
+        return setNotice("No Selection Criteria credits remain. Share your referral code to earn one more use.");
+      }
+    }
     const packId = crypto.randomUUID();
     setBusy(true);
     const created: GeneratedDocument[] = [];
@@ -371,6 +386,10 @@ export default function Home() {
         created.push(result);
       }
       setDocuments((current) => [...created.reverse(), ...current]);
+      if (includesSelectionCriteria) {
+        const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
+        if (accessResponse.ok) setSelectionAccess(await accessResponse.json());
+      }
       setActiveType("tailored_resume");
       const checkResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
       if (checkResponse.ok) {
@@ -388,6 +407,20 @@ export default function Home() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function claimReferral(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const response = await authenticatedFetch(`${api}/selection-criteria/referral`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ referral_code: referralCode.trim() }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not apply this referral code.");
+    setSelectionAccess(result);
+    setReferralCode("");
+    setNotice("Referral recorded. The person who invited you has received one Selection Criteria credit.");
   }
 
   async function saveDraft() {
@@ -575,6 +608,20 @@ export default function Home() {
       {supabase && <button type="button" className="secondary" onClick={signOut}>Sign out</button>}
     </header>
     <p className="notice">{notice}</p>
+
+    {selectionAccess && !selectionAccess.unlimited && <section className="selectionAccessCard">
+      <div>
+        <strong>Selection Criteria access</strong>
+        <p><b>{selectionAccess.remaining_credits}</b> free use{selectionAccess.remaining_credits === 1 ? "" : "s"} remaining. New users receive 2; each successful referral adds 1.</p>
+      </div>
+      <div className="referralTools">
+        {selectionAccess.referral_code && <button type="button" className="secondary" onClick={() => navigator.clipboard.writeText(selectionAccess.referral_code || "")}>Copy my referral code</button>}
+        {!selectionAccess.referral_claimed && <form onSubmit={claimReferral}>
+          <input aria-label="Referral code" value={referralCode} onChange={(event) => setReferralCode(event.target.value)} placeholder="Enter an inviter's code" required />
+          <button type="submit">Apply code</button>
+        </form>}
+      </div>
+    </section>}
 
     <section className="steps">
       <details className="panel" open={!profile}>

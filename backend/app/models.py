@@ -93,6 +93,26 @@ class GenerationUsage(SQLModel, table=True):
     generated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
+class CreditLedger(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    delta: int
+    reason: str
+    reference_id: str | None = None
+    idempotency_key: str = Field(unique=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class Referral(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    inviter_user_id: UUID = Field(index=True)
+    invited_user_id: UUID = Field(unique=True, index=True)
+    status: str = "earned"
+    reward_credits: int = 1
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    earned_at: datetime | None = Field(default_factory=datetime.utcnow)
+
+
 class ResumeCreate(SQLModel):
     title: str = "Master Resume"
     source_text: str
@@ -197,6 +217,20 @@ class GenerateRequest(SQLModel):
     application_id: int
     document_type: str  # tailored_resume | cover_letter | selection_criteria | ats_analysis
     pack_id: UUID | None = None
+
+
+class ReferralClaimRequest(SQLModel):
+    referral_code: str
+
+
+class SelectionCriteriaAccessResponse(SQLModel):
+    unlimited: bool = False
+    included_credits: int = 2
+    referral_credits: int = 0
+    used_credits: int = 0
+    remaining_credits: int | None = None
+    referral_code: str | None = None
+    referral_claimed: bool = False
 
 
 class GeneratedDocumentUpdate(SQLModel):

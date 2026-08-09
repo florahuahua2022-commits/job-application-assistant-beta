@@ -16,7 +16,7 @@ from .config import settings
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_text, import_job_url, parse_job_ad_text
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -98,6 +98,99 @@ def check_generation_quota(session: Session, user_id: UUID | None, pack_id: UUID
     if global_monthly_count >= settings.monthly_pack_limit_global:
         raise HTTPException(429, "The beta's monthly AI limit has been reached. Generation is paused.")
     return True
+
+
+def selection_criteria_access(session: Session, user_id: UUID | None) -> SelectionCriteriaAccessResponse:
+    if settings.deployment_mode.strip().lower() != "online":
+        return SelectionCriteriaAccessResponse(unlimited=True)
+    if user_id is None:
+        raise HTTPException(401, "Sign in to use Selection Criteria.")
+    ledger_total = session.exec(
+        select(func.coalesce(func.sum(CreditLedger.delta), 0)).where(CreditLedger.user_id == user_id)
+    ).one()
+    referral_credits = session.exec(
+        select(func.count(Referral.id)).where(
+            Referral.inviter_user_id == user_id,
+            Referral.status == "earned",
+        )
+    ).one()
+    used_credits = session.exec(
+        select(func.count(CreditLedger.id)).where(
+            CreditLedger.user_id == user_id,
+            CreditLedger.reason == "generation",
+        )
+    ).one()
+    referral_claimed = session.exec(
+        select(Referral.id).where(Referral.invited_user_id == user_id)
+    ).first() is not None
+    return SelectionCriteriaAccessResponse(
+        included_credits=2,
+        referral_credits=referral_credits,
+        used_credits=used_credits,
+        remaining_credits=max(0, 2 + int(ledger_total)),
+        referral_code=str(user_id),
+        referral_claimed=referral_claimed,
+    )
+
+
+def check_selection_criteria_credit(
+    session: Session,
+    user_id: UUID | None,
+    pack_id: UUID | None,
+) -> str | None:
+    if settings.deployment_mode.strip().lower() != "online":
+        return None
+    if user_id is None or pack_id is None:
+        raise HTTPException(400, "A generation pack identifier is required in online mode.")
+    idempotency_key = f"selection-criteria:{user_id}:{pack_id}"
+    if session.exec(select(CreditLedger.id).where(CreditLedger.idempotency_key == idempotency_key)).first():
+        return None
+    access = selection_criteria_access(session, user_id)
+    if not access.remaining_credits:
+        raise HTTPException(429, "No Selection Criteria credits remain. Invite a new user to earn one more use.")
+    return idempotency_key
+
+
+@app.get("/selection-criteria/access", response_model=SelectionCriteriaAccessResponse)
+def get_selection_criteria_access(
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    return selection_criteria_access(session, user_id)
+
+
+@app.post("/selection-criteria/referral", response_model=SelectionCriteriaAccessResponse)
+def claim_selection_criteria_referral(
+    payload: ReferralClaimRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    if settings.deployment_mode.strip().lower() != "online" or user_id is None:
+        raise HTTPException(400, "Referral credits are available in the online service only.")
+    try:
+        inviter_id = UUID(payload.referral_code.strip())
+    except ValueError as error:
+        raise HTTPException(400, "This referral code is not valid.") from error
+    if inviter_id == user_id:
+        raise HTTPException(400, "You cannot use your own referral code.")
+    if session.exec(select(Referral.id).where(Referral.invited_user_id == user_id)).first():
+        raise HTTPException(409, "A referral has already been claimed for this account.")
+    session.add(Referral(
+        inviter_user_id=inviter_id,
+        invited_user_id=user_id,
+        status="earned",
+        reward_credits=1,
+        earned_at=datetime.utcnow(),
+    ))
+    session.add(CreditLedger(
+        user_id=inviter_id,
+        delta=1,
+        reason="referral",
+        reference_id=str(user_id),
+        idempotency_key=f"referral:{user_id}",
+    ))
+    session.commit()
+    return selection_criteria_access(session, user_id)
 
 
 @app.get("/backups")
@@ -802,6 +895,11 @@ def generate(
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
     new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
+    selection_credit_key = (
+        check_selection_criteria_credit(session, user_id, payload.pack_id)
+        if payload.document_type == "selection_criteria"
+        else None
+    )
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     used_experiences = "[]"
     used_closing_styles = "[]"
@@ -866,6 +964,14 @@ def generate(
         closing_styles_json=json.dumps(metadata["closing_styles"]),
     )
     session.add(document)
+    if selection_credit_key and user_id is not None:
+        session.add(CreditLedger(
+            user_id=user_id,
+            delta=-1,
+            reason="generation",
+            reference_id=str(application.id),
+            idempotency_key=selection_credit_key,
+        ))
     if new_pack_usage and user_id is not None and payload.pack_id is not None:
         session.add(GenerationUsage(
             user_id=user_id,
