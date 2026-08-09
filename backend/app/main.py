@@ -20,6 +20,7 @@ from .ingest import extract_resume_experiences, extract_resume_text, import_job_
 from .job_model import build_job_model, validate_job_model
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
 from .quality import find_writing_quality_issues
+from .selection_logic import build_selection_plan
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -74,6 +75,7 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
 def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
     for application in session.exec(select_for_user(JobApplication, user_id)).all():
         application.evidence_matches_json = "{}"
+        application.selection_plan_json = "{}"
         session.add(application)
     session.commit()
 
@@ -689,6 +691,7 @@ def update_application(
             application.job_description, application.selection_criteria, application.position_title, application.company
         )
         application.evidence_matches_json = "{}"
+        application.selection_plan_json = "{}"
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()
@@ -1138,6 +1141,15 @@ def generate(
             application.evidence_matches_json = evidence_matches_json
             session.add(application)
             session.commit()
+        selection_plan_json = application.selection_plan_json or "{}"
+        if selection_plan_json.strip() in {"", "{}"}:
+            selection_plan_json = json.dumps(build_selection_plan(
+                json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json),
+                settings.default_sc_word_target,
+            ), ensure_ascii=False)
+            application.selection_plan_json = selection_plan_json
+            session.add(application)
+            session.commit()
         content = generate_draft(
             master_resume.source_text,
             application.job_description,
@@ -1151,6 +1163,7 @@ def generate(
             used_closing_styles,
             job_model_json,
             evidence_matches_json,
+            selection_plan_json,
         )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
