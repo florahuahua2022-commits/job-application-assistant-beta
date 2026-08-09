@@ -39,3 +39,24 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
 
 def findings_block_release(findings: list[dict[str, Any]]) -> bool:
     return any(bool(item.get("blocks_release")) for item in findings)
+
+
+def normalise_document_review(raw: dict[str, Any], document_id: str) -> dict[str, Any]:
+    findings = []
+    for issue in raw.get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        finding = normalise_finding(issue)
+        if finding:
+            findings.append(finding)
+    status = "fail" if findings_block_release(findings) else "pass"
+    return {
+        "schema_version": SHARED_REVIEWER_SCHEMA_VERSION,
+        "status": status,
+        "results": [{
+            "criteria_id": document_id,
+            "status": status,
+            "issues": findings,
+            "recommendation": str(raw.get("recommendation") or "").strip(),
+        }],
+    }

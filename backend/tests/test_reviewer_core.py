@@ -1,6 +1,6 @@
 import unittest
 
-from app.reviewer_core import SHARED_REVIEWER_SCHEMA_VERSION, findings_block_release, normalise_finding
+from app.reviewer_core import SHARED_REVIEWER_SCHEMA_VERSION, findings_block_release, normalise_document_review, normalise_finding
 
 
 class SharedReviewerCoreTests(unittest.TestCase):
@@ -26,6 +26,14 @@ class SharedReviewerCoreTests(unittest.TestCase):
 
     def test_unknown_issue_type_is_rejected(self):
         self.assertIsNone(normalise_finding({"type": "personal_preference"}))
+
+    def test_document_review_does_not_fail_for_style_only_feedback(self):
+        result = normalise_document_review({"status": "fail", "issues": [
+            {"type": "style_only", "description": "A shorter opening may read better."},
+        ]}, "cover_letter")
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["results"][0]["criteria_id"], "cover_letter")
 
 
 if __name__ == "__main__":

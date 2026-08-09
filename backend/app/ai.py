@@ -8,6 +8,7 @@ from .evidence_matcher import matched_evidence_pack, normalise_match_result, val
 from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
+from .reviewer_core import normalise_document_review
 
 
 EVIDENCE_STOP_WORDS = {
@@ -324,6 +325,71 @@ Return every criteria_id exactly once. Use pass with an empty issues array when 
         except (OpenAIError, ValueError) as error:
             last_error = str(error)
     raise AIServiceError(f"Batch Reviewer failed validation: {last_error or 'unknown error'}")
+
+
+def review_cover_letter(
+    ckb_json: str,
+    job_model_json: str,
+    cover_letter_plan_json: str,
+    applicant_profile: str | None,
+    content: str,
+) -> dict:
+    try:
+        ckb = json.loads(ckb_json or "[]")
+        job_model = json.loads(job_model_json or "{}")
+        plan = json.loads(cover_letter_plan_json or "{}")
+    except json.JSONDecodeError as error:
+        raise ValueError("Cover Letter Reviewer inputs are invalid.") from error
+    if not content.strip() or not plan.get("priorities"):
+        raise ValueError("The Cover Letter Reviewer package is incomplete.")
+    prompt = f"""You are the factual and requirement-coverage Reviewer for an Australian government Cover Letter. Do not rewrite, improve or repair the letter. Only verify and flag material issues.
+
+{government_writing_rules(target_english_variant())}
+
+Check only these issue types:
+- unsupported_claim
+- unsupported_inference
+- fabricated_figure
+- evidence_mismatch
+- internal_inconsistency
+- contradiction
+- unmatched_evidence_used
+- unsupported_motivation
+- requirement_omission
+- jd_wording_repeated
+- ai_tone
+- declared_evidence_unused
+- style_only
+
+The Applicant Profile intent may support motivation or values alignment, but it is not employment evidence. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
+
+SHARED JOB MODEL:
+{json.dumps(job_model, ensure_ascii=False)}
+
+COVER LETTER PLAN:
+{json.dumps(plan, ensure_ascii=False)}
+
+APPLICANT PROFILE DECLARATIONS:
+{applicant_profile or 'Not provided'}
+
+FULL CKB WITH SOURCE TEXT:
+{json.dumps(ckb, ensure_ascii=False)}
+
+FINAL COVER LETTER:
+{content}
+
+Return JSON only:
+{{"status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"letter phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+
+Use pass with an empty issues array when there is no material issue."""
+    last_error = ""
+    for _attempt in range(2):
+        try:
+            raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            return normalise_document_review(raw, "cover_letter")
+        except (OpenAIError, ValueError) as error:
+            last_error = str(error)
+    raise AIServiceError(f"Cover Letter Reviewer failed validation: {last_error or 'unknown error'}")
 
 
 def _finalise_date(content: str) -> str:
