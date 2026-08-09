@@ -10,12 +10,40 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.database import get_session
 from app.auth import get_current_user
-from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, enforce_profile_contact, organisation_is_named
-from app.models import ApplicantProfile, GeneratedDocument, JobApplication
+from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, enforce_profile_contact, organisation_is_named
+from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
 from app import backup
 
 
 class SubmissionRecordTests(unittest.TestCase):
+    def test_resume_content_check_matches_source_and_flags_unsupported_edit(self):
+        resume = Resume(
+            source_text="Alex Morgan\n0400 000 000\nalex@example.com\nProject Officer\nExample Agency\nPrepared monthly reports and project registers.",
+            experiences_json='[{"role_title":"Project Director","organization":"Example Agency","responsibility":"Prepared monthly reports and project registers."}]',
+        )
+        profile = ApplicantProfile(
+            first_name="Alex", last_name="Morgan", phone="0400 000 000", email="alex@example.com",
+        )
+
+        result = build_resume_content_check(resume, profile)
+
+        statuses = {item.field: item.status for item in result.items}
+        self.assertEqual(statuses["profile.full_name"], "matched")
+        self.assertEqual(statuses["experiences.1.organization"], "matched")
+        self.assertEqual(statuses["experiences.1.role_title"], "review")
+        self.assertFalse(result.ready)
+
+    def test_resume_content_check_reports_missing_structured_experience(self):
+        resume = Resume(source_text="Alex Morgan\nalex@example.com\n0400 000 000", experiences_json="[]")
+        profile = ApplicantProfile(
+            first_name="Alex", last_name="Morgan", phone="0400 000 000", email="alex@example.com",
+        )
+
+        result = build_resume_content_check(resume, profile)
+
+        self.assertEqual(result.missing_count, 1)
+        self.assertEqual(result.items[-1].field, "experiences")
+
     def test_auto_polish_matches_generic_salutation_and_signoff(self):
         polished = auto_polish_cover_letter(
             "Dear Hiring Manager,\n\nEvidence.\n\nYours sincerely,\nAlex Morgan",

@@ -13,6 +13,8 @@ type Application = { id: number; company: string; position_title: string; job_ur
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; created_at: string };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
 type QualityResult = { ready: boolean; issues: QualityIssue[]; checked_documents: string[] };
+type ResumeContentCheckItem = { field: string; label: string; value: string; status: "matched" | "review" | "missing"; message: string };
+type ResumeContentCheckResult = { ready: boolean; matched_count: number; review_count: number; missing_count: number; items: ResumeContentCheckItem[] };
 type Backup = { filename: string; size: number; created_at: string };
 type Referee = { organisation: string; name: string; position_title: string; phone: string; relationship: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string };
 type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; referees: Referee[]; updated_at: string };
@@ -43,6 +45,8 @@ export default function Home() {
   const [activeType, setActiveType] = useState<string>("tailored_resume");
   const [draftText, setDraftText] = useState("");
   const [qualityResult, setQualityResult] = useState<QualityResult | null>(null);
+  const [resumeContentCheck, setResumeContentCheck] = useState<ResumeContentCheckResult | null>(null);
+  const [resumeCheckState, setResumeCheckState] = useState<"idle" | "checking" | "done" | "error">("idle");
   const [statusFilter, setStatusFilter] = useState("all");
   const [backups, setBackups] = useState<Backup[]>([]);
   const [resumeUploadState, setResumeUploadState] = useState("idle");
@@ -223,7 +227,27 @@ export default function Home() {
       body: JSON.stringify(payload),
     });
     setNotice(response.ok ? "Master Resume saved. You only need to update it when your experience changes." : "Could not save the Master Resume.");
-    if (response.ok) refresh();
+    if (response.ok) {
+      setResumeContentCheck(null);
+      setResumeCheckState("idle");
+      refresh();
+    }
+  }
+
+  async function runResumeContentCheck(resumeId = resumes[0]?.id) {
+    if (!resumeId) return setNotice("Upload or save your Master Resume before running Content Check.");
+    setResumeCheckState("checking");
+    const response = await authenticatedFetch(`${api}/resumes/${resumeId}/content-check`);
+    const result = await response.json();
+    if (!response.ok) {
+      setResumeCheckState("error");
+      return setNotice(result.detail || "Could not compare the extracted details with your CV.");
+    }
+    setResumeContentCheck(result);
+    setResumeCheckState("done");
+    setNotice(result.ready
+      ? "CV Content Check passed. Every extracted field was found in the uploaded CV."
+      : "CV Content Check finished. Review the highlighted details before generating documents.");
   }
 
   function addExperience() {
@@ -256,6 +280,7 @@ export default function Home() {
     setContactGuess(guess);
     const contactSaved = await saveDetectedContact(guess);
     await refresh();
+    await runResumeContentCheck(result.id);
     const experienceMessage = extractedExperienceCount
       ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.`
       : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.";
@@ -741,6 +766,14 @@ export default function Home() {
             </fieldset>)}
             {!experiences.length && <p className="helper">Add each relevant role as a separate experience. You can still keep the full resume text above.</p>}
           </div>
+          {resumes[0] && <div className="resumeContentCheck">
+            <div className="contentCheckHeading"><div><strong>CV Content Check</strong><p className="helper">Compare personal details and extracted experience with the original uploaded CV.</p></div><button type="button" className="secondary" onClick={() => runResumeContentCheck()} disabled={resumeCheckState === "checking"}>{resumeCheckState === "checking" ? "Checking…" : "Check extracted details"}</button></div>
+            {resumeContentCheck && <div className={resumeContentCheck.ready ? "contentCheckSummary pass" : "contentCheckSummary review"}>
+              <strong>{resumeContentCheck.ready ? "All extracted details matched" : "Review the highlighted details"}</strong>
+              <p>{resumeContentCheck.matched_count} matched · {resumeContentCheck.review_count} need confirmation · {resumeContentCheck.missing_count} missing</p>
+              <div className="contentCheckItems">{resumeContentCheck.items.map((item) => <div className={`contentCheckItem ${item.status}`} key={item.field}><span>{item.status === "matched" ? "Matched" : item.status === "review" ? "Review" : "Missing"}</span><div><strong>{item.label}</strong>{item.value && <small>{item.value}</small>}<small>{item.message}</small></div></div>)}</div>
+            </div>}
+          </div>}
           <button>Save Master Resume</button>
         </form>
       </details>
