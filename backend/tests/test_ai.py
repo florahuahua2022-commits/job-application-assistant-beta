@@ -80,6 +80,19 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = deepseek_call.call_args.args[0]
         self.assertIn("Do not infer a recruiter/client relationship", prompt)
         self.assertIn("use 'Yours faithfully' after a generic salutation", prompt)
+        self.assertIn("Never use 'RE:'", prompt)
+
+    def test_resume_prompt_requires_standard_sections_and_two_page_limit(self):
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as deepseek_call:
+            ai.generate_draft("Resume", "Job description", "tailored_resume")
+
+        prompt = deepseek_call.call_args.args[0]
+        self.assertIn("## Professional Summary", prompt)
+        self.assertIn("## Key Skills", prompt)
+        self.assertIn("## Work Experience", prompt)
+        self.assertIn("no more than two pages", prompt)
 
     def test_builds_ranked_evidence_pack_from_structured_experience(self):
         experiences = '[{"id":"EV-project","role_title":"Project Officer","organization":"Agency","responsibility":"Managed stakeholder workshops","result":"Delivered the project on time"},{"id":"EV-retail","role_title":"Assistant","organization":"Shop","responsibility":"Processed sales"}]'
