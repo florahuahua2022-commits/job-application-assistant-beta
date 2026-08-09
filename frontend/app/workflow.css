@@ -52,9 +52,15 @@
 .evidenceTrace ul { margin: .55rem 0 0; padding-left: 1.2rem; }
 .evidenceTrace li { color: var(--muted); font-size: .84rem; margin: .25rem 0; }
 .evidenceTrace code { color: var(--accent-dark); font-weight: 800; margin-right: .35rem; }
+.templatePicker { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin: 10px 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf8; }
+.templatePicker > div { display: grid; gap: 3px; }
+.templatePicker small { color: var(--muted); }
+.templatePicker select { width: min(100%, 260px); margin: 0; }
 @media (max-width: 760px) {
   .uploadBox, .quickStartUpload, .linkImportRow, .contactConfirm { grid-template-columns: 1fr; }
   .confirmCard { align-items: stretch; flex-direction: column; }
   .selectedActions { width: 100%; }
   .selectedActions button { flex: 1; }
+  .templatePicker { align-items: stretch; flex-direction: column; }
+  .templatePicker select { width: 100%; }
 }

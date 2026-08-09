@@ -58,6 +58,7 @@ export default function Home() {
   const [contactGuess, setContactGuess] = useState<ContactGuess>({ full_name: "", phone: "", email: "" });
   const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
   const [referralCode, setReferralCode] = useState("");
+  const [exportTemplate, setExportTemplate] = useState<"classic" | "modern" | "traditional">("classic");
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -586,7 +587,7 @@ export default function Home() {
 
   async function downloadDocument(format: "docx" | "pdf") {
     if (!activeDocument) return;
-    const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}/export?format=${format}`);
+    const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}/export?format=${format}&template=${exportTemplate}`);
     if (!response.ok) return setNotice("Could not download this document.");
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
@@ -598,7 +599,7 @@ export default function Home() {
 
   async function downloadPack(format: "docx" | "pdf") {
     if (!selectedApplication) return;
-    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/export-pack?format=${format}`);
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/export-pack?format=${format}&template=${exportTemplate}`);
     if (!response.ok) return setNotice("Could not download the application pack.");
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
@@ -799,6 +800,7 @@ export default function Home() {
               </details>
               {documents.length ? <>
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
+                <div className="templatePicker"><div><strong>Export style</strong><small>All options are single-column and ATS-friendly.</small></div><select aria-label="Export style" value={exportTemplate} onChange={(event) => setExportTemplate(event.target.value as "classic" | "modern" | "traditional")}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option></select></div>
                 {activeDocument && <div className="editor">{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
               </> : <div className="emptyState"><strong>Your CV and cover letter will appear here.</strong><p>If the saved job includes Selection Criteria, those responses will be added as an optional third document.</p></div>}
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}

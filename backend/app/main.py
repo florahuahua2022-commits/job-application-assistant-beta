@@ -886,6 +886,7 @@ def update_generated_document(
 def export_generated_document(
     document_id: int,
     format: str = Query(pattern="^(docx|pdf)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
@@ -902,10 +903,10 @@ def export_generated_document(
     }.get(document.document_type, document.document_type)
     filename = safe_filename(f"{application.position_title}_{label}")
     if format == "docx":
-        payload = create_docx(document.content, label.replace("_", " "))
+        payload = create_docx(document.content, label.replace("_", " "), template)
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
-        payload = create_pdf(document.content, label.replace("_", " "))
+        payload = create_pdf(document.content, label.replace("_", " "), template)
         media_type = "application/pdf"
     return Response(payload, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'})
 
@@ -914,6 +915,7 @@ def export_generated_document(
 def export_application_pack(
     application_id: int,
     format: str = Query(pattern="^(docx|pdf)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
@@ -945,7 +947,7 @@ def export_application_pack(
         for document_type in required_types:
             document = latest[document_type]
             label = labels[document_type]
-            payload = create_docx(document.content, label.replace("_", " ")) if format == "docx" else create_pdf(document.content, label.replace("_", " "))
+            payload = create_docx(document.content, label.replace("_", " "), template) if format == "docx" else create_pdf(document.content, label.replace("_", " "), template)
             archive.writestr(f"{safe_filename(application.position_title)}_{label}.{format}", payload)
     filename = safe_filename(f"{application.position_title}_Application_Pack_{format.upper()}")
     return Response(archive_stream.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}.zip"'})
