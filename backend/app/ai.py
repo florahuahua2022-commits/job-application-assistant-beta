@@ -59,6 +59,16 @@ def build_evidence_pack(
     )
     return ranked[:max_items]
 
+
+def selection_input_mode(selection_criteria: str | None) -> str:
+    value = (selection_criteria or "").strip()
+    if not value:
+        return "not provided"
+    meaningful_lines = [line for line in value.splitlines() if line.strip()]
+    if len(value) <= 220 and len(meaningful_lines) <= 3:
+        return "brief user guidance"
+    return "full selection criteria"
+
 def target_english_variant() -> str:
     return settings.target_english_variant.strip() or "Australian English"
 
@@ -134,6 +144,11 @@ def generate_draft(
     }.get(document_type)
     if not task:
         raise ValueError("Unsupported document_type")
+    if document_type == "selection_criteria":
+        mode = selection_input_mode(selection_criteria)
+        task += (
+            f" SELECTION INPUT MODE: {mode}. When the mode is brief user guidance, use the guidance to prioritise only explicit requirements found in the Job Description, create clear requirement-based headings, and expand them into useful responses. Do not invent additional employer criteria. When the mode is full selection criteria, respond separately to every supplied criterion."
+        )
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
     evidence_pack = build_evidence_pack(

@@ -131,6 +131,25 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("MATCHED RESUME EVIDENCE", prompt)
         self.assertIn("requirements only, never applicant evidence", prompt)
 
+    def test_short_selection_guidance_is_expanded_from_explicit_jd_requirements(self):
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as deepseek_call:
+            ai.generate_draft(
+                "Project Officer\nManaged stakeholder workshops and prepared reports.",
+                "The role requires stakeholder engagement and government reporting.",
+                "selection_criteria",
+                "Focus on stakeholder engagement and reporting",
+            )
+
+        prompt = deepseek_call.call_args.args[0]
+        self.assertIn("SELECTION INPUT MODE: brief user guidance", prompt)
+        self.assertIn("Do not invent additional employer criteria", prompt)
+
+    def test_long_selection_input_is_treated_as_full_criteria(self):
+        criteria = "\n".join(f"Criterion {index}: " + "demonstrated capability " * 8 for index in range(1, 5))
+        self.assertEqual(ai.selection_input_mode(criteria), "full selection criteria")
+
 
 if __name__ == "__main__":
     unittest.main()
