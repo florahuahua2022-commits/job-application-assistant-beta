@@ -16,6 +16,7 @@ from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
 from .config import settings
+from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
@@ -1173,11 +1174,20 @@ def generate(
             session.commit()
         selection_bundle = None
         selection_review = None
+        cover_letter_plan = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
             selection_review = review_selection_criteria_batch(ckb_source_json, selection_plan_json, selection_bundle)
             content = selection_bundle["content"]
         else:
+            if payload.document_type == "cover_letter":
+                try:
+                    prior_ids = json.loads(used_experiences or "[]")
+                except json.JSONDecodeError:
+                    prior_ids = []
+                cover_letter_plan = build_cover_letter_plan(
+                    json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json), profile, prior_ids
+                )
             content = generate_draft(
                 master_resume.source_text,
                 application.job_description,
@@ -1192,6 +1202,7 @@ def generate(
                 job_model_json,
                 evidence_matches_json,
                 selection_plan_json,
+                json.dumps(cover_letter_plan or {}, ensure_ascii=False),
             )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
@@ -1224,6 +1235,8 @@ def generate(
             for item in parsed_matches.get("matches") or []
             for evidence_id in item.get("matched_evidence") or []
         }
+        if payload.document_type == "cover_letter" and cover_letter_plan:
+            allowed_evidence_ids = selected_cover_letter_evidence_ids(cover_letter_plan)
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
@@ -1245,7 +1258,7 @@ def generate(
         application_id=application.id,
         document_type=payload.document_type,
         content=content,
-        structured_content_json=json.dumps(selection_bundle or {}, ensure_ascii=False),
+        structured_content_json=json.dumps(selection_bundle or cover_letter_plan or {}, ensure_ascii=False),
         reviewer_json=json.dumps(selection_review or {}, ensure_ascii=False),
         run_id=run_id,
         trace_json=json.dumps(trace, ensure_ascii=False),

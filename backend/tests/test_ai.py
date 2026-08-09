@@ -141,6 +141,18 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("use 'Yours faithfully' after a generic salutation", prompt)
         self.assertIn("Never use 'RE:'", prompt)
 
+    def test_cover_letter_prompt_uses_traceable_priority_and_narrative_plan(self):
+        plan = '{"schema_version":"1.0","priorities":[{"criteria_id":"C1","requirement":"Stakeholder engagement"}],"selected_evidence":[{"evidence_id":"EV1"}],"narrative_plan":[{"section":"role_and_organisation_alignment","target_share":0.45}]}'
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as provider:
+            ai.generate_draft("Resume", "Job description", "cover_letter", cover_letter_plan_json=plan)
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("COVER LETTER PLAN", prompt)
+        self.assertIn("role_and_organisation_alignment", prompt)
+        self.assertIn("follow the COVER LETTER PLAN as authoritative", prompt)
+
     def test_resume_prompt_requires_standard_sections_and_two_page_limit(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
             ai, "_deepseek_draft", return_value="Draft"
