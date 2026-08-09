@@ -17,7 +17,11 @@ class BatchReviewerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"], [{
-            "type": "fabricated_figure", "description": "The percentage is absent from source evidence.",
+            "type": "fabricated_figure", "severity": "critical",
+            "description": "The percentage is absent from source evidence.",
+            "evidence": "", "location": "",
+            "recommended_action": "Review or regenerate the affected content.",
+            "blocks_release": True,
         }])
         self.assertEqual(validate_review_result(result, ["C1", "C2"]), [])
 
