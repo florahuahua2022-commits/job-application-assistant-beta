@@ -19,6 +19,7 @@
 - 语言变体预留：当前固定为 `Australian English`，通过 `TARGET_ENGLISH_VARIANT` 配置；未来可直接连接地区语言下拉菜单，无需重写 AI 生成逻辑
 - 材料按需生成：普通岗位只生成 CV 与 Cover Letter；只有岗位明确提供 Selection Criteria 时才生成并要求该文件
 - Selection Criteria 质量：要求每项使用真实、自然的 STAR 证据，并提醒结果或影响不清晰的案例
+- Selection Criteria 免费额度：在线新用户默认可生成 2 次；每成功邀请 1 位新用户并由对方认领邀请码，邀请人增加 1 次；只有生成成功才扣除额度
 - 提交记录：点击 **Review & Apply** 后自动进入 Ready；可复制链接到任意浏览器。完成外部申请后，点击一次 **Mark as Applied** 直接保存日期；确认编号只在岗位详情中选填，不再弹窗
 - 申请记录管理：集中统计和筛选 Draft、Ready、Applied；所有保存及已投岗位都可在列表中查看
 - 本地备份与恢复：备份个人资料、Master Resume、岗位记录、状态和生成材料；支持下载及确认后恢复
