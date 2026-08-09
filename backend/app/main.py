@@ -294,11 +294,16 @@ def auto_polish_cover_letter(
     profile: ApplicantProfile | None,
     job_description: str = "",
 ) -> str:
+    def application_heading(match: re.Match) -> str:
+        heading = match.group(1).strip()
+        return heading if heading.lower().startswith("application for ") else f"Application for {heading}"
+
     polished = re.sub(
         r"(?i)\bI am writing to apply\b",
         "Please accept my application",
         content,
     )
+    polished = re.sub(r"(?im)^\s*(?:RE|Subject)\s*:\s*(.+?)\s*$", application_heading, polished)
     generic_salutation = re.search(
         r"(?im)^Dear (?:Hiring Manager|Recruitment Team|Sir or Madam)\s*,?\s*$",
         polished,
@@ -337,6 +342,30 @@ def auto_polish_cover_letter(
         elif availability == "Do not state availability":
             polished = re.sub(r"(?i)I am available to commence[^.]*\.\s*", "", polished)
 
+    return re.sub(r"\n{3,}", "\n\n", polished).strip()
+
+
+def auto_polish_tailored_resume(content: str) -> str:
+    polished = content
+    heading_variants = (
+        (r"professional summary|professional profile|career profile|profile|summary", "Professional Summary"),
+        (r"key skills|core skills|relevant skills|skills|core capabilities|relevant capabilities", "Key Skills"),
+        (r"work experience|professional experience|employment history|career history", "Work Experience"),
+        (r"references|referees", "References"),
+    )
+    for variants, standard in heading_variants:
+        polished = re.sub(
+            rf"(?im)^\s*(?:#{{1,3}}\s*)?(?:\*\*)?(?:{variants})(?:\*\*)?\s*:?[ \t]*$",
+            f"## {standard}",
+            polished,
+        )
+    polished = re.sub(
+        r"(?im)^\s*(?:references?|referees?)\s+(?:are\s+)?available (?:on|upon) request\.?\s*$",
+        "Available upon request",
+        polished,
+    )
+    if not re.search(r"(?im)^## References\s*$", polished):
+        polished = f"{polished.rstrip()}\n\n## References\nAvailable upon request"
     return re.sub(r"\n{3,}", "\n\n", polished).strip()
 
 
@@ -631,6 +660,7 @@ def quality_check(
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     content_to_check = {key: value.content for key, value in latest.items() if key in required}
     cover = content_to_check.get("cover_letter", "")
+    tailored_resume = content_to_check.get("tailored_resume", "")
     role_title = application.position_title.split(" - ", 1)[0].strip()
     if cover and role_title.lower() not in cover.lower():
         issues.append(QualityCheckIssue(
@@ -786,6 +816,28 @@ def quality_check(
                 code="cover_letter_length",
                 message=f"The cover letter has about {word_count} words and may be longer than a concise one-page letter.",
                 document_type="cover_letter",
+            ))
+
+    if tailored_resume:
+        required_resume_headings = ("professional summary", "key skills", "work experience")
+        missing_resume_headings = [
+            heading for heading in required_resume_headings
+            if not re.search(rf"(?im)^\s*#*\s*{re.escape(heading)}\s*$", tailored_resume)
+        ]
+        if missing_resume_headings:
+            issues.append(QualityCheckIssue(
+                severity="warning",
+                code="resume_structure",
+                message=f"The CV is missing standard sections: {', '.join(missing_resume_headings)}.",
+                document_type="tailored_resume",
+            ))
+        resume_word_count = len(tailored_resume.split())
+        if resume_word_count > 900:
+            issues.append(QualityCheckIssue(
+                severity="warning",
+                code="resume_length",
+                message=f"The CV has about {resume_word_count} words and may run beyond two pages.",
+                document_type="tailored_resume",
             ))
 
     selection_response = content_to_check.get("selection_criteria", "")
@@ -945,6 +997,8 @@ def generate(
         )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
+        if payload.document_type == "tailored_resume":
+            content = auto_polish_tailored_resume(content)
         if payload.document_type == "cover_letter":
             content = auto_polish_cover_letter(content, profile, application.job_description)
     except (RuntimeError, ValueError) as error:

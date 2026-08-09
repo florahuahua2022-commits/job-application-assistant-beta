@@ -10,7 +10,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.database import get_session
 from app.auth import get_current_user
-from app.main import app, auto_polish_cover_letter, enforce_profile_contact, organisation_is_named
+from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, enforce_profile_contact, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication
 from app import backup
 
@@ -35,6 +35,25 @@ class SubmissionRecordTests(unittest.TestCase):
             polished,
             "Please accept my application for the Project Administrator position.",
         )
+
+    def test_auto_polish_replaces_email_style_cover_letter_heading(self):
+        polished = auto_polish_cover_letter(
+            "9 August 2026\nRE: Project Administrator\nDear Hiring Manager,",
+            None,
+        )
+
+        self.assertIn("Application for Project Administrator", polished)
+        self.assertNotIn("RE:", polished)
+
+    def test_resume_polish_standardises_sections_and_reference_wording(self):
+        polished = auto_polish_tailored_resume(
+            "Alex Morgan\nProfessional Profile\nExperienced coordinator.\nCore Capabilities\n- Reporting\nEmployment History\nProject Officer\nReferences available on request."
+        )
+
+        self.assertIn("## Professional Summary", polished)
+        self.assertIn("## Key Skills", polished)
+        self.assertIn("## Work Experience", polished)
+        self.assertIn("## References\nAvailable upon request", polished)
 
     def test_online_user_cannot_list_or_update_another_users_application(self):
         owner_id = uuid4()
