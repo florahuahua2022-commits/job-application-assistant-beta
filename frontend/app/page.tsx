@@ -10,7 +10,7 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 type Experience = { id: string; role_title: string; organization: string; responsibility: string; context: string; result: string; no_result_data: boolean };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string };
 type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; status: string; submission_reference?: string; submitted_at?: string };
-type GeneratedDocument = { id: number; document_type: string; content: string; created_at: string };
+type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; created_at: string };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
 type QualityResult = { ready: boolean; issues: QualityIssue[]; checked_documents: string[] };
 type Backup = { filename: string; size: number; created_at: string };
@@ -138,6 +138,20 @@ export default function Home() {
   }, [documents]);
 
   const activeDocument = latestDocuments[activeType];
+  const activeEvidence = useMemo(() => {
+    if (!activeDocument?.used_experiences_json) return [];
+    try {
+      const ids = JSON.parse(activeDocument.used_experiences_json) as string[];
+      return ids.map((id) => {
+        const experience = experiences.find((item) => item.id === id);
+        return experience
+          ? { id, label: [experience.role_title, experience.organization].filter(Boolean).join(" — ") || experience.responsibility }
+          : { id, label: "Source excerpt from the uploaded Master CV" };
+      });
+    } catch {
+      return [];
+    }
+  }, [activeDocument?.used_experiences_json, experiences]);
   useEffect(() => {
     setDraftText(activeDocument?.content || "");
     setDraftSaveState("saved");
@@ -750,7 +764,7 @@ export default function Home() {
               </details>
               {documents.length ? <>
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
-                {activeDocument && <div className="editor"><textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
+                {activeDocument && <div className="editor">{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
               </> : <div className="emptyState"><strong>Your CV and cover letter will appear here.</strong><p>If the saved job includes Selection Criteria, those responses will be added as an optional third document.</p></div>}
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
           </div>
