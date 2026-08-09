@@ -5,6 +5,7 @@ import re
 from openai import OpenAI, OpenAIError
 from .config import settings
 from .evidence_matcher import matched_evidence_pack, normalise_match_result, validate_match_result
+from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 
@@ -82,7 +83,11 @@ def target_english_variant() -> str:
 
 def safety_instruction() -> str:
     variant = target_english_variant()
-    return f"""You are a careful Australian job-application writer. Use natural, professional {variant}. Only use facts found in the supplied Master Resume and Applicant Profile. Never invent employment, qualifications, metrics, systems, security clearances, licences, responsibilities or achievements. Treat every duty, system and requirement in the Job Description as an employer requirement, not as evidence that the applicant has done it. Never imply direct experience when the evidence is only transferable. Never compare the value, scale, complexity or significance of two projects unless both sources provide explicit, verifiable facts supporting that comparison. When a named system is absent from the evidence, do not claim proficiency, comfort, fast learning or quick adaptation; if useful, state the gap plainly and refer only to genuinely analogous tools or processes. Avoid subjective suitability claims and generic AI-style wording such as 'I am confident', 'I am excited', 'I am well placed', 'I am comfortable learning', 'I can adapt quickly', 'I am writing to express my interest', 'proven track record', 'dynamic professional', 'passionate about', 'leverage my skills', or 'well placed'. Let verified examples demonstrate suitability. Prefer specific evidence and plain language. Never calculate or invent a calendar start date from a notice period; use the exact confirmed availability wording supplied in the Applicant Profile. Never use American spelling when the configured English variant uses a different standard spelling."""
+    return f"""You are a careful Australian job-application writer.
+
+{government_writing_rules(variant)}
+
+Only use facts found in the supplied Master Resume, CKB and Applicant Profile. Never compare the value, scale, complexity or significance of two projects unless both sources provide explicit, verifiable facts supporting that comparison. When a named system is absent from the evidence, do not claim proficiency, comfort, fast learning or quick adaptation; if useful, state the gap plainly and refer only to genuinely analogous tools or processes. Avoid subjective suitability claims such as 'I am confident', 'I am excited', 'I am well placed', 'I am comfortable learning', 'I can adapt quickly', 'I am writing to express my interest', 'proven track record', 'dynamic professional', 'passionate about', or 'leverage my skills'. Never calculate or invent a calendar start date from a notice period; use the exact confirmed availability wording supplied in the Applicant Profile. Never use American spelling when the configured English variant uses a different standard spelling."""
 
 
 class AIServiceError(Exception):
@@ -213,13 +218,9 @@ def generate_selection_criteria_bundle(ckb_json: str, selection_plan_json: str) 
         matched = [evidence_by_id[value] for value in plan_item.get("matched_evidence") or [] if value in evidence_by_id]
         base_prompt = f"""You are writing one Selection Criterion response for an Australian government application.
 
-GOVERNMENT WRITING RULES:
-- Use Australian English, active voice and natural professional language.
-- Do not open like an email or letter.
-- Do not copy the criterion wording verbatim.
-- Do not invent or alter employers, roles, dates, actions, achievements, motivations or figures.
-- Every factual claim must be supported by the supplied source_text.
-- If evidence is transferable or weak, frame it conservatively. If evidence is insufficient, do not fabricate a story.
+{government_writing_rules(target_english_variant())}
+
+If evidence is transferable or weak, frame it conservatively. If evidence is insufficient, do not fabricate a story.
 
 CRITERION PLAN:
 {json.dumps(plan_item, ensure_ascii=False)}
@@ -285,6 +286,8 @@ def review_selection_criteria_batch(ckb_json: str, selection_plan_json: str, bun
         for plan_item, response in zip(plan["items"], bundle["responses"])
     ]
     prompt = f"""You are the factual quality Reviewer for a batch of Australian government Selection Criteria responses. Do not rewrite, improve or repair any response. Only verify and flag issues.
+
+{government_writing_rules(target_english_variant())}
 
 For every criterion, check only these issue types:
 - unsupported_claim
