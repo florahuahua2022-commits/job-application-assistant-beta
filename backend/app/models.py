@@ -68,6 +68,7 @@ class JobApplication(SQLModel, table=True):
     job_description: str
     selection_criteria: str | None = None
     job_model_json: str = "{}"
+    evidence_matches_json: str = "{}"
     deadline: date | None = None
     status: ApplicationStatus = ApplicationStatus.draft
     submission_reference: str | None = None

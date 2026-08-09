@@ -7,6 +7,19 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_batch_matcher_uses_all_criteria_and_rejects_unknown_evidence(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'
+        response = '{"matches":[{"criteria_id":"C1","matched_evidence":["EV001","FAKE"],"match_type":"direct","coverage":"strong","reasoning":"Relevant."}],"unused_evidence":[]}'
+        with patch.object(ai, "_openai_draft", return_value=response) as call:
+            result = ai.match_evidence_batch(ckb, job_model)
+
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("C1", call.call_args.args[0])
+        self.assertIn("C2", call.call_args.args[0])
+        self.assertEqual(result["matches"][0]["matched_evidence"], ["EV001"])
+        self.assertEqual(result["matches"][1]["match_type"], "insufficient")
+
     def test_replaces_date_placeholder_with_written_current_date(self):
         expected = f"{ai.date.today().day} {ai.date.today().strftime('%B %Y')}"
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(

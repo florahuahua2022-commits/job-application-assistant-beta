@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft
+from .ai import AIServiceError, build_evidence_pack, generate_draft, match_evidence_batch
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -69,6 +69,13 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(model, ensure_ascii=False)
+
+
+def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
+    for application in session.exec(select_for_user(JobApplication, user_id)).all():
+        application.evidence_matches_json = "{}"
+        session.add(application)
+    session.commit()
 
 
 def _content_words(value: str) -> list[str]:
@@ -524,6 +531,7 @@ def create_resume(
     resume = Resume.model_validate(values)
     resume.user_id = user_id
     session.add(resume); session.commit(); session.refresh(resume)
+    invalidate_evidence_matches(session, user_id)
     return resume
 
 
@@ -557,6 +565,7 @@ async def upload_resume(
             ckb_json=ckb_json,
         )
     session.add(resume); session.commit(); session.refresh(resume)
+    invalidate_evidence_matches(session, user_id)
     return resume
 
 
@@ -600,6 +609,7 @@ def update_resume(
         setattr(resume, key, value)
     resume.updated_at = datetime.utcnow()
     session.add(resume); session.commit(); session.refresh(resume)
+    invalidate_evidence_matches(session, user_id)
     return resume
 
 
@@ -678,6 +688,7 @@ def update_application(
         application.job_model_json = serialise_job_model(
             application.job_description, application.selection_criteria, application.position_title, application.company
         )
+        application.evidence_matches_json = "{}"
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()
@@ -1120,7 +1131,13 @@ def generate(
         application.job_model_json = job_model_json
         session.add(application)
         session.commit()
+    evidence_matches_json = application.evidence_matches_json or "{}"
     try:
+        if evidence_matches_json.strip() in {"", "{}"}:
+            evidence_matches_json = json.dumps(match_evidence_batch(ckb_source_json, job_model_json), ensure_ascii=False)
+            application.evidence_matches_json = evidence_matches_json
+            session.add(application)
+            session.commit()
         content = generate_draft(
             master_resume.source_text,
             application.job_description,
@@ -1133,6 +1150,7 @@ def generate(
             used_experiences,
             used_closing_styles,
             job_model_json,
+            evidence_matches_json,
         )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
@@ -1155,13 +1173,11 @@ def generate(
             except (json.JSONDecodeError, AttributeError):
                 pass
             content = content[:match.start()].rstrip()
+        parsed_matches = json.loads(evidence_matches_json or "{}")
         allowed_evidence_ids = {
-            item["evidence_id"] for item in build_evidence_pack(
-                master_resume.source_text,
-                master_resume.experiences_json or "[]",
-                application.job_description,
-                application.selection_criteria,
-            )
+            str(evidence_id)
+            for item in parsed_matches.get("matches") or []
+            for evidence_id in item.get("matched_evidence") or []
         }
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:

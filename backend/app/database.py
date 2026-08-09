@@ -38,6 +38,8 @@ def create_db_and_tables() -> None:
                 application_columns = {column["name"] for column in inspector.get_columns("jobapplication")}
                 if "job_model_json" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN job_model_json TEXT NOT NULL DEFAULT '{}'"))
+                if "evidence_matches_json" not in application_columns:
+                    connection.execute(text("ALTER TABLE jobapplication ADD COLUMN evidence_matches_json TEXT NOT NULL DEFAULT '{}'"))
     if engine.dialect.name == "sqlite":
         existing = {column["name"] for column in inspector.get_columns("jobapplication")}
         with engine.begin() as connection:
@@ -48,6 +50,8 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN submitted_at DATETIME"))
             if "job_model_json" not in existing:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN job_model_json TEXT DEFAULT '{}'"))
+            if "evidence_matches_json" not in existing:
+                connection.execute(text("ALTER TABLE jobapplication ADD COLUMN evidence_matches_json TEXT DEFAULT '{}'"))
             resume_columns = {column["name"] for column in inspector.get_columns("resume")}
             if "experiences_json" not in resume_columns:
                 connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT DEFAULT '[]'"))
