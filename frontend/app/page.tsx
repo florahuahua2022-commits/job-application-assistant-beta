@@ -20,7 +20,7 @@ type ResumeContentCheckItem = { field: string; label: string; value: string; sta
 type ResumeContentCheckResult = { ready: boolean; matched_count: number; review_count: number; missing_count: number; items: ResumeContentCheckItem[] };
 type Backup = { filename: string; size: number; created_at: string };
 type Referee = { organisation: string; name: string; position_title: string; phone: string; relationship: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string };
-type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; referees: Referee[]; updated_at: string };
+type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; target_direction?: string; motivation?: string; writing_tone: string; preferences_notes?: string; referees: Referee[]; updated_at: string };
 type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string };
 type ContactGuess = { full_name: string; phone: string; email: string };
 type SelectionCriteriaAccess = { unlimited: boolean; included_credits: number; referral_credits: number; used_credits: number; remaining_credits: number | null; referral_code: string | null; referral_claimed: boolean };
@@ -189,6 +189,7 @@ export default function Home() {
       title: value("title"), first_name: nameParts[0] || "", last_name: nameParts.slice(1).join(" ") || nameParts[0] || "", preferred_name: value("preferred_name"),
       phone: value("phone"), email: value("email"), postal_address: profile?.postal_address || "", suburb: profile?.suburb || "", state: profile?.state || "WA",
       postcode: profile?.postcode || "", country: profile?.country || "Australia", work_rights: value("work_rights") || profile?.work_rights || "not_specified", availability_notice: value("availability_notice") || "not_specified",
+      target_direction: value("target_direction"), motivation: value("motivation"), writing_tone: value("writing_tone") || "natural_professional", preferences_notes: value("preferences_notes"),
       referees,
     };
     const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -216,6 +217,7 @@ export default function Home() {
       title: profile?.title || "", first_name: nameParts[0], last_name: nameParts.slice(1).join(" ") || nameParts[0], preferred_name: profile?.preferred_name || "",
       phone: guess.phone, email: guess.email, postal_address: profile?.postal_address || "", suburb: profile?.suburb || "", state: profile?.state || "WA", postcode: profile?.postcode || "", country: profile?.country || "Australia",
       work_rights: profile?.work_rights || "not_specified", availability_notice: profile?.availability_notice || "not_specified", referees: profile?.referees || [],
+      target_direction: profile?.target_direction || "", motivation: profile?.motivation || "", writing_tone: profile?.writing_tone || "natural_professional", preferences_notes: profile?.preferences_notes || "",
     };
     const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (!response.ok) return false;
@@ -755,6 +757,10 @@ export default function Home() {
               <label>Email<input name="email" type="email" defaultValue={profile?.email || contactGuess.email} required /></label>
               <label>Work rights <em>optional</em><select name="work_rights" defaultValue={profile?.work_rights || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="citizen">Australian citizen</option><option value="permanent_resident">Permanent resident</option><option value="visa">Visa holder</option></select></label>
               <label>Availability <em>optional</em><select name="availability_notice" defaultValue={profile?.availability_notice || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="two_weeks">Available after two weeks</option><option value="one_month">Available after one month</option><option value="negotiable">Start date negotiable</option></select></label>
+              <label className="full">Target direction <em>optional</em><input name="target_direction" defaultValue={profile?.target_direction || ""} placeholder="e.g. Government project and policy roles" /></label>
+              <label className="full">Why this direction? <em>optional</em><textarea name="motivation" defaultValue={profile?.motivation || ""} placeholder="Your own motivation only - this is kept separate from CV evidence." /></label>
+              <label>Writing tone <em>optional</em><select name="writing_tone" defaultValue={profile?.writing_tone || "natural_professional"}><option value="natural_professional">Natural and professional</option><option value="concise_direct">Concise and direct</option><option value="warm_formal">Warm and formal</option></select></label>
+              <label className="full">Other preferences <em>optional</em><textarea name="preferences_notes" defaultValue={profile?.preferences_notes || ""} placeholder="Document preferences or constraints; do not add employment claims here." /></label>
               <details className="optionalProfile full">
                 <summary>Optional referees (maximum two)</summary>
                 {[0, 1].map((index) => {
