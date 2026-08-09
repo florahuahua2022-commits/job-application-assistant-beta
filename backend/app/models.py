@@ -37,6 +37,10 @@ class ApplicantProfile(SQLModel, table=True):
     country: str = "Australia"
     work_rights: str = "permanent_resident"
     availability_notice: str = "not_specified"
+    target_direction: str | None = None
+    motivation: str | None = None
+    writing_tone: str = "natural_professional"
+    preferences_notes: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -154,6 +158,10 @@ class ApplicantProfilePayload(SQLModel):
     country: str = "Australia"
     work_rights: str = "permanent_resident"
     availability_notice: str = "not_specified"
+    target_direction: str | None = None
+    motivation: str | None = None
+    writing_tone: str = "natural_professional"
+    preferences_notes: str | None = None
     referees: list[RefereePayload] = Field(default_factory=list)
 
 

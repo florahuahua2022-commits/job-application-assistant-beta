@@ -48,6 +48,16 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_plan_json TEXT NOT NULL DEFAULT '{}'"))
                 if "selection_confirmations_json" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_confirmations_json TEXT NOT NULL DEFAULT '[]'"))
+            if "applicantprofile" in table_names:
+                profile_columns = {column["name"] for column in inspector.get_columns("applicantprofile")}
+                if "target_direction" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN target_direction TEXT"))
+                if "motivation" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN motivation TEXT"))
+                if "writing_tone" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR NOT NULL DEFAULT 'natural_professional'"))
+                if "preferences_notes" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
     if engine.dialect.name == "sqlite":
         existing = {column["name"] for column in inspector.get_columns("jobapplication")}
         with engine.begin() as connection:
@@ -87,6 +97,14 @@ def create_db_and_tables() -> None:
                 profile_columns = {column["name"] for column in inspector.get_columns("applicantprofile")}
                 if "availability_notice" not in profile_columns:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN availability_notice VARCHAR DEFAULT 'not_specified'"))
+                if "target_direction" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN target_direction TEXT"))
+                if "motivation" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN motivation TEXT"))
+                if "writing_tone" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR DEFAULT 'natural_professional'"))
+                if "preferences_notes" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
 
 
 def get_session():

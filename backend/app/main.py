@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_selection_criteria_batch
+from .applicant_profile import applicant_profile_prompt
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -1138,16 +1139,7 @@ def generate(
         if prior_selection:
             used_experiences = prior_selection.used_experiences_json or "[]"
             used_closing_styles = prior_selection.closing_styles_json or "[]"
-    profile_text = None
-    if profile:
-        profile_text = "\n".join(filter(None, [
-            f"Name: {' '.join(filter(None, [profile.title, profile.first_name, profile.last_name]))}",
-            f"Phone: {profile.phone}",
-            f"Email: {profile.email}",
-            f"Address: {', '.join(filter(None, [profile.postal_address, profile.suburb, profile.state, profile.postcode, profile.country]))}",
-            f"Work rights: {profile.work_rights.replace('_', ' ')}",
-            f"Confirmed availability wording: {confirmed_availability_wording(profile.availability_notice)}",
-        ]))
+    profile_text = applicant_profile_prompt(profile) if profile else None
     ckb_source_json = master_resume.ckb_json or "[]"
     if ckb_source_json.strip() in {"", "[]"}:
         ckb_source_json = serialise_ckb(master_resume.source_text, master_resume.experiences_json or "[]")
