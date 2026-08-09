@@ -19,6 +19,14 @@ def evidence_status(match_type: str, coverage: str) -> str:
     return "weak"
 
 
+def criteria_requiring_confirmation(plan: dict[str, Any]) -> set[str]:
+    return {
+        str(item.get("criteria_id"))
+        for item in plan.get("items") or []
+        if item.get("evidence_status") in {"transferable", "weak"}
+    }
+
+
 def allocate_word_limits(job_model: dict[str, Any], default_target: int = 350) -> dict[str, int]:
     criteria = list(job_model.get("criteria") or [])
     if not criteria:
