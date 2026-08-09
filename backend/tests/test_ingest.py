@@ -39,6 +39,37 @@ class IngestTests(unittest.TestCase):
         self.assertIn("Coordinate projects", result["job_description"])
         self.assertEqual(result["source"], "structured_job_posting")
 
+    def test_reads_nested_structured_job_posting(self):
+        html = """
+        <script type="application/ld+json">
+        {"page":{"content":{"@type":["Thing","JobPosting"],"title":"Policy Officer",
+         "hiringOrganization":{"name":"Example Council"},
+         "description":"<p>Prepare policy advice and stakeholder briefings.</p>"}}}
+        </script>
+        """
+
+        result = parse_job_page(html, "https://example.com/job/2")
+
+        self.assertEqual(result["position_title"], "Policy Officer")
+        self.assertEqual(result["company"], "Example Council")
+
+    def test_reads_visible_job_page_when_structured_data_is_missing(self):
+        html = """
+        <html><head><title>Project Coordinator | SEEK</title></head><body>
+        <nav>Sign in</nav><main><h1>Project Coordinator</h1><p>Bright Energy Pty Ltd</p>
+        <h2>About the role</h2><p>Coordinate project schedules, procurement, documentation,
+        reporting and stakeholder meetings for a growing renewable energy delivery team.</p>
+        <h2>What you'll bring</h2><ul><li>Three years of project coordination experience.</li>
+        <li>Strong written communication and reporting skills.</li></ul></main></body></html>
+        """
+
+        result = parse_job_page(html, "https://example.com/job/3")
+
+        self.assertEqual(result["source"], "page_body")
+        self.assertEqual(result["position_title"], "Project Coordinator")
+        self.assertEqual(result["company"], "Bright Energy Pty Ltd")
+        self.assertIn("project schedules", result["job_description"])
+
     def test_separates_seek_style_full_job_ad(self):
         raw_text = """
         **Project Support Officer / Junior Project Manager**
@@ -111,6 +142,33 @@ class IngestTests(unittest.TestCase):
 
         self.assertEqual(result["company"], "Metrowest")
         self.assertNotEqual(result["company"], "What you'll be doing")
+
+    def test_prefers_labelled_fields_and_extracts_modern_criteria_heading(self):
+        raw_text = """
+        Job details
+        Location
+        Perth WA
+        Classification
+        Administration & Office Support
+        Job title: Senior Project Administrator
+        Organisation: Horizon Infrastructure
+        About the role
+        Support complex infrastructure projects through document control, scheduling, reporting,
+        procurement coordination and clear communication with internal and external stakeholders.
+        What you will bring
+        At least three years of project administration experience.
+        Advanced document control and Excel skills.
+        Strong written communication and attention to detail.
+        How to apply
+        Submit your resume and cover letter through the application portal.
+        """
+
+        result = parse_job_ad_text(raw_text)
+
+        self.assertEqual(result["position_title"], "Senior Project Administrator")
+        self.assertEqual(result["company"], "Horizon Infrastructure")
+        self.assertIn("document control", result["selection_criteria"])
+        self.assertNotIn("Submit your resume", result["selection_criteria"])
 
 
 if __name__ == "__main__":

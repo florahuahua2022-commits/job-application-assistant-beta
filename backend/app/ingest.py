@@ -45,6 +45,10 @@ class _JobPageParser(HTMLParser):
         self.json_ld: list[str] = []
         self._in_json_ld = False
         self._json_parts: list[str] = []
+        self._hidden_depth = 0
+        self._in_title = False
+        self.title_parts: list[str] = []
+        self.body_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {key.lower(): value or "" for key, value in attrs}
@@ -55,15 +59,32 @@ class _JobPageParser(HTMLParser):
         if tag.lower() == "script" and "ld+json" in values.get("type", "").lower():
             self._in_json_ld = True
             self._json_parts = []
+        elif tag.lower() in {"script", "style", "noscript", "svg"}:
+            self._hidden_depth += 1
+        if tag.lower() == "title":
+            self._in_title = True
+        if tag.lower() in {"p", "li", "div", "section", "article", "h1", "h2", "h3", "br"}:
+            self.body_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._in_json_ld:
             self._json_parts.append(data)
+        elif not self._hidden_depth:
+            if self._in_title:
+                self.title_parts.append(data)
+            else:
+                self.body_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "script" and self._in_json_ld:
             self.json_ld.append("".join(self._json_parts))
             self._in_json_ld = False
+        elif tag.lower() in {"script", "style", "noscript", "svg"} and self._hidden_depth:
+            self._hidden_depth -= 1
+        if tag.lower() == "title":
+            self._in_title = False
+        if tag.lower() in {"p", "li", "div", "section", "article", "h1", "h2", "h3"}:
+            self.body_parts.append("\n")
 
 
 def _clean_html(value: str) -> str:
@@ -80,10 +101,13 @@ def _job_postings(value):
         for item in value:
             yield from _job_postings(item)
     elif isinstance(value, dict):
-        if value.get("@type") == "JobPosting" or "JobPosting" in value.get("@type", []):
+        item_type = value.get("@type", [])
+        item_types = [item_type] if isinstance(item_type, str) else item_type
+        if "JobPosting" in item_types:
             yield value
-        if "@graph" in value:
-            yield from _job_postings(value["@graph"])
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                yield from _job_postings(child)
 
 
 def parse_job_page(html: str, url: str) -> dict[str, str]:
@@ -105,9 +129,24 @@ def parse_job_page(html: str, url: str) -> dict[str, str]:
                 "job_url": url,
                 "source": "structured_job_posting",
             }
-    title = parser.meta.get("og:title", "")
+
+    page_body = _clean_html("".join(parser.body_parts))
+    title = parser.meta.get("og:title") or " ".join(parser.title_parts)
     description = parser.meta.get("og:description") or parser.meta.get("description", "")
-    title = re.sub(r"\s*[|–-]\s*(SEEK|Indeed|LinkedIn).*", "", title, flags=re.I).strip()
+    title = re.sub(r"\s*[|\-–—]\s*(SEEK|Indeed|LinkedIn|Jora|Glassdoor).*", "", title, flags=re.I).strip()
+    if len(page_body) >= 120:
+        try:
+            parsed_body = parse_job_ad_text(page_body)
+        except ValueError:
+            parsed_body = {}
+        if parsed_body:
+            return {
+                "company": parsed_body.get("company", ""),
+                "position_title": parsed_body.get("position_title") or _clean_html(title),
+                "job_description": parsed_body.get("job_description") or _clean_html(description),
+                "job_url": url,
+                "source": "page_body",
+            }
     return {
         "company": "",
         "position_title": _clean_html(title),
@@ -131,16 +170,32 @@ def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None
     lines = [_plain_ad_line(line) for line in text.splitlines()]
     lines = [line for line in lines if line]
     noise = re.compile(
-        r"(?i)^(view all jobs|share or report ad|apply(?: now)?$|save$|posted\b|high application volume|how you match|show all|salary |full time$|part time$|employer questions?)"
+        r"(?i)^(view all jobs|share or report ad|apply(?: now)?$|save$|posted\b|high application volume|how you match|show all|"
+        r"sign in|create (?:a )?job alert|job details$|classification$|subclassification$|location$|work type$|"
+        r"salary(?:\s|$)|full[ -]?time$|part[ -]?time$|contract/temp$|employer questions?)"
     )
     candidates = [line for line in lines[:30] if not noise.search(line) and not line.lower().startswith("http")]
-    position_title = candidates[0][:160] if candidates else ""
-    company = ""
+    labelled_title = re.search(r"(?im)^\s*(?:job title|position title|position|role)\s*:\s*(.+?)\s*$", text)
+    labelled_company = re.search(r"(?im)^\s*(?:company|organisation|organization|employer)\s*:\s*(.+?)\s*$", text)
+    position_title = _plain_ad_line(labelled_title.group(1))[:160] if labelled_title else ""
+    company = _plain_ad_line(labelled_company.group(1))[:160] if labelled_company else ""
+    excluded_heading = re.compile(
+        r"(?i)^(about (?:the )?(?:role|job|company|organisation)|job summary|job description|key responsibilities|"
+        r"responsibilities|requirements|selection criteria|what you(?:'|’)?ll|what we(?:'|’)?re|the position|how to apply)$"
+    )
+    if not position_title:
+        for candidate in candidates:
+            if excluded_heading.search(candidate) or ":" in candidate[:30]:
+                continue
+            if re.search(r"(?i),\s*(?:perth\s+)?WA(?:\s|\(|$)", candidate):
+                continue
+            position_title = candidate[:160]
+            break
     company_patterns = (
         r"(?im)^\s*([A-Z][A-Za-z0-9&.'’ -]{2,100}?)\s+(?:is|are)\s+(?:growing|seeking|looking|hiring)\b",
         r"(?im)^\s*why\s+join\s+([A-Z][A-Za-z0-9&.'’ -]{2,100}?)\s*$",
     )
-    for pattern in company_patterns:
+    for pattern in company_patterns if not company else ():
         match = re.search(pattern, text)
         if match:
             company = _plain_ad_line(match.group(1))
@@ -162,7 +217,9 @@ def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None
 
     criteria = ""
     criteria_match = re.search(
-        r"(?is)(?:key selection criteria|selection criteria|essential criteria)\s*[:\n]+(.+?)(?=\n\s*(?:what we offer|how to apply|about us|employer questions?)\b|\Z)",
+        r"(?is)(?:key selection criteria|selection criteria|essential criteria|essential requirements|role requirements|"
+        r"what you(?:(?:'|’)?ll| will) bring|what we(?:(?:'|’)?re| are) looking for|about you)\s*[:\n]+(.+?)"
+        r"(?=\n\s*(?:what we offer|what you(?:'|’)?ll get|benefits|how to apply|about us|about the company|employer questions?)\b|\Z)",
         text,
     )
     if criteria_match:
@@ -186,7 +243,7 @@ def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None
     return {
         "company": company,
         "position_title": position_title,
-        "job_description": text,
+        "job_description": "\n".join(lines),
         "selection_criteria": criteria,
         "warnings": list(dict.fromkeys(warnings)),
     }
