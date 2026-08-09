@@ -2,6 +2,7 @@ from datetime import datetime
 from io import BytesIO
 import json
 import re
+from time import perf_counter
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -1151,6 +1152,7 @@ def generate(
         raise HTTPException(400, "Unsupported document type.")
     if not feature["enabled"]:
         raise HTTPException(503, f"{payload.document_type.replace('_', ' ').title()} generation is temporarily unavailable. Existing documents remain available.")
+    generation_started = perf_counter()
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
@@ -1307,6 +1309,9 @@ def generate(
     run_id = str(uuid4())
     provider = settings.ai_provider.strip().lower()
     model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
+    review_result = selection_review or cover_letter_review or resume_review or {}
+    retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
+    retry_count += int(review_result.get("telemetry", {}).get("reviewer_retries", 0))
     trace = build_generation_trace(
         run_id=run_id,
         document_type=payload.document_type,
@@ -1315,7 +1320,9 @@ def generate(
         provider=provider,
         model=model_name,
         evidence_ids=[str(value) for value in metadata["used_experiences"]],
-        reviewer=selection_review or cover_letter_review or resume_review,
+        reviewer=review_result,
+        latency_ms=round((perf_counter() - generation_started) * 1000),
+        retry_count=retry_count,
     )
     document = GeneratedDocument(
         user_id=user_id,

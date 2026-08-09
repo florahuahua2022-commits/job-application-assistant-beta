@@ -47,6 +47,8 @@ def build_generation_trace(
     model: str,
     evidence_ids: list[str],
     reviewer: dict[str, Any] | None = None,
+    latency_ms: int = 0,
+    retry_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "schema_version": GENERATION_TRACE_SCHEMA_VERSION,
@@ -64,6 +66,12 @@ def build_generation_trace(
             "applicant_profile_schema": APPLICANT_PROFILE_SCHEMA_VERSION,
         },
         "model": {"provider": provider, "name": model},
+        "runtime": {
+            "status": "completed",
+            "latency_ms": max(int(latency_ms), 0),
+            "observed_retry_count": max(int(retry_count), 0),
+            "retry_count_scope": "structured_generator_and_reviewer",
+        },
         "trace": {"evidence_ids": sorted(set(evidence_ids))},
         "review": {
             "status": str((reviewer or {}).get("status") or "not_run"),

@@ -19,6 +19,8 @@ class GenerationTraceTests(unittest.TestCase):
                 {"criteria_id": "C1", "issues": [{"type": "fabricated_figure"}]},
                 {"criteria_id": "C2", "issues": []},
             ]},
+            latency_ms=1250,
+            retry_count=2,
         )
 
         self.assertEqual(GENERATION_TRACE_SCHEMA_VERSION, "1.0")
@@ -28,6 +30,9 @@ class GenerationTraceTests(unittest.TestCase):
         self.assertEqual(trace["review"], {"status": "fail", "finding_count": 1})
         self.assertEqual(trace["versions"]["government_writing_rules"], "1.0")
         self.assertEqual(trace["versions"]["applicant_profile_schema"], "1.0")
+        self.assertEqual(trace["runtime"]["status"], "completed")
+        self.assertEqual(trace["runtime"]["latency_ms"], 1250)
+        self.assertEqual(trace["runtime"]["observed_retry_count"], 2)
 
     def test_non_reviewed_document_is_explicit(self):
         trace = build_generation_trace(
