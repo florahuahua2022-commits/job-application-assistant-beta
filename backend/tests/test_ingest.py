@@ -3,7 +3,7 @@ from io import BytesIO
 
 from docx import Document
 
-from app.ingest import extract_resume_text, parse_job_ad_text, parse_job_page
+from app.ingest import extract_resume_experiences, extract_resume_text, parse_job_ad_text, parse_job_page
 
 
 class IngestTests(unittest.TestCase):
@@ -22,6 +22,38 @@ class IngestTests(unittest.TestCase):
     def test_rejects_unsupported_resume_file(self):
         with self.assertRaises(ValueError):
             extract_resume_text("resume.png", b"not a supported resume document" * 3)
+
+    def test_extracts_structured_experiences_from_resume(self):
+        source_text = """
+        Alex Morgan
+        alex@example.com | 0412 345 678
+        Professional Experience
+        Project Coordinator
+        Bright Energy Pty Ltd
+        January 2022 – Present
+        Coordinated project schedules, procurement, document control and monthly reporting.
+        Prepared stakeholder briefings and maintained accurate project registers.
+        Administration Officer | Example Council
+        March 2019 - December 2021
+        Supported a multidisciplinary team with correspondence, meetings and records management.
+        Education
+        Bachelor of Business
+        """
+
+        result = extract_resume_experiences(source_text)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["role_title"], "Project Coordinator")
+        self.assertEqual(result[0]["organization"], "Bright Energy Pty Ltd")
+        self.assertIn("project schedules", result[0]["responsibility"])
+        self.assertEqual(result[1]["role_title"], "Administration Officer")
+        self.assertEqual(result[1]["organization"], "Example Council")
+
+    def test_resume_experience_parser_fails_safely_without_dated_roles(self):
+        self.assertEqual(
+            extract_resume_experiences("Alex Morgan\nProfessional Summary\nExperienced administrator and coordinator."),
+            [],
+        )
 
     def test_reads_structured_job_posting(self):
         html = """
