@@ -80,6 +80,7 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(call.call_count, 3)
         self.assertEqual(len(result["responses"]), 2)
         self.assertEqual(result["responses"][0]["evidence_used"], ["EV001"])
+        self.assertEqual(result["telemetry"]["generator_retries"], 1)
 
     def test_batch_matcher_uses_all_criteria_and_rejects_unknown_evidence(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'

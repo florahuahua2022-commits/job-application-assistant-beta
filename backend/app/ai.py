@@ -216,6 +216,7 @@ def generate_selection_criteria_bundle(ckb_json: str, selection_plan_json: str) 
     evidence_by_id = {str(item.get("evidence_id")): item for item in ckb if isinstance(item, dict)}
     responses: list[dict] = []
     used_ids: list[str] = []
+    generator_retries = 0
     for plan_item in plan["items"]:
         matched = [evidence_by_id[value] for value in plan_item.get("matched_evidence") or [] if value in evidence_by_id]
         base_prompt = f"""You are writing one Selection Criterion response for an Australian government application.
@@ -256,6 +257,7 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
         if not validation or not validation.get("valid"):
             issue = (validation or {}).get("issues", [{}])[0].get("message", "Unknown validation error")
             raise AIServiceError(f"Criterion {plan_item.get('criteria_id')} failed validation: {issue}")
+        generator_retries += attempt
         response["word_count"] = validation["actual_word_count"]
         response["validation"] = validation
         responses.append(response)
@@ -271,6 +273,7 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
         "responses": responses,
         "used_experiences": used_ids,
         "actual_total_word_count": sum(item["word_count"] for item in responses),
+        "telemetry": {"generator_retries": generator_retries, "criterion_count": len(responses)},
     }
 
 
@@ -315,12 +318,13 @@ Return JSON only:
 
 Return every criteria_id exactly once. Use pass with an empty issues array when no material issue exists."""
     last_error = ""
-    for _attempt in range(2):
+    for attempt in range(2):
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             result = normalise_review_result(raw, criteria_ids)
             errors = validate_review_result(result, criteria_ids)
             if not errors:
+                result["telemetry"] = {"reviewer_retries": attempt}
                 return result
             last_error = errors[0]
         except (OpenAIError, ValueError) as error:
@@ -384,10 +388,12 @@ Return JSON only:
 
 Use pass with an empty issues array when there is no material issue."""
     last_error = ""
-    for _attempt in range(2):
+    for attempt in range(2):
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
-            return normalise_document_review(raw, "cover_letter")
+            result = normalise_document_review(raw, "cover_letter")
+            result["telemetry"] = {"reviewer_retries": attempt}
+            return result
         except (OpenAIError, ValueError) as error:
             last_error = str(error)
     raise AIServiceError(f"Cover Letter Reviewer failed validation: {last_error or 'unknown error'}")
@@ -443,10 +449,12 @@ Return JSON only:
 
 Use pass with an empty issues array when there is no material issue."""
     last_error = ""
-    for _attempt in range(2):
+    for attempt in range(2):
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
-            return normalise_document_review(raw, "tailored_resume")
+            result = normalise_document_review(raw, "tailored_resume")
+            result["telemetry"] = {"reviewer_retries": attempt}
+            return result
         except (OpenAIError, ValueError) as error:
             last_error = str(error)
     raise AIServiceError(f"Resume Reviewer failed validation: {last_error or 'unknown error'}")
