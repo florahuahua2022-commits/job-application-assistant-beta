@@ -642,6 +642,12 @@ export default function Home() {
     </header>
     <p className="notice">{notice}</p>
 
+    <section className="workspaceOverview" aria-label="Application overview">
+      <div className="overviewStats"><div><strong>{applications.length}</strong><small>All applications</small></div><div><strong>{statusCounts.ready_to_apply || 0}</strong><small>Ready</small></div><div><strong>{statusCounts.applied || 0}</strong><small>Applied</small></div></div>
+      <div className="overviewRecent"><strong>Recent applications</strong>{applications.length ? applications.slice(0, 3).map((application) => <button type="button" key={application.id} onClick={() => { openApplication(application.id); document.getElementById("application-workspace")?.scrollIntoView({ behavior: "smooth" }); }}><span>{application.position_title}</span><small>{application.company} · {statusLabels[application.status] || application.status}</small></button>) : <small>No saved jobs yet.</small>}</div>
+      <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><button type="button" className="secondary" onClick={() => document.getElementById("application-tracker")?.scrollIntoView({ behavior: "smooth" })}>Open Tracker</button></div>
+    </section>
+
     {selectionAccess && !selectionAccess.unlimited && <section className="selectionAccessCard">
       <div>
         <strong>Selection Criteria access</strong>
@@ -739,7 +745,7 @@ export default function Home() {
         </form>
       </details>
 
-      <section className="panel">
+      <section className="panel" id="add-job">
         <div className="stepHeading"><span>2</span><div><strong>Add a job</strong><small>Paste the JD and application link</small></div></div>
         <form onSubmit={createApplication} className="formBody compactForm">
           <div className="full fullAdBox">
@@ -757,7 +763,7 @@ export default function Home() {
         </form>
       </section>
 
-      <section className="panel">
+      <section className="panel" id="application-tracker">
         <div className="stepHeading"><span>3</span><div><strong>Application Tracker</strong><small>Review and update every application in one place</small></div></div>
         <div className="statusFilters">
           <button type="button" className={statusFilter === "all" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("all")}><strong>{applications.length}</strong><small>All jobs</small></button>
@@ -771,7 +777,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="panel">
+      <section className="panel" id="application-workspace">
         <div className="stepHeading"><span>4</span><div><strong>Generate, review and apply</strong><small>Creates your tailored CV and Cover Letter; Selection Criteria is optional</small></div></div>
         <div className="applicationLayout">
           <aside className="jobList">
