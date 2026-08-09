@@ -84,6 +84,7 @@ class GeneratedDocument(SQLModel, table=True):
     application_id: int = Field(foreign_key="jobapplication.id")
     document_type: str
     content: str
+    structured_content_json: str = "{}"
     used_experiences_json: str = "[]"
     closing_styles_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)

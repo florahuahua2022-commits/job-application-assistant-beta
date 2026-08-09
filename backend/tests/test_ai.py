@@ -7,6 +7,36 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_generates_and_validates_each_selection_criterion_separately(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"],"match_type":"direct","coverage":"strong","evidence_status":"strong"},{"criteria_id":"C2","criteria_text":"Qualification","allocated_word_limit":100,"matched_evidence":["EV002"],"match_type":"direct","coverage":"strong","evidence_status":"strong"}]}'
+        outputs = [
+            '{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"Monthly cycle","task":"Prepare reports","action":"Compiled records","result":"Reports submitted"},"final_response":"I prepared accurate monthly reports from verified project records.","word_count":999}',
+            '{"criteria_id":"C2","evidence_used":["EV002"],"star":{"situation":"Study","task":"Complete degree","action":"Completed coursework","result":"Degree awarded"},"final_response":"I completed a Bachelor of Business qualification.","word_count":999}',
+        ]
+        with patch.object(ai, "_openai_draft", side_effect=outputs) as call:
+            result = ai.generate_selection_criteria_bundle(ckb, plan)
+
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(len(result["responses"]), 2)
+        self.assertEqual(result["used_experiences"], ["EV001", "EV002"])
+        self.assertIn("## Reporting", result["content"])
+        self.assertNotEqual(result["responses"][0]["word_count"], 999)
+        self.assertTrue(result["responses"][0]["validation"]["valid"])
+
+    def test_retries_only_the_criterion_that_fails_hard_validation(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."},{"evidence_id":"EV002","source_text":"Completed degree."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"]},{"criteria_id":"C2","criteria_text":"Qualification","allocated_word_limit":100,"matched_evidence":["EV002"]}]}'
+        invalid = '{"criteria_id":"C1","evidence_used":["FAKE"],"star":{"situation":"S","task":"T","action":"A","result":"R"},"final_response":"Reporting example."}'
+        valid_c1 = '{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"S","task":"T","action":"A","result":"R"},"final_response":"I prepared reports."}'
+        valid_c2 = '{"criteria_id":"C2","evidence_used":["EV002"],"star":{"situation":"S","task":"T","action":"A","result":"R"},"final_response":"I completed the degree."}'
+        with patch.object(ai, "_openai_draft", side_effect=[invalid, valid_c1, valid_c2]) as call:
+            result = ai.generate_selection_criteria_bundle(ckb, plan)
+
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(len(result["responses"]), 2)
+        self.assertEqual(result["responses"][0]["evidence_used"], ["EV001"])
+
     def test_batch_matcher_uses_all_criteria_and_rejects_unknown_evidence(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'
