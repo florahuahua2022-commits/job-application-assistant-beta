@@ -23,6 +23,7 @@ from .ingest import extract_resume_experiences, extract_resume_text, import_job_
 from .job_model import build_job_model, validate_job_model
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
+from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
@@ -1178,6 +1179,7 @@ def generate(
         selection_review = None
         cover_letter_plan = None
         cover_letter_review = None
+        resume_plan = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
             selection_review = review_selection_criteria_batch(ckb_source_json, selection_plan_json, selection_bundle)
@@ -1190,6 +1192,10 @@ def generate(
                     prior_ids = []
                 cover_letter_plan = build_cover_letter_plan(
                     json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json), profile, prior_ids
+                )
+            if payload.document_type == "tailored_resume":
+                resume_plan = build_resume_curation_plan(
+                    json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json)
                 )
             content = generate_draft(
                 master_resume.source_text,
@@ -1206,6 +1212,7 @@ def generate(
                 evidence_matches_json,
                 selection_plan_json,
                 json.dumps(cover_letter_plan or {}, ensure_ascii=False),
+                json.dumps(resume_plan or {}, ensure_ascii=False),
             )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
@@ -1221,7 +1228,7 @@ def generate(
         "used_experiences": selection_bundle["used_experiences"] if selection_bundle else [],
         "closing_styles": [],
     }
-    if payload.document_type == "cover_letter":
+    if payload.document_type in {"cover_letter", "tailored_resume"}:
         match = re.search(r"<!--\s*GENERATION_META\s+(\{.*?\})\s*-->", content, re.DOTALL)
         if match:
             try:
@@ -1231,7 +1238,7 @@ def generate(
             except (json.JSONDecodeError, AttributeError):
                 pass
             content = content[:match.start()].rstrip()
-    if payload.document_type in {"selection_criteria", "cover_letter"}:
+    if payload.document_type in {"selection_criteria", "cover_letter", "tailored_resume"}:
         parsed_matches = json.loads(evidence_matches_json or "{}")
         allowed_evidence_ids = {
             str(evidence_id)
@@ -1240,6 +1247,8 @@ def generate(
         }
         if payload.document_type == "cover_letter" and cover_letter_plan:
             allowed_evidence_ids = selected_cover_letter_evidence_ids(cover_letter_plan)
+        if payload.document_type == "tailored_resume" and resume_plan:
+            allowed_evidence_ids = selected_resume_evidence_ids(resume_plan)
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
@@ -1270,7 +1279,7 @@ def generate(
         application_id=application.id,
         document_type=payload.document_type,
         content=content,
-        structured_content_json=json.dumps(selection_bundle or cover_letter_plan or {}, ensure_ascii=False),
+        structured_content_json=json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False),
         reviewer_json=json.dumps(selection_review or cover_letter_review or {}, ensure_ascii=False),
         run_id=run_id,
         trace_json=json.dumps(trace, ensure_ascii=False),
