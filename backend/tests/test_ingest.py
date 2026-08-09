@@ -3,10 +3,58 @@ from io import BytesIO
 
 from docx import Document
 
-from app.ingest import extract_resume_experiences, extract_resume_text, parse_job_ad_text, parse_job_page
+from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, parse_job_ad_text, parse_job_page
 
 
 class IngestTests(unittest.TestCase):
+    def test_ocr_reads_scanned_pdf_pages_and_filters_low_confidence_text(self):
+        class FakeImage:
+            def close(self):
+                pass
+
+        class FakeBitmap:
+            def to_pil(self):
+                return FakeImage()
+
+            def close(self):
+                pass
+
+        class FakePage:
+            def render(self, **kwargs):
+                self.render_options = kwargs
+                return FakeBitmap()
+
+            def close(self):
+                pass
+
+        class FakeDocument:
+            def __init__(self, payload):
+                self.pages = [FakePage(), FakePage()]
+
+            def __len__(self):
+                return len(self.pages)
+
+            def __getitem__(self, index):
+                return self.pages[index]
+
+            def close(self):
+                pass
+
+        class Result:
+            txts = ("Alex Morgan", "Project Coordinator", "unreadable")
+            scores = (0.99, 0.96, 0.20)
+
+        text = _extract_scanned_pdf_text(
+            b"scanned pdf",
+            document_factory=FakeDocument,
+            ocr_engine=lambda image: Result(),
+            image_adapter=lambda image: image,
+        )
+
+        self.assertIn("Alex Morgan", text)
+        self.assertIn("Project Coordinator", text)
+        self.assertNotIn("unreadable", text)
+
     def test_extracts_master_resume_from_docx(self):
         document = Document()
         document.add_heading("Alex Morgan", level=1)
