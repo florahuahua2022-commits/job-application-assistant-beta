@@ -472,7 +472,7 @@ export default function Home() {
       return null;
     }
     setQualityResult(result);
-    setNotice(result.ready ? "Final check passed. Review any warnings, then continue to the application page." : "Final check found errors. Fix them before applying.");
+    setNotice(result.ready ? "Content and grammar check passed. Review any warnings, then continue to the application page." : "Content and grammar check found errors. Fix them before applying.");
     return result as QualityResult;
   }
 
