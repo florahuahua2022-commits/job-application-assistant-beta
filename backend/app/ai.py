@@ -309,7 +309,7 @@ FULL CAREER KNOWLEDGE BASE WITH SOURCE TEXT:
 {json.dumps(ckb, ensure_ascii=False)}
 
 Return JSON only:
-{{"results":[{{"criteria_id":"...","status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"..."}}],"recommendation":"optional guidance"}}]}}
+{{"results":[{{"criteria_id":"...","status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"response phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}]}}
 
 Return every criteria_id exactly once. Use pass with an empty issues array when no material issue exists."""
     last_error = ""
