@@ -1,0 +1,15 @@
+{
+  "fixture_version": "1.0",
+  "pairings": [
+    ["RES-A", "JD-A"], ["RES-A", "JD-B"], ["RES-A", "JD-C"],
+    ["RES-B", "JD-A"], ["RES-B", "JD-B"], ["RES-B", "JD-C"]
+  ],
+  "assertions": [
+    "CKB validates and preserves source_text",
+    "Job Model validates and retains the exact limit branch",
+    "Every criterion receives one normalised match",
+    "Unknown evidence IDs cannot enter the plan",
+    "Sparse or irrelevant evidence degrades to Transferable or Weak without fabrication",
+    "Allocated total limits never exceed the advertised total"
+  ]
+}

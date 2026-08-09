@@ -1,0 +1,10 @@
+{
+  "case_id": "PASS-001",
+  "document_type": "cover_letter",
+  "human_label": "pass",
+  "rationale": "The only suggestion is stylistic and must not block release.",
+  "reviewer_output": {
+    "status": "fail",
+    "issues": [{"type": "style_only", "description": "The opening could be shorter."}]
+  }
+}

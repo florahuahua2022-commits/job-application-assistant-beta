@@ -1,0 +1,8 @@
+{
+  "fixture_id": "JD-A",
+  "position_title": "Project Support Officer",
+  "organisation": "Example Government Agency",
+  "job_description": "Support project reporting, stakeholder engagement and administrative coordination.",
+  "selection_criteria": "Selection Criteria\n1. Demonstrated experience preparing project reports.\n2. Demonstrated stakeholder communication skills.\nMaximum 300 words per criterion.",
+  "expected": {"requirement_mode": "explicit_selection_criteria", "limit_scope": "per_criteria", "per_criteria_word_limit": 300}
+}
