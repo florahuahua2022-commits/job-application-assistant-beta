@@ -1,5 +1,4 @@
 import ipaddress
-import hashlib
 import json
 import re
 import socket
@@ -11,6 +10,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from docx import Document
 from pypdf import PdfReader
+from .ckb import stable_evidence_id
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -139,17 +139,23 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
         responsibility = " ".join(responsibility_lines).strip()
         if not role_title or len(responsibility) < 25:
             continue
-        evidence_key = hashlib.sha1(
-            f"{role_title}|{organization}|{work_lines[date_index]}".encode("utf-8")
-        ).hexdigest()[:12]
+        source_block = "\n".join(work_lines[max(0, header_start):next_header_start]).strip()
+        evidence_id = stable_evidence_id("experience", source_block)
         experiences.append({
-            "id": f"resume-{evidence_key}",
+            "id": evidence_id,
+            "evidence_id": evidence_id,
+            "evidence_type": "experience",
             "role_title": role_title,
             "organization": organization,
             "responsibility": responsibility,
             "context": f"Employment dates: {work_lines[date_index]}",
             "result": "",
             "no_result_data": False,
+            "source_section": f"Work Experience > {organization or 'Unknown organisation'} > {role_title}",
+            "source_text": source_block,
+            "time_period_text": work_lines[date_index],
+            "competency_tags": [],
+            "fact_verification": "explicit",
         })
     return experiences[:20]
 

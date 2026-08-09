@@ -37,12 +37,16 @@ def build_evidence_pack(
         for index, item in enumerate(experiences, start=1):
             if not isinstance(item, dict):
                 continue
-            source_text = ". ".join(str(item.get(field, "")).strip() for field in (
-                "role_title", "organization", "responsibility", "context", "result"
-            ) if str(item.get(field, "")).strip())
+            source_text = str(item.get("source_text") or "").strip() or ". ".join(
+                str(item.get(field, "")).strip() for field in (
+                    "role_title", "organization", "responsibility", "context", "result", "detail"
+                ) if str(item.get(field, "")).strip()
+            )
             if source_text:
                 evidence.append({
-                    "evidence_id": str(item.get("id") or f"EXP{index:03d}"),
+                    "evidence_id": str(item.get("evidence_id") or item.get("id") or f"EXP{index:03d}"),
+                    "evidence_type": str(item.get("evidence_type") or "experience"),
+                    "source_section": str(item.get("source_section") or "Master Resume"),
                     "source_text": source_text,
                 })
     if not evidence:

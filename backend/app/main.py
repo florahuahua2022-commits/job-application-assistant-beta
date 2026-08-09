@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
+from .ckb import build_career_knowledge_base, validate_career_knowledge_base
 from .config import settings
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
@@ -51,6 +52,14 @@ def health():
 def select_for_user(model, user_id: UUID | None):
     statement = select(model)
     return statement.where(model.user_id == user_id) if user_id is not None else statement
+
+
+def serialise_ckb(source_text: str, experiences_json: str) -> str:
+    ckb = build_career_knowledge_base(source_text, experiences_json)
+    errors = validate_career_knowledge_base(ckb)
+    if errors:
+        raise HTTPException(400, errors[0])
+    return json.dumps(ckb, ensure_ascii=False)
 
 
 def _content_words(value: str) -> list[str]:
@@ -501,7 +510,9 @@ def create_resume(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    resume = Resume.model_validate(payload)
+    values = payload.model_dump()
+    values["ckb_json"] = serialise_ckb(values["source_text"], values.get("experiences_json") or "[]")
+    resume = Resume.model_validate(values)
     resume.user_id = user_id
     session.add(resume); session.commit(); session.refresh(resume)
     return resume
@@ -519,11 +530,13 @@ async def upload_resume(
     except ValueError as error:
         raise HTTPException(400, str(error))
     experiences_json = json.dumps(extract_resume_experiences(source_text), ensure_ascii=False)
+    ckb_json = serialise_ckb(source_text, experiences_json)
     current = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if current:
         current.title = title.strip() or "Master Resume"
         current.source_text = source_text
         current.experiences_json = experiences_json
+        current.ckb_json = ckb_json
         current.updated_at = datetime.utcnow()
         resume = current
     else:
@@ -532,6 +545,7 @@ async def upload_resume(
             title=title.strip() or "Master Resume",
             source_text=source_text,
             experiences_json=experiences_json,
+            ckb_json=ckb_json,
         )
     session.add(resume); session.commit(); session.refresh(resume)
     return resume
@@ -569,6 +583,10 @@ def update_resume(
     if not resume:
         raise HTTPException(404, "Resume not found.")
     values = payload.model_dump(exclude_unset=True)
+    next_source_text = values.get("source_text", resume.source_text)
+    next_experiences_json = values.get("experiences_json", resume.experiences_json)
+    if "source_text" in values or "experiences_json" in values:
+        values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
     for key, value in values.items():
         setattr(resume, key, value)
     resume.updated_at = datetime.utcnow()
@@ -1071,6 +1089,12 @@ def generate(
             f"Work rights: {profile.work_rights.replace('_', ' ')}",
             f"Confirmed availability wording: {confirmed_availability_wording(profile.availability_notice)}",
         ]))
+    ckb_source_json = master_resume.ckb_json or "[]"
+    if ckb_source_json.strip() in {"", "[]"}:
+        ckb_source_json = serialise_ckb(master_resume.source_text, master_resume.experiences_json or "[]")
+        master_resume.ckb_json = ckb_source_json
+        session.add(master_resume)
+        session.commit()
     try:
         content = generate_draft(
             master_resume.source_text,
@@ -1080,7 +1104,7 @@ def generate(
             profile_text,
             application.position_title,
             application.company,
-            master_resume.experiences_json or "[]",
+            ckb_source_json,
             used_experiences,
             used_closing_styles,
         )
