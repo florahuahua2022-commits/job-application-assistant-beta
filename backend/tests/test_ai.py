@@ -7,6 +7,20 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_resume_reviewer_checks_factual_curation_and_relevance(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
+        job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        plan = '{"selected_evidence":[{"evidence_id":"EV001"}],"required_sections":["Professional Summary","Key Skills","Work Experience"]}'
+        reviewer_output = '{"status":"fail","issues":[{"type":"fabricated_figure","description":"The 40% result is not in the CKB."}]}'
+        with patch.object(ai, "_openai_draft", return_value=reviewer_output) as provider:
+            result = ai.review_tailored_resume(ckb, job_model, plan, "## Professional Summary\nText")
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("factual and relevance Reviewer", prompt)
+        self.assertIn("Do not penalise factual compression or reordering", prompt)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
+
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'

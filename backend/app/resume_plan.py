@@ -1,9 +1,24 @@
 from collections import Counter
 import json
+import re
 from typing import Any
 
 
 RESUME_PLAN_SCHEMA_VERSION = "1.0"
+
+
+def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: list[str]) -> dict[str, Any]:
+    issues = []
+    for section in plan.get("required_sections") or []:
+        if not re.search(rf"(?im)^#+\s*{re.escape(str(section))}\s*$", content):
+            issues.append({"code": "missing_required_section", "message": f"The CV is missing the {section} section."})
+    word_count = len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE))
+    if word_count > 750:
+        issues.append({"code": "resume_too_long", "message": f"The CV contains {word_count} words; the two-page target allows at most 750."})
+    unknown = set(map(str, evidence_used)) - selected_resume_evidence_ids(plan)
+    if unknown:
+        issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
+    return {"valid": not issues, "word_count": word_count, "issues": issues}
 
 
 def selected_resume_evidence_ids(plan: dict[str, Any]) -> set[str]:

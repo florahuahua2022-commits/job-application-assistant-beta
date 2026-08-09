@@ -2,7 +2,7 @@ import unittest
 
 import json
 
-from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, resume_evidence_pack, selected_resume_evidence_ids
+from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 
 
 class ResumeCurationPlanTests(unittest.TestCase):
@@ -39,6 +39,21 @@ class ResumeCurationPlanTests(unittest.TestCase):
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, ckb, max_evidence=6)
 
         self.assertEqual(len(plan["selected_evidence"]), 6)
+
+    def test_hard_validation_requires_sections_length_and_selected_evidence(self):
+        plan = {
+            "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
+            "selected_evidence": [{"evidence_id": "EV1"}],
+        }
+        valid = "## Professional Summary\nSummary.\n## Key Skills\nSkills.\n## Work Experience\nExperience."
+
+        self.assertTrue(validate_resume_content(valid, plan, ["EV1"])["valid"])
+        invalid = validate_resume_content("## Professional Summary\n" + " ".join(["word"] * 751), plan, ["EV2"])
+        self.assertFalse(invalid["valid"])
+        self.assertEqual(
+            {issue["code"] for issue in invalid["issues"]},
+            {"missing_required_section", "resume_too_long", "unselected_evidence_used"},
+        )
 
 
 if __name__ == "__main__":

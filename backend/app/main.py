@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace
 from .auth import get_current_user
@@ -23,7 +23,7 @@ from .ingest import extract_resume_experiences, extract_resume_text, import_job_
 from .job_model import build_job_model, validate_job_model
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
-from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids
+from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
@@ -794,7 +794,7 @@ def quality_check(
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     content_to_check = {key: value.content for key, value in latest.items() if key in required}
-    for reviewed_type in ("selection_criteria", "cover_letter"):
+    for reviewed_type in ("selection_criteria", "cover_letter", "tailored_resume"):
         reviewed_document = latest.get(reviewed_type)
         if not reviewed_document or (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
             continue
@@ -1180,6 +1180,7 @@ def generate(
         cover_letter_plan = None
         cover_letter_review = None
         resume_plan = None
+        resume_review = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
             selection_review = review_selection_criteria_batch(ckb_source_json, selection_plan_json, selection_bundle)
@@ -1252,6 +1253,18 @@ def generate(
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
+    if payload.document_type == "tailored_resume":
+        validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
+        if not validation["valid"]:
+            raise HTTPException(502, validation["issues"][0]["message"] + " Please regenerate it.")
+        try:
+            resume_review = review_tailored_resume(
+                ckb_source_json, job_model_json, json.dumps(resume_plan or {}, ensure_ascii=False), content
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        except AIServiceError as error:
+            raise HTTPException(502, str(error))
     if payload.document_type == "cover_letter":
         try:
             cover_letter_review = review_cover_letter(
@@ -1272,7 +1285,7 @@ def generate(
         provider=provider,
         model=model_name,
         evidence_ids=[str(value) for value in metadata["used_experiences"]],
-        reviewer=selection_review or cover_letter_review,
+        reviewer=selection_review or cover_letter_review or resume_review,
     )
     document = GeneratedDocument(
         user_id=user_id,
@@ -1280,7 +1293,7 @@ def generate(
         document_type=payload.document_type,
         content=content,
         structured_content_json=json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False),
-        reviewer_json=json.dumps(selection_review or cover_letter_review or {}, ensure_ascii=False),
+        reviewer_json=json.dumps(selection_review or cover_letter_review or resume_review or {}, ensure_ascii=False),
         run_id=run_id,
         trace_json=json.dumps(trace, ensure_ascii=False),
         used_experiences_json=json.dumps(metadata["used_experiences"]),
