@@ -2,7 +2,7 @@ from datetime import datetime
 from io import BytesIO
 import json
 import re
-from uuid import UUID
+from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_selection_criteria_batch
 from .applicant_profile import applicant_profile_prompt
+from .generation_trace import build_generation_trace
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -1226,6 +1227,19 @@ def generate(
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
+    run_id = str(uuid4())
+    provider = settings.ai_provider.strip().lower()
+    model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
+    trace = build_generation_trace(
+        run_id=run_id,
+        document_type=payload.document_type,
+        application_id=application.id,
+        resume_id=master_resume.id,
+        provider=provider,
+        model=model_name,
+        evidence_ids=[str(value) for value in metadata["used_experiences"]],
+        reviewer=selection_review,
+    )
     document = GeneratedDocument(
         user_id=user_id,
         application_id=application.id,
@@ -1233,6 +1247,8 @@ def generate(
         content=content,
         structured_content_json=json.dumps(selection_bundle or {}, ensure_ascii=False),
         reviewer_json=json.dumps(selection_review or {}, ensure_ascii=False),
+        run_id=run_id,
+        trace_json=json.dumps(trace, ensure_ascii=False),
         used_experiences_json=json.dumps(metadata["used_experiences"]),
         closing_styles_json=json.dumps(metadata["closing_styles"]),
     )
