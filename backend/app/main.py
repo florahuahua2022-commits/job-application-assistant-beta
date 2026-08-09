@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, generate_draft
+from .ai import AIServiceError, build_evidence_pack, generate_draft
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .config import settings
@@ -945,7 +945,7 @@ def generate(
     except AIServiceError as error:
         raise HTTPException(502, str(error))
     metadata = {"used_experiences": [], "closing_styles": []}
-    if payload.document_type == "selection_criteria":
+    if payload.document_type in {"selection_criteria", "cover_letter"}:
         match = re.search(r"<!--\s*GENERATION_META\s+(\{.*?\})\s*-->", content, re.DOTALL)
         if match:
             try:
@@ -955,6 +955,17 @@ def generate(
             except (json.JSONDecodeError, AttributeError):
                 pass
             content = content[:match.start()].rstrip()
+        allowed_evidence_ids = {
+            item["evidence_id"] for item in build_evidence_pack(
+                master_resume.source_text,
+                master_resume.experiences_json or "[]",
+                application.job_description,
+                application.selection_criteria,
+            )
+        }
+        invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
+        if invalid_evidence_ids:
+            raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
     document = GeneratedDocument(
         user_id=user_id,
         application_id=application.id,

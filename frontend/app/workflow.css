@@ -48,6 +48,10 @@
 .quickProfileEdit { margin-top: 14px; }
 .quickProfileEdit > summary { color: var(--accent-dark); font-weight: 700; cursor: pointer; }
 .quickProfileEdit form { margin-top: 12px; }
+.evidenceTrace { background: #f7f8f6; border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; margin-bottom: 12px; }
+.evidenceTrace ul { margin: .55rem 0 0; padding-left: 1.2rem; }
+.evidenceTrace li { color: var(--muted); font-size: .84rem; margin: .25rem 0; }
+.evidenceTrace code { color: var(--accent-dark); font-weight: 800; margin-right: .35rem; }
 @media (max-width: 760px) {
   .uploadBox, .quickStartUpload, .linkImportRow, .contactConfirm { grid-template-columns: 1fr; }
   .confirmCard { align-items: stretch; flex-direction: column; }

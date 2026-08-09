@@ -81,6 +81,43 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("Do not infer a recruiter/client relationship", prompt)
         self.assertIn("use 'Yours faithfully' after a generic salutation", prompt)
 
+    def test_builds_ranked_evidence_pack_from_structured_experience(self):
+        experiences = '[{"id":"EV-project","role_title":"Project Officer","organization":"Agency","responsibility":"Managed stakeholder workshops","result":"Delivered the project on time"},{"id":"EV-retail","role_title":"Assistant","organization":"Shop","responsibility":"Processed sales"}]'
+
+        result = ai.build_evidence_pack(
+            "resume",
+            experiences,
+            "The role requires stakeholder engagement and project delivery.",
+        )
+
+        self.assertEqual(result[0]["evidence_id"], "EV-project")
+        self.assertIn("Managed stakeholder workshops", result[0]["source_text"])
+
+    def test_falls_back_to_traceable_resume_excerpts(self):
+        result = ai.build_evidence_pack(
+            "Project Officer\nManaged consultation with community stakeholders and delivered clear reports.\nRetail Assistant\nServed customers.",
+            "[]",
+            "stakeholder consultation",
+        )
+
+        self.assertEqual(result[0]["evidence_id"], "RES001")
+        self.assertIn("community stakeholders", result[0]["source_text"])
+
+    def test_selection_criteria_prompt_uses_only_matched_resume_evidence(self):
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as deepseek_call:
+            ai.generate_draft(
+                "Project Officer\nManaged stakeholder workshops and delivered reports.",
+                "Stakeholder engagement is essential.",
+                "selection_criteria",
+                "Demonstrated stakeholder engagement",
+            )
+
+        prompt = deepseek_call.call_args.args[0]
+        self.assertIn("MATCHED RESUME EVIDENCE", prompt)
+        self.assertIn("requirements only, never applicant evidence", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

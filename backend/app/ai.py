@@ -5,6 +5,60 @@ import re
 from openai import OpenAI, OpenAIError
 from .config import settings
 
+
+EVIDENCE_STOP_WORDS = {
+    "about", "after", "also", "and", "are", "for", "from", "have", "into", "job",
+    "role", "that", "the", "their", "this", "with", "will", "you", "your",
+}
+
+
+def _evidence_tokens(text: str) -> set[str]:
+    return {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9+#-]{2,}", text)
+        if token.lower() not in EVIDENCE_STOP_WORDS
+    }
+
+
+def build_evidence_pack(
+    master_resume: str,
+    user_experiences_json: str,
+    job_description: str,
+    selection_criteria: str | None = None,
+    max_items: int = 8,
+) -> list[dict[str, str]]:
+    """Build a small, traceable set of resume evidence for document generation."""
+    evidence: list[dict[str, str]] = []
+    try:
+        experiences = json.loads(user_experiences_json or "[]")
+    except json.JSONDecodeError:
+        experiences = []
+    if isinstance(experiences, list):
+        for index, item in enumerate(experiences, start=1):
+            if not isinstance(item, dict):
+                continue
+            source_text = ". ".join(str(item.get(field, "")).strip() for field in (
+                "role_title", "organization", "responsibility", "context", "result"
+            ) if str(item.get(field, "")).strip())
+            if source_text:
+                evidence.append({
+                    "evidence_id": str(item.get("id") or f"EXP{index:03d}"),
+                    "source_text": source_text,
+                })
+    if not evidence:
+        resume_lines = [line.strip(" \t•-–—") for line in master_resume.splitlines() if line.strip()]
+        for index in range(0, len(resume_lines), 2):
+            source_text = " ".join(resume_lines[index:index + 2]).strip()
+            if len(source_text) >= 30:
+                evidence.append({"evidence_id": f"RES{index // 2 + 1:03d}", "source_text": source_text})
+    query_tokens = _evidence_tokens(f"{job_description}\n{selection_criteria or ''}")
+    ranked = sorted(
+        evidence,
+        key=lambda item: (len(_evidence_tokens(item["source_text"]) & query_tokens), len(item["source_text"])),
+        reverse=True,
+    )
+    return ranked[:max_items]
+
 def target_english_variant() -> str:
     return settings.target_english_variant.strip() or "Australian English"
 
@@ -74,15 +128,18 @@ def generate_draft(
         raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
     task = {
         "tailored_resume": "Create a clean ATS-friendly CV of about 550-750 words. Treat the structured experience facts as the primary evidence for employment bullets. Turn responsibility into concise action-led bullets and include context only where it clarifies scope. Use a supplied exact result or rough range when available; when result is blank or marked unavailable, write a restrained qualitative outcome and never invent a number. Use a contact header, short professional summary, relevant capabilities, and reverse-chronological employment history. Use present tense for the current role and past tense for earlier roles. Keep original employers, titles and dates truthful. Do not use tables, columns, graphics, first-person pronouns, selection criteria, reviewer notes or match scores.",
-        "cover_letter": "Write a concise one-page cover letter of about 300-450 words. This letter must work as a standalone companion to the CV even when no selection criteria document exists. When no experience IDs were previously used, select only one or two of the strongest relevant experiences and summarise them briefly instead of retelling the CV. When experience IDs were detailed in selection criteria, those experiences may receive at most one brief sentence total; do not repeat their detail or the same skill claims. At least 60% of the body must explain why this role, why this organisation, what the work means to the candidate, and how the candidate's work style and values align with the organisation's mission. Use the supplied organisation mission/values when present. If the JD mentions roster/shift work, medical checks, right to work, police clearance or a licence, add a brief factual confirmation paragraph at the end, confirming only facts present in the evidence. Choose the final thematic sentence from a value-alignment, next-action, transferable-capability, or personal-work-style approach; when selection criteria exists, do not reuse an approach already used there. Begin with the supplied date. Use 'Yours sincerely' only for a named addressee; use 'Yours faithfully' after a generic salutation. Output only the submission-ready letter.",
-        "selection_criteria": "Respond separately to every supplied criterion. Every response must follow a natural Situation–Task–Action–Result flow without printing S/T/A/R labels. Use only results supplied by the user; never invent a number. When no result metric was supplied, use a truthful, restrained qualitative outcome. Give each experience object an id if it has one and track every id used. End each criterion with one of four approaches—A value alignment, B next action/willingness, C transferable capability, D personal work style—and never use the same approach more than once in this generation. After the submission-ready text, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"experience-id\"],\"closing_styles\":[\"A\"]} -->. Do not mention this metadata elsewhere.",
+        "cover_letter": "Write a concise one-page cover letter of about 300-450 words. This letter must work as a standalone companion to the CV even when no selection criteria document exists. Select only one or two of the strongest items from MATCHED RESUME EVIDENCE and summarise them briefly instead of retelling the CV. When evidence IDs were detailed in selection criteria, those items may receive at most one brief sentence total; do not repeat their detail or the same skill claims. At least 60% of the body must explain why this role, why this organisation, what the work means to the candidate, and how the candidate's work style and values align with the organisation's mission. Use the supplied organisation mission/values when present. If the JD mentions roster/shift work, medical checks, right to work, police clearance or a licence, add a brief factual confirmation paragraph at the end, confirming only facts present in the evidence. Begin with the supplied date. Use 'Yours sincerely' only for a named addressee; use 'Yours faithfully' after a generic salutation. After the submission-ready letter, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->.",
+        "selection_criteria": "Respond separately to every supplied criterion. Every response must follow a natural Situation–Task–Action–Result flow without printing S/T/A/R labels. Use only MATCHED RESUME EVIDENCE. Never treat the JD as proof of applicant experience. Use only results supplied by the user; never invent a number. When no result metric was supplied, use a truthful, restrained qualitative outcome. If evidence is insufficient, state the transferable evidence conservatively instead of inventing a story. End each criterion with one of four approaches—A value alignment, B next action/willingness, C transferable capability, D personal work style—and never use the same approach more than once in this generation. After the submission-ready text, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[\"A\"]} -->. Every evidence ID must exist in MATCHED RESUME EVIDENCE.",
         "ats_analysis": "List key JD keywords as Covered, Missing, or Evidence needed, with a transparent qualitative match assessment.",
     }.get(document_type)
     if not task:
         raise ValueError("Unsupported document_type")
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
-    prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nSTRUCTURED EXPERIENCE FACTS (authoritative; blank result means no metric was supplied):\n{user_experiences_json}\n\nEXPERIENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME:\n{master_resume}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES:\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
+    evidence_pack = build_evidence_pack(
+        master_resume, user_experiences_json, job_description, selection_criteria
+    )
+    prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nMATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n{json.dumps(evidence_pack, ensure_ascii=False)}\n\nEVIDENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME (context only; do not introduce claims outside the matched evidence for Cover Letter or Selection Criteria):\n{master_resume}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES (requirements only, never applicant evidence):\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
 
     if provider == "deepseek":
         try:
