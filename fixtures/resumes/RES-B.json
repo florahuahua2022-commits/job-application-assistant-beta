@@ -1,0 +1,16 @@
+{
+  "fixture_id": "RES-B",
+  "profile": "sparse_messy",
+  "source_text": "Administration Assistant - Local Service. Helped customers and updated records. Dates not supplied. Education: Secondary School Certificate.",
+  "experiences": [
+    {
+      "evidence_type": "experience",
+      "role_title": "Administration Assistant",
+      "organization": "Local Service",
+      "responsibility": "Helped customers and updated records.",
+      "context": "",
+      "result": "",
+      "source_text": "Administration Assistant - Local Service. Helped customers and updated records. Dates not supplied."
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "fixture_id": "JD-C",
+  "position_title": "Contracts Support Officer",
+  "organisation": "Example Authority",
+  "job_description": "Maintain procurement documentation and contract registers. Liaise with vendors and provide contract-management reports. Support governance meetings and record decisions.",
+  "selection_criteria": "",
+  "expected": {"requirement_mode": "inferred_requirements", "limit_scope": "unspecified", "critical_gap_for_sparse_resume": "procurement and contract management"}
+}

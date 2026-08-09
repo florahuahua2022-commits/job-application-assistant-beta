@@ -1,0 +1,17 @@
+{
+  "fixture_id": "RES-A",
+  "profile": "well_structured_information_rich",
+  "source_text": "Project Officer, Example Community Agency, January 2022 - Present. Coordinated monthly project reporting and stakeholder workshops. Consolidated records from five teams and delivered reports by the agreed deadline. Education: Bachelor of Business, Example University, 2021. Qualifications: Certificate IV in Project Management Practice, 2022.",
+  "experiences": [
+    {
+      "evidence_type": "experience",
+      "role_title": "Project Officer",
+      "organization": "Example Community Agency",
+      "time_period_text": "January 2022 - Present",
+      "responsibility": "Coordinated monthly project reporting and stakeholder workshops.",
+      "context": "Consolidated records from five teams.",
+      "result": "Delivered reports by the agreed deadline.",
+      "source_text": "Project Officer, Example Community Agency, January 2022 - Present. Coordinated monthly project reporting and stakeholder workshops. Consolidated records from five teams and delivered reports by the agreed deadline."
+    }
+  ]
+}

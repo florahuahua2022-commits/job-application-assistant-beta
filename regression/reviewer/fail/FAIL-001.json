@@ -1,0 +1,12 @@
+{
+  "case_id": "FAIL-001",
+  "document_type": "tailored_resume",
+  "human_label": "fail",
+  "category": "fabricated_figure",
+  "severity": "critical",
+  "rationale": "The generated 40% improvement is absent from the supplied evidence.",
+  "reviewer_output": {
+    "status": "fail",
+    "issues": [{"type": "fabricated_figure", "description": "The 40% improvement is not supported by source_text."}]
+  }
+}

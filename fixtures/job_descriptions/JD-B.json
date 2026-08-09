@@ -1,0 +1,8 @@
+{
+  "fixture_id": "JD-B",
+  "position_title": "Program Officer",
+  "organisation": "Example Department",
+  "job_description": "Coordinate program records, provide written advice and work with internal stakeholders. Your complete response must not exceed 900 words in total.",
+  "selection_criteria": "Selection Criteria\n1. Demonstrated program coordination experience.\n2. Strong written communication and reporting capability.\n3. Ability to build productive stakeholder relationships.",
+  "expected": {"requirement_mode": "explicit_selection_criteria", "limit_scope": "total", "total_word_limit": 900}
+}
