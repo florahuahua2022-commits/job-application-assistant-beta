@@ -162,11 +162,22 @@ export default function Home() {
     const form = new FormData(event.currentTarget);
     const value = (name: string) => String(form.get(name) || "").trim();
     const nameParts = value("full_name").split(/\s+/).filter(Boolean);
+    const referees = [0, 1].flatMap((index) => {
+      if (!value(`referee_${index}_name`)) return [];
+      return [{
+        organisation: value(`referee_${index}_organisation`), name: value(`referee_${index}_name`),
+        position_title: value(`referee_${index}_position_title`), phone: value(`referee_${index}_phone`),
+        relationship: value(`referee_${index}_relationship`), email: value(`referee_${index}_email`),
+        postal_address: "", suburb: "", state: "WA", postcode: "", country: "Australia",
+      }];
+    });
+    const incompleteReferee = referees.find((referee) => !referee.organisation || !referee.position_title || !referee.phone || !referee.relationship || !referee.email);
+    if (incompleteReferee) return setNotice("Complete every field for each referee you add, or clear the referee name to leave it out.");
     const payload = {
-      title: profile?.title || "", first_name: nameParts[0] || "", last_name: nameParts.slice(1).join(" ") || nameParts[0] || "", preferred_name: profile?.preferred_name || "",
+      title: value("title"), first_name: nameParts[0] || "", last_name: nameParts.slice(1).join(" ") || nameParts[0] || "", preferred_name: value("preferred_name"),
       phone: value("phone"), email: value("email"), postal_address: profile?.postal_address || "", suburb: profile?.suburb || "", state: profile?.state || "WA",
       postcode: profile?.postcode || "", country: profile?.country || "Australia", work_rights: value("work_rights") || profile?.work_rights || "not_specified", availability_notice: value("availability_notice") || "not_specified",
-      referees: [],
+      referees,
     };
     const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const result = await response.json();
@@ -190,9 +201,9 @@ export default function Home() {
     if (!guess.full_name || !guess.phone || !guess.email) return false;
     const nameParts = guess.full_name.split(/\s+/).filter(Boolean);
     const payload = {
-      title: "", first_name: nameParts[0], last_name: nameParts.slice(1).join(" ") || nameParts[0], preferred_name: "",
-      phone: guess.phone, email: guess.email, postal_address: "", suburb: "", state: "WA", postcode: "", country: "Australia",
-      work_rights: "not_specified", availability_notice: "not_specified", referees: [],
+      title: profile?.title || "", first_name: nameParts[0], last_name: nameParts.slice(1).join(" ") || nameParts[0], preferred_name: profile?.preferred_name || "",
+      phone: guess.phone, email: guess.email, postal_address: profile?.postal_address || "", suburb: profile?.suburb || "", state: profile?.state || "WA", postcode: profile?.postcode || "", country: profile?.country || "Australia",
+      work_rights: profile?.work_rights || "not_specified", availability_notice: profile?.availability_notice || "not_specified", referees: profile?.referees || [],
     };
     const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (!response.ok) return false;
@@ -658,15 +669,32 @@ export default function Home() {
           <details className="quickProfileEdit" open={!profile}>
             <summary>{profile ? "Something is wrong? Edit it" : "Check missing details"}</summary>
             <form key={`${profile?.updated_at || "new"}-${contactGuess.email}`} onSubmit={saveProfile} className="compactForm">
+              <label>Title <em>optional</em><select name="title" defaultValue={profile?.title || ""}><option value="">No title</option><option value="Mr">Mr</option><option value="Ms">Ms</option><option value="Mrs">Mrs</option><option value="Miss">Miss</option><option value="Dr">Dr</option></select></label>
+              <label>Preferred name <em>optional</em><input name="preferred_name" defaultValue={profile?.preferred_name || ""} /></label>
               <label className="full">Full name<input name="full_name" defaultValue={profile ? [profile.first_name, profile.last_name].filter(Boolean).join(" ") : contactGuess.full_name} required /></label>
               <label>Phone<input name="phone" defaultValue={profile?.phone || contactGuess.phone} required /></label>
               <label>Email<input name="email" type="email" defaultValue={profile?.email || contactGuess.email} required /></label>
               <label>Work rights <em>optional</em><select name="work_rights" defaultValue={profile?.work_rights || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="citizen">Australian citizen</option><option value="permanent_resident">Permanent resident</option><option value="visa">Visa holder</option></select></label>
               <label>Availability <em>optional</em><select name="availability_notice" defaultValue={profile?.availability_notice || "not_specified"}><option value="not_specified">Do not state in documents</option><option value="two_weeks">Available after two weeks</option><option value="one_month">Available after one month</option><option value="negotiable">Start date negotiable</option></select></label>
+              <details className="optionalProfile full">
+                <summary>Optional referees (maximum two)</summary>
+                {[0, 1].map((index) => {
+                  const referee = profile?.referees?.[index];
+                  return <fieldset className="referee" key={index}><legend>Referee {index + 1}</legend>
+                    <label>Name<input name={`referee_${index}_name`} defaultValue={referee?.name || ""} /></label>
+                    <label>Organisation<input name={`referee_${index}_organisation`} defaultValue={referee?.organisation || ""} /></label>
+                    <label>Position title<input name={`referee_${index}_position_title`} defaultValue={referee?.position_title || ""} /></label>
+                    <label>Relationship<input name={`referee_${index}_relationship`} defaultValue={referee?.relationship || ""} /></label>
+                    <label>Phone<input name={`referee_${index}_phone`} defaultValue={referee?.phone || ""} /></label>
+                    <label>Email<input name={`referee_${index}_email`} type="email" defaultValue={referee?.email || ""} /></label>
+                  </fieldset>;
+                })}
+                <p className="helper">Only complete this if an employer asks for referees. These details are saved to your profile.</p>
+              </details>
               <button className="full">Confirm details</button>
             </form>
           </details>
-          <p className="helper">References are not collected. Add them only if an employer asks later.</p>
+          <p className="helper">Title, preferred name and referees are optional. Add them only when useful for an application.</p>
         </div>
       </details>
 
