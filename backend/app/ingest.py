@@ -15,6 +15,58 @@ from pypdf import PdfReader
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_PAGE_BYTES = 3 * 1024 * 1024
+MAX_OCR_PAGES = 6
+
+
+def _extract_scanned_pdf_text(payload: bytes, document_factory=None, ocr_engine=None, image_adapter=None) -> str:
+    """OCR a bounded number of PDF pages without sending the resume to another service."""
+    if document_factory is None:
+        try:
+            import pypdfium2 as pdfium
+        except ImportError as error:
+            raise ValueError("OCR is not available on this server. Try a DOCX or text-based PDF.") from error
+        document_factory = pdfium.PdfDocument
+    if ocr_engine is None:
+        try:
+            from rapidocr import RapidOCR
+        except ImportError as error:
+            raise ValueError("OCR is not available on this server. Try a DOCX or text-based PDF.") from error
+        ocr_engine = RapidOCR()
+    if image_adapter is None:
+        import numpy as np
+        image_adapter = np.asarray
+
+    document = document_factory(payload)
+    extracted_pages: list[str] = []
+    try:
+        for page_index in range(min(len(document), MAX_OCR_PAGES)):
+            page = document[page_index]
+            bitmap = None
+            image = None
+            try:
+                bitmap = page.render(scale=2.0, grayscale=True)
+                image = bitmap.to_pil()
+                result = ocr_engine(image_adapter(image))
+                texts = tuple(getattr(result, "txts", ()) or ())
+                scores = tuple(getattr(result, "scores", ()) or ())
+                accepted = [
+                    str(value).strip()
+                    for index, value in enumerate(texts)
+                    if str(value).strip() and (index >= len(scores) or float(scores[index]) >= 0.50)
+                ]
+                if accepted:
+                    extracted_pages.append("\n".join(accepted))
+            finally:
+                if image is not None and hasattr(image, "close"):
+                    image.close()
+                if bitmap is not None and hasattr(bitmap, "close"):
+                    bitmap.close()
+                if hasattr(page, "close"):
+                    page.close()
+    finally:
+        if hasattr(document, "close"):
+            document.close()
+    return "\n\n".join(extracted_pages).strip()
 
 
 def _resume_line(value: str) -> str:
@@ -114,6 +166,8 @@ def extract_resume_text(filename: str, payload: bytes) -> str:
     elif suffix == "pdf":
         reader = PdfReader(BytesIO(payload))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if len(re.sub(r"\s+", "", text)) < 40:
+            text = _extract_scanned_pdf_text(payload)
     elif suffix in {"txt", "md"}:
         text = payload.decode("utf-8-sig", errors="replace")
     else:
