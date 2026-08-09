@@ -1,4 +1,5 @@
 import ipaddress
+import hashlib
 import json
 import re
 import socket
@@ -14,6 +15,91 @@ from pypdf import PdfReader
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_PAGE_BYTES = 3 * 1024 * 1024
+
+
+def _resume_line(value: str) -> str:
+    value = re.sub(r"^[\s•●▪◦*-]+", "", value.strip())
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def extract_resume_experiences(source_text: str) -> list[dict]:
+    """Extract conservative, user-reviewable work-history records from resume text."""
+    lines = [_resume_line(line) for line in source_text.splitlines()]
+    lines = [line for line in lines if line]
+    section_start = next(
+        (index + 1 for index, line in enumerate(lines) if re.fullmatch(
+            r"(?i)(?:professional |relevant )?(?:work |employment )?(?:experience|history)|employment history|career history",
+            line,
+        )),
+        0,
+    )
+    section_end = next(
+        (index for index in range(section_start, len(lines)) if re.fullmatch(
+            r"(?i)(?:education|qualifications|certifications?|skills|technical skills|referees?|references|volunteering)",
+            lines[index],
+        )),
+        len(lines),
+    )
+    work_lines = lines[section_start:section_end]
+    date_pattern = re.compile(
+        r"(?i)(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}"
+        r"\s*(?:-|–|—|to)\s*(?:(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}|present|current|now)"
+    )
+    date_indexes = [index for index, line in enumerate(work_lines) if date_pattern.search(line)]
+    if not date_indexes:
+        return []
+
+    company_hint = re.compile(
+        r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|council|department|university|college|"
+        r"government|authority|agency|company|corporation|corp)\b"
+    )
+    headers: list[tuple[int, str, str]] = []
+    for date_index in date_indexes:
+        previous = work_lines[max(0, date_index - 2):date_index]
+        if not previous:
+            headers.append((date_index, "", ""))
+            continue
+        combined = previous[-1]
+        parts = [part.strip() for part in re.split(r"\s+(?:\||–|—)\s+", combined, maxsplit=1)]
+        if len(parts) == 2:
+            role_title, organization = parts
+            header_start = date_index - 1
+        elif len(previous) >= 2:
+            role_title, organization = previous[-2], previous[-1]
+            header_start = date_index - 2
+            if company_hint.search(role_title) and not company_hint.search(organization):
+                role_title, organization = organization, role_title
+        else:
+            role_title, organization = combined, ""
+            header_start = date_index - 1
+        headers.append((header_start, role_title[:160], organization[:160]))
+
+    experiences: list[dict] = []
+    for position, date_index in enumerate(date_indexes):
+        header_start, role_title, organization = headers[position]
+        next_header_start = headers[position + 1][0] if position + 1 < len(headers) else len(work_lines)
+        responsibility_lines = [
+            line for line in work_lines[date_index + 1:next_header_start]
+            if len(line) > 2 and not re.fullmatch(r"(?i)(?:responsibilities|key achievements|achievements|duties):?", line)
+        ]
+        responsibility = " ".join(responsibility_lines).strip()
+        if not role_title or len(responsibility) < 25:
+            continue
+        evidence_key = hashlib.sha1(
+            f"{role_title}|{organization}|{work_lines[date_index]}".encode("utf-8")
+        ).hexdigest()[:12]
+        experiences.append({
+            "id": f"resume-{evidence_key}",
+            "role_title": role_title,
+            "organization": organization,
+            "responsibility": responsibility,
+            "context": f"Employment dates: {work_lines[date_index]}",
+            "result": "",
+            "no_result_data": False,
+        })
+    return experiences[:20]
 
 
 def extract_resume_text(filename: str, payload: bytes) -> str:

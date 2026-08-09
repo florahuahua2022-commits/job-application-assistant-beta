@@ -15,7 +15,7 @@ from .backup import create_backup, list_backups, read_backup, restore_backup
 from .config import settings
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
-from .ingest import extract_resume_text, import_job_url, parse_job_ad_text
+from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
@@ -422,14 +422,21 @@ async def upload_resume(
         source_text = extract_resume_text(file.filename or "resume", await file.read())
     except ValueError as error:
         raise HTTPException(400, str(error))
+    experiences_json = json.dumps(extract_resume_experiences(source_text), ensure_ascii=False)
     current = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if current:
         current.title = title.strip() or "Master Resume"
         current.source_text = source_text
+        current.experiences_json = experiences_json
         current.updated_at = datetime.utcnow()
         resume = current
     else:
-        resume = Resume(user_id=user_id, title=title.strip() or "Master Resume", source_text=source_text)
+        resume = Resume(
+            user_id=user_id,
+            title=title.strip() or "Master Resume",
+            source_text=source_text,
+            experiences_json=experiences_json,
+        )
     session.add(resume); session.commit(); session.refresh(resume)
     return resume
 

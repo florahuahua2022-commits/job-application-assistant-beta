@@ -238,11 +238,18 @@ export default function Home() {
       return setNotice(result.detail || "Could not read this resume file.");
     }
     setResumeUploadState("saved");
+    let extractedExperienceCount = 0;
+    try { extractedExperienceCount = JSON.parse(result.experiences_json || "[]").length; } catch { extractedExperienceCount = 0; }
     const guess = detectContact(result.source_text || "");
     setContactGuess(guess);
     const contactSaved = await saveDetectedContact(guess);
     await refresh();
-    setNotice(contactSaved ? "CV uploaded. We found and saved your name, phone and email — please check them once." : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.");
+    const experienceMessage = extractedExperienceCount
+      ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.`
+      : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.";
+    setNotice((contactSaved
+      ? "CV uploaded. We found and saved your name, phone and email — please check them once."
+      : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.") + experienceMessage);
   }
 
   async function importJobLink() {
