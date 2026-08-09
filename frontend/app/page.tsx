@@ -752,7 +752,7 @@ export default function Home() {
           <label>Position title<input name="position_title" value={jobFields.position_title} onChange={(event) => setJobFields({ ...jobFields, position_title: event.target.value })} required /></label>
           <label className="full">Application link<div className="linkImportRow"><input name="job_url" type="url" placeholder="https://example.com/job" value={jobFields.job_url} onChange={(event) => setJobFields({ ...jobFields, job_url: event.target.value })} /><button type="button" onClick={importJobLink} disabled={jobImportState === "importing"}>{jobImportState === "importing" ? "Reading…" : jobImportState === "done" ? "Imported ✓" : "Import Details"}</button></div></label>
           <label className="full">Job description<textarea name="job_description" rows={8} value={jobFields.job_description} onChange={(event) => setJobFields({ ...jobFields, job_description: event.target.value })} required /></label>
-          <label className="full">Selection criteria <em>optional</em><textarea name="selection_criteria" rows={4} value={jobFields.selection_criteria} onChange={(event) => setJobFields({ ...jobFields, selection_criteria: event.target.value })} /></label>
+          <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" rows={4} value={jobFields.selection_criteria} onChange={(event) => setJobFields({ ...jobFields, selection_criteria: event.target.value })} placeholder="Paste the full criteria, or add a short instruction such as: Focus on stakeholder engagement and government reporting." /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
           <button className="full">Save Job</button>
         </form>
       </section>
@@ -793,7 +793,7 @@ export default function Home() {
                   <label>Position title<input name="position_title" defaultValue={selected.position_title} required /></label>
                   <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
                   <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
-                  <label className="full">Selection criteria <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} /></label>
+                  <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} placeholder="Full criteria or a short instruction" /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
                   <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
                   <button className="full">Save job changes</button>
                 </form>
