@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     daily_pack_limit_per_user: int = 3
     monthly_pack_limit_global: int = 50
     allow_public_signup: bool = False
+    enable_tailored_resume: bool = True
+    enable_cover_letter: bool = True
+    enable_selection_criteria: bool = True
+    enable_ats_analysis: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

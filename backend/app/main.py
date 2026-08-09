@@ -19,6 +19,7 @@ from .config import settings
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
+from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
@@ -52,6 +53,10 @@ def health():
             and settings.ai_fallback_to_deepseek
             and settings.deepseek_api_key
         ),
+        "generation_features": {
+            document_type: bool(getattr(settings, setting))
+            for document_type, setting in GENERATION_FEATURES.items()
+        },
     }
 
 
@@ -1121,6 +1126,13 @@ def generate(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
+    feature = generation_feature_status(payload.document_type, {
+        setting: bool(getattr(settings, setting)) for setting in GENERATION_FEATURES.values()
+    })
+    if not feature["supported"]:
+        raise HTTPException(400, "Unsupported document type.")
+    if not feature["enabled"]:
+        raise HTTPException(503, f"{payload.document_type.replace('_', ' ').title()} generation is temporarily unavailable. Existing documents remain available.")
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
