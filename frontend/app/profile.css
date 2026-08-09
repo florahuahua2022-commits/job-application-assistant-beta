@@ -203,6 +203,74 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.resumeContentCheck {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8faf8;
+}
+
+.contentCheckHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.contentCheckHeading p,
+.contentCheckSummary p {
+  margin: 4px 0 0;
+}
+
+.contentCheckSummary {
+  padding: 14px;
+  border-radius: 10px;
+}
+
+.contentCheckSummary.pass {
+  background: #e8f3ef;
+  border: 1px solid #9bcabd;
+}
+
+.contentCheckSummary.review {
+  background: #fff8e8;
+  border: 1px solid #e1b86a;
+}
+
+.contentCheckItems {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.contentCheckItem {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 10px;
+  padding: 9px 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.contentCheckItem > span {
+  align-self: start;
+  padding: 3px 6px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: .72rem;
+  font-weight: 800;
+}
+
+.contentCheckItem.matched > span { background: #dcefe8; color: #05584c; }
+.contentCheckItem.review > span { background: #fff0c7; color: #805600; }
+.contentCheckItem.missing > span { background: #f7dede; color: #8b2424; }
+.contentCheckItem > div { display: grid; gap: 3px; min-width: 0; }
+.contentCheckItem small { overflow-wrap: anywhere; }
+
 @media (max-width: 760px) {
   .backupActions,
   .backupRow {
@@ -212,5 +280,10 @@ select:focus {
 
   .backupRow > div:last-child button {
     flex: 1;
+  }
+
+  .contentCheckHeading {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

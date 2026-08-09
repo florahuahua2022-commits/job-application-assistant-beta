@@ -250,5 +250,21 @@ class QualityCheckResponse(SQLModel):
     checked_documents: list[str]
 
 
+class ResumeContentCheckItem(SQLModel):
+    field: str
+    label: str
+    value: str
+    status: str  # matched | review | missing
+    message: str
+
+
+class ResumeContentCheckResponse(SQLModel):
+    ready: bool
+    matched_count: int
+    review_count: int
+    missing_count: int
+    items: list[ResumeContentCheckItem]
+
+
 class RestoreBackupRequest(SQLModel):
     confirm: bool = False

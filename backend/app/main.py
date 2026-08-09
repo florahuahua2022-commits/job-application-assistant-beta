@@ -16,7 +16,7 @@ from .config import settings
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
 from .quality import find_writing_quality_issues
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
@@ -51,6 +51,72 @@ def health():
 def select_for_user(model, user_id: UUID | None):
     statement = select(model)
     return statement.where(model.user_id == user_id) if user_id is not None else statement
+
+
+def _content_words(value: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", value.lower())
+
+
+def _resume_value_is_supported(value: str, source_text: str) -> bool:
+    value_words = _content_words(value)
+    source_words = _content_words(source_text)
+    if not value_words:
+        return False
+    compact_value = "".join(value_words)
+    compact_source = "".join(source_words)
+    if compact_value in compact_source:
+        return True
+    source_set = set(source_words)
+    meaningful = [word for word in value_words if len(word) > 2]
+    return bool(meaningful) and sum(word in source_set for word in meaningful) / len(meaningful) >= 0.8
+
+
+def build_resume_content_check(
+    resume: Resume,
+    profile: ApplicantProfile | None,
+) -> ResumeContentCheckResponse:
+    items: list[ResumeContentCheckItem] = []
+
+    def add(field: str, label: str, value: str) -> None:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            status, message = "missing", "No information was extracted. Add it if it appears in your CV."
+        elif _resume_value_is_supported(cleaned, resume.source_text):
+            status, message = "matched", "Found in the uploaded CV."
+        else:
+            status, message = "review", "Not found as written in the uploaded CV. Confirm or correct it."
+        items.append(ResumeContentCheckItem(field=field, label=label, value=cleaned, status=status, message=message))
+
+    add("profile.full_name", "Full name", f"{profile.first_name} {profile.last_name}" if profile else "")
+    add("profile.phone", "Phone", profile.phone if profile else "")
+    add("profile.email", "Email", profile.email if profile else "")
+    try:
+        experiences = json.loads(resume.experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        experiences = []
+    if not experiences:
+        items.append(ResumeContentCheckItem(
+            field="experiences", label="Structured experience", value="", status="missing",
+            message="No work experience was extracted. Review the CV text and add experience manually if needed.",
+        ))
+    for index, experience in enumerate(experiences, start=1):
+        prefix = f"experiences.{index}"
+        add(f"{prefix}.role_title", f"Experience {index} — role title", str(experience.get("role_title") or ""))
+        add(f"{prefix}.organization", f"Experience {index} — organisation", str(experience.get("organization") or ""))
+        add(f"{prefix}.responsibility", f"Experience {index} — responsibilities", str(experience.get("responsibility") or ""))
+        result = str(experience.get("result") or "")
+        if result:
+            add(f"{prefix}.result", f"Experience {index} — result", result)
+    matched_count = sum(item.status == "matched" for item in items)
+    review_count = sum(item.status == "review" for item in items)
+    missing_count = sum(item.status == "missing" for item in items)
+    return ResumeContentCheckResponse(
+        ready=review_count == 0 and missing_count == 0,
+        matched_count=matched_count,
+        review_count=review_count,
+        missing_count=missing_count,
+        items=items,
+    )
 
 
 def get_for_user(session: Session, model, record_id: int, user_id: UUID | None):
@@ -477,6 +543,19 @@ def list_resumes(
     user_id: UUID | None = Depends(get_current_user),
 ):
     return session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).all()
+
+
+@app.get("/resumes/{resume_id}/content-check", response_model=ResumeContentCheckResponse)
+def check_resume_content(
+    resume_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    resume = get_for_user(session, Resume, resume_id, user_id)
+    if not resume:
+        raise HTTPException(404, "Resume not found.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id)).first()
+    return build_resume_content_check(resume, profile)
 
 
 @app.patch("/resumes/{resume_id}", response_model=Resume)
