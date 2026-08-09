@@ -5,6 +5,7 @@ import re
 from openai import OpenAI, OpenAIError
 from .config import settings
 from .evidence_matcher import matched_evidence_pack, normalise_match_result, validate_match_result
+from .selection_logic import hard_validate_response
 
 
 EVIDENCE_STOP_WORDS = {
@@ -180,6 +181,93 @@ Return JSON only in this shape:
     if errors:
         raise AIServiceError(errors[0])
     return normalised
+
+
+def _selection_provider_response(prompt: str) -> str:
+    provider = settings.ai_provider.strip().lower()
+    if provider == "deepseek":
+        return _deepseek_draft(prompt)
+    if provider != "openai":
+        raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
+    try:
+        return _openai_draft(f"{safety_instruction()}\n\n{prompt}")
+    except OpenAIError:
+        if not settings.ai_fallback_to_deepseek:
+            raise
+        return _deepseek_draft(prompt)
+
+
+def generate_selection_criteria_bundle(ckb_json: str, selection_plan_json: str) -> dict:
+    try:
+        ckb = json.loads(ckb_json or "[]")
+        plan = json.loads(selection_plan_json or "{}")
+    except json.JSONDecodeError as error:
+        raise ValueError("CKB or Selection Plan JSON is invalid.") from error
+    if not isinstance(ckb, list) or not isinstance(plan, dict) or not plan.get("items"):
+        raise ValueError("No Selection Criteria plan is available for generation.")
+    evidence_by_id = {str(item.get("evidence_id")): item for item in ckb if isinstance(item, dict)}
+    responses: list[dict] = []
+    used_ids: list[str] = []
+    for plan_item in plan["items"]:
+        matched = [evidence_by_id[value] for value in plan_item.get("matched_evidence") or [] if value in evidence_by_id]
+        base_prompt = f"""You are writing one Selection Criterion response for an Australian government application.
+
+GOVERNMENT WRITING RULES:
+- Use Australian English, active voice and natural professional language.
+- Do not open like an email or letter.
+- Do not copy the criterion wording verbatim.
+- Do not invent or alter employers, roles, dates, actions, achievements, motivations or figures.
+- Every factual claim must be supported by the supplied source_text.
+- If evidence is transferable or weak, frame it conservatively. If evidence is insufficient, do not fabricate a story.
+
+CRITERION PLAN:
+{json.dumps(plan_item, ensure_ascii=False)}
+
+MATCHED CKB EVIDENCE (the only factual source):
+{json.dumps(matched, ensure_ascii=False)}
+
+Write about {plan_item.get('allocated_word_limit')} words. Return JSON only:
+{{"criteria_id":"{plan_item.get('criteria_id')}","evidence_used":["EV..."],"star":{{"situation":"...","task":"...","action":"...","result":"..."}},"final_response":"natural paragraph text","word_count":0}}
+
+Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include only IDs materially used in final_response. The STAR fields are audit fields; do not print S/T/A/R labels inside final_response."""
+        validation = None
+        response: dict = {}
+        for attempt in range(2):
+            retry_note = ""
+            if validation and validation["issues"]:
+                retry_note = "\n\nYour previous output failed deterministic validation. Correct only these issues:\n" + json.dumps(validation["issues"], ensure_ascii=False)
+            try:
+                response = _json_object(_selection_provider_response(base_prompt + retry_note))
+            except (OpenAIError, ValueError) as error:
+                if attempt == 1:
+                    raise AIServiceError(f"Criterion {plan_item.get('criteria_id')} could not be generated as valid JSON.") from error
+                validation = {"issues": [{"code": "invalid_json", "message": "Return one valid JSON object only."}]}
+                continue
+            if str(response.get("criteria_id") or "") != str(plan_item.get("criteria_id")):
+                validation = {"issues": [{"code": "criteria_mismatch", "message": "Return the exact criteria_id from the plan."}]}
+            else:
+                validation = hard_validate_response(response, plan_item)
+            if validation.get("valid"):
+                break
+        if not validation or not validation.get("valid"):
+            issue = (validation or {}).get("issues", [{}])[0].get("message", "Unknown validation error")
+            raise AIServiceError(f"Criterion {plan_item.get('criteria_id')} failed validation: {issue}")
+        response["word_count"] = validation["actual_word_count"]
+        response["validation"] = validation
+        responses.append(response)
+        for evidence_id in response.get("evidence_used") or []:
+            if evidence_id not in used_ids:
+                used_ids.append(evidence_id)
+    content = "\n\n".join(
+        f"## {item['plan']['criteria_text']}\n\n{item['response']['final_response'].strip()}"
+        for item in ({"plan": plan_item, "response": response} for plan_item, response in zip(plan["items"], responses))
+    )
+    return {
+        "content": content,
+        "responses": responses,
+        "used_experiences": used_ids,
+        "actual_total_word_count": sum(item["word_count"] for item in responses),
+    }
 
 
 def _finalise_date(content: str) -> str:

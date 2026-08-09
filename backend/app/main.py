@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, match_evidence_batch
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -1150,21 +1150,26 @@ def generate(
             application.selection_plan_json = selection_plan_json
             session.add(application)
             session.commit()
-        content = generate_draft(
-            master_resume.source_text,
-            application.job_description,
-            payload.document_type,
-            application.selection_criteria,
-            profile_text,
-            application.position_title,
-            application.company,
-            ckb_source_json,
-            used_experiences,
-            used_closing_styles,
-            job_model_json,
-            evidence_matches_json,
-            selection_plan_json,
-        )
+        selection_bundle = None
+        if payload.document_type == "selection_criteria":
+            selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
+            content = selection_bundle["content"]
+        else:
+            content = generate_draft(
+                master_resume.source_text,
+                application.job_description,
+                payload.document_type,
+                application.selection_criteria,
+                profile_text,
+                application.position_title,
+                application.company,
+                ckb_source_json,
+                used_experiences,
+                used_closing_styles,
+                job_model_json,
+                evidence_matches_json,
+                selection_plan_json,
+            )
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
         if payload.document_type == "tailored_resume":
@@ -1175,8 +1180,11 @@ def generate(
         raise HTTPException(400, str(error))
     except AIServiceError as error:
         raise HTTPException(502, str(error))
-    metadata = {"used_experiences": [], "closing_styles": []}
-    if payload.document_type in {"selection_criteria", "cover_letter"}:
+    metadata = {
+        "used_experiences": selection_bundle["used_experiences"] if selection_bundle else [],
+        "closing_styles": [],
+    }
+    if payload.document_type == "cover_letter":
         match = re.search(r"<!--\s*GENERATION_META\s+(\{.*?\})\s*-->", content, re.DOTALL)
         if match:
             try:
@@ -1186,6 +1194,7 @@ def generate(
             except (json.JSONDecodeError, AttributeError):
                 pass
             content = content[:match.start()].rstrip()
+    if payload.document_type in {"selection_criteria", "cover_letter"}:
         parsed_matches = json.loads(evidence_matches_json or "{}")
         allowed_evidence_ids = {
             str(evidence_id)
@@ -1200,6 +1209,7 @@ def generate(
         application_id=application.id,
         document_type=payload.document_type,
         content=content,
+        structured_content_json=json.dumps(selection_bundle or {}, ensure_ascii=False),
         used_experiences_json=json.dumps(metadata["used_experiences"]),
         closing_styles_json=json.dumps(metadata["closing_styles"]),
     )
