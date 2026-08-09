@@ -7,6 +7,20 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
+        job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        plan = '{"priorities":[{"criteria_id":"C1"}],"selected_evidence":[{"evidence_id":"EV001"}]}'
+        reviewer_output = '{"status":"fail","issues":[{"type":"unsupported_motivation","description":"The motivation was not declared."}],"recommendation":"Remove the claim."}'
+        with patch.object(ai, "_openai_draft", return_value=reviewer_output) as provider:
+            result = ai.review_cover_letter(ckb, job_model, plan, "Motivation: Not provided", "Cover letter text")
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("intent may support motivation", prompt)
+        self.assertIn("requirement_omission", prompt)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
+
     def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'

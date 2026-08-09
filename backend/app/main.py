@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_selection_criteria_batch
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace
 from .auth import get_current_user
@@ -793,10 +793,12 @@ def quality_check(
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     content_to_check = {key: value.content for key, value in latest.items() if key in required}
-    selection_document = latest.get("selection_criteria")
-    if selection_document and (selection_document.reviewer_json or "{}").strip() not in {"", "{}"}:
+    for reviewed_type in ("selection_criteria", "cover_letter"):
+        reviewed_document = latest.get(reviewed_type)
+        if not reviewed_document or (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
+            continue
         try:
-            reviewer = json.loads(selection_document.reviewer_json)
+            reviewer = json.loads(reviewed_document.reviewer_json)
         except json.JSONDecodeError:
             reviewer = {"status": "fail", "results": []}
         if reviewer.get("status") == "fail":
@@ -810,14 +812,14 @@ def quality_check(
                     issues.append(QualityCheckIssue(
                         severity="error",
                         code=f"reviewer_{issue.get('type', 'finding')}",
-                        message=str(issue.get("description") or "The Selection Criteria Reviewer found a material issue."),
-                        document_type="selection_criteria",
+                        message=str(issue.get("description") or f"The {reviewed_type.replace('_', ' ').title()} Reviewer found a material issue."),
+                        document_type=reviewed_type,
                     ))
             else:
                 issues.append(QualityCheckIssue(
                     severity="error", code="reviewer_failed",
-                    message="The Selection Criteria Reviewer did not pass this document. Regenerate or review it manually.",
-                    document_type="selection_criteria",
+                    message=f"The {reviewed_type.replace('_', ' ').title()} Reviewer did not pass this document. Regenerate or review it manually.",
+                    document_type=reviewed_type,
                 ))
     cover = content_to_check.get("cover_letter", "")
     tailored_resume = content_to_check.get("tailored_resume", "")
@@ -1175,6 +1177,7 @@ def generate(
         selection_bundle = None
         selection_review = None
         cover_letter_plan = None
+        cover_letter_review = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
             selection_review = review_selection_criteria_batch(ckb_source_json, selection_plan_json, selection_bundle)
@@ -1240,6 +1243,15 @@ def generate(
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
+    if payload.document_type == "cover_letter":
+        try:
+            cover_letter_review = review_cover_letter(
+                ckb_source_json, job_model_json, json.dumps(cover_letter_plan or {}, ensure_ascii=False), profile_text, content
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        except AIServiceError as error:
+            raise HTTPException(502, str(error))
     run_id = str(uuid4())
     provider = settings.ai_provider.strip().lower()
     model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
@@ -1251,7 +1263,7 @@ def generate(
         provider=provider,
         model=model_name,
         evidence_ids=[str(value) for value in metadata["used_experiences"]],
-        reviewer=selection_review,
+        reviewer=selection_review or cover_letter_review,
     )
     document = GeneratedDocument(
         user_id=user_id,
@@ -1259,7 +1271,7 @@ def generate(
         document_type=payload.document_type,
         content=content,
         structured_content_json=json.dumps(selection_bundle or cover_letter_plan or {}, ensure_ascii=False),
-        reviewer_json=json.dumps(selection_review or {}, ensure_ascii=False),
+        reviewer_json=json.dumps(selection_review or cover_letter_review or {}, ensure_ascii=False),
         run_id=run_id,
         trace_json=json.dumps(trace, ensure_ascii=False),
         used_experiences_json=json.dumps(metadata["used_experiences"]),
