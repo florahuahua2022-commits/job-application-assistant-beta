@@ -271,6 +271,27 @@ select:focus {
 .contentCheckItem > div { display: grid; gap: 3px; min-width: 0; }
 .contentCheckItem small { overflow-wrap: anywhere; }
 
+.reviewerResult {
+  margin: 14px 0;
+  padding: 13px 15px;
+  border-radius: 10px;
+}
+
+.reviewerResult.pass {
+  background: #e8f3ef;
+  border: 1px solid #9bcabd;
+}
+
+.reviewerResult.fail {
+  background: #fff1ed;
+  border: 1px solid #d98d79;
+}
+
+.reviewerResult ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
 @media (max-width: 760px) {
   .backupActions,
   .backupRow {

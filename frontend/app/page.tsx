@@ -10,7 +10,8 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 type Experience = { id: string; role_title: string; organization: string; responsibility: string; context: string; result: string; no_result_data: boolean };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string };
 type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; status: string; submission_reference?: string; submitted_at?: string };
-type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; created_at: string };
+type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; created_at: string };
+type ReviewerResult = { status: "pass" | "fail"; results: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; description: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
 type QualityResult = { ready: boolean; issues: QualityIssue[]; checked_documents: string[] };
 type ResumeContentCheckItem = { field: string; label: string; value: string; status: "matched" | "review" | "missing"; message: string };
@@ -143,6 +144,10 @@ export default function Home() {
   }, [documents]);
 
   const activeDocument = latestDocuments[activeType];
+  const activeReviewer = useMemo(() => {
+    if (!activeDocument?.reviewer_json) return null;
+    try { return JSON.parse(activeDocument.reviewer_json) as ReviewerResult; } catch { return null; }
+  }, [activeDocument?.reviewer_json]);
   const activeEvidence = useMemo(() => {
     if (!activeDocument?.used_experiences_json) return [];
     try {
@@ -838,6 +843,7 @@ export default function Home() {
                 </form>
               </details>
               {documents.length ? <>
+                {activeReviewer && <div className={activeReviewer.status === "pass" ? "reviewerResult pass" : "reviewerResult fail"}><strong>{activeReviewer.status === "pass" ? "Batch Reviewer passed" : "Batch Reviewer found issues"}</strong>{activeReviewer.status === "fail" && <ul>{activeReviewer.results.flatMap((result) => result.issues.map((issue) => <li key={`${result.criteria_id}-${issue.type}`}>{result.criteria_id}: {issue.description}</li>))}</ul>}</div>}
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
                 <div className="templatePicker"><div><strong>Export style</strong><small>All options are single-column and ATS-friendly.</small></div><select aria-label="Export style" value={exportTemplate} onChange={(event) => setExportTemplate(event.target.value as "classic" | "modern" | "traditional")}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option></select></div>
                 {activeDocument && <div className="editor">{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}

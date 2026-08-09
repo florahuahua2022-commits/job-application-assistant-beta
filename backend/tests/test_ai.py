@@ -7,6 +7,22 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'
+        bundle = {"responses": [
+            {"criteria_id": "C1", "evidence_used": ["EV001"], "final_response": "I prepared reports."},
+            {"criteria_id": "C2", "evidence_used": [], "final_response": "I have no direct procurement example."},
+        ]}
+        reviewer_output = '{"results":[{"criteria_id":"C1","status":"pass","issues":[]},{"criteria_id":"C2","status":"fail","issues":[{"type":"unsupported_claim","description":"The claim needs evidence."}],"recommendation":"Review manually."}]}'
+        with patch.object(ai, "_openai_draft", return_value=reviewer_output) as call:
+            result = ai.review_selection_criteria_batch(ckb, plan, bundle)
+
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("Do not rewrite", call.call_args.args[0])
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["results"][1]["issues"][0]["type"], "unsupported_claim")
+
     def test_generates_and_validates_each_selection_criterion_separately(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'
         plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"],"match_type":"direct","coverage":"strong","evidence_status":"strong"},{"criteria_id":"C2","criteria_text":"Qualification","allocated_word_limit":100,"matched_evidence":["EV002"],"match_type":"direct","coverage":"strong","evidence_status":"strong"}]}'

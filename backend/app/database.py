@@ -36,6 +36,8 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE generateddocument ADD COLUMN closing_styles_json TEXT NOT NULL DEFAULT '[]'"))
                 if "structured_content_json" not in document_columns:
                     connection.execute(text("ALTER TABLE generateddocument ADD COLUMN structured_content_json TEXT NOT NULL DEFAULT '{}'"))
+                if "reviewer_json" not in document_columns:
+                    connection.execute(text("ALTER TABLE generateddocument ADD COLUMN reviewer_json TEXT NOT NULL DEFAULT '{}'"))
             if "jobapplication" in table_names:
                 application_columns = {column["name"] for column in inspector.get_columns("jobapplication")}
                 if "job_model_json" not in application_columns:
@@ -70,6 +72,8 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE generateddocument ADD COLUMN closing_styles_json TEXT DEFAULT '[]'"))
             if "structured_content_json" not in document_columns:
                 connection.execute(text("ALTER TABLE generateddocument ADD COLUMN structured_content_json TEXT DEFAULT '{}'"))
+            if "reviewer_json" not in document_columns:
+                connection.execute(text("ALTER TABLE generateddocument ADD COLUMN reviewer_json TEXT DEFAULT '{}'"))
             for table_name in ("applicantprofile", "referee", "resume", "jobapplication", "generateddocument"):
                 if table_name in inspector.get_table_names():
                     columns = {column["name"] for column in inspector.get_columns(table_name)}
