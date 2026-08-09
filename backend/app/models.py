@@ -70,6 +70,7 @@ class JobApplication(SQLModel, table=True):
     job_model_json: str = "{}"
     evidence_matches_json: str = "{}"
     selection_plan_json: str = "{}"
+    selection_confirmations_json: str = "[]"
     deadline: date | None = None
     status: ApplicationStatus = ApplicationStatus.draft
     submission_reference: str | None = None
@@ -237,6 +238,10 @@ class SelectionCriteriaAccessResponse(SQLModel):
     remaining_credits: int | None = None
     referral_code: str | None = None
     referral_claimed: bool = False
+
+
+class SelectionCriteriaConfirmationRequest(SQLModel):
+    criteria_ids: list[str] = Field(default_factory=list)
 
 
 class GeneratedDocumentUpdate(SQLModel):

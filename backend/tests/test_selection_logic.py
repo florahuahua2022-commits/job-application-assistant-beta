@@ -1,9 +1,18 @@
 import unittest
 
-from app.selection_logic import allocate_word_limits, build_selection_plan, evidence_status, hard_validate_response
+from app.selection_logic import allocate_word_limits, build_selection_plan, criteria_requiring_confirmation, evidence_status, hard_validate_response
 
 
 class SelectionApplicationLogicTests(unittest.TestCase):
+    def test_only_transferable_and_weak_criteria_require_confirmation(self):
+        plan = {"items": [
+            {"criteria_id": "C1", "evidence_status": "strong"},
+            {"criteria_id": "C2", "evidence_status": "transferable"},
+            {"criteria_id": "C3", "evidence_status": "weak"},
+        ]}
+
+        self.assertEqual(criteria_requiring_confirmation(plan), {"C2", "C3"})
+
     def test_maps_match_and_coverage_to_frozen_user_status(self):
         self.assertEqual(evidence_status("direct", "strong"), "strong")
         self.assertEqual(evidence_status("direct", "partial"), "transferable")

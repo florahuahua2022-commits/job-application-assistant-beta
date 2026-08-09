@@ -8,8 +8,10 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 type Experience = { id: string; role_title: string; organization: string; responsibility: string; context: string; result: string; no_result_data: boolean };
-type Resume = { id: number; title: string; source_text: string; experiences_json?: string };
-type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; status: string; submission_reference?: string; submitted_at?: string };
+type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
+type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string };
+type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
+type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; created_at: string };
 type ReviewerResult = { status: "pass" | "fail"; results: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; description: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
@@ -539,6 +541,19 @@ export default function Home() {
       window.alert(message);
       return;
     }
+    let requiredConfirmations: string[] = [];
+    let confirmedCriteria: string[] = [];
+    try {
+      const plan = JSON.parse(application.selection_plan_json || "{}");
+      requiredConfirmations = (plan.items || []).filter((item: SelectionPlanItem) => item.evidence_status === "transferable" || item.evidence_status === "weak").map((item: SelectionPlanItem) => item.criteria_id);
+      confirmedCriteria = JSON.parse(application.selection_confirmations_json || "[]");
+    } catch { requiredConfirmations = []; confirmedCriteria = []; }
+    if (requiredConfirmations.some((criteriaId) => !confirmedCriteria.includes(criteriaId))) {
+      const message = "Review and confirm every Transferable or Weak Selection Criterion before continuing.";
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
     const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/prepare-submission`, { method: "POST" });
     const result = await response.json();
     if (!response.ok) return setNotice(result.detail || "Add the job application link before continuing.");
@@ -640,6 +655,33 @@ export default function Home() {
   }
 
   const selected = applications.find((application) => application.id === selectedApplication);
+  const selectionPlan = useMemo(() => {
+    try { return JSON.parse(selected?.selection_plan_json || "{}").items as SelectionPlanItem[] || []; } catch { return []; }
+  }, [selected?.selection_plan_json]);
+  const confirmedSelectionCriteria = useMemo(() => {
+    try { return JSON.parse(selected?.selection_confirmations_json || "[]") as string[]; } catch { return []; }
+  }, [selected?.selection_confirmations_json]);
+  const ckbById = useMemo(() => {
+    try {
+      const items = JSON.parse(resumes[0]?.ckb_json || "[]") as CkbEvidence[];
+      return Object.fromEntries(items.map((item) => [item.evidence_id, item]));
+    } catch { return {} as Record<string, CkbEvidence>; }
+  }, [resumes]);
+  const reviewerByCriteria = useMemo(() => Object.fromEntries((activeReviewer?.results || []).map((item) => [item.criteria_id, item])), [activeReviewer]);
+
+  async function setCriterionConfirmation(criteriaId: string, checked: boolean) {
+    if (!selectedApplication) return;
+    const next = checked
+      ? Array.from(new Set([...confirmedSelectionCriteria, criteriaId]))
+      : confirmedSelectionCriteria.filter((value) => value !== criteriaId);
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/selection-confirmations`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ criteria_ids: next }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not save this confirmation.");
+    setApplications((current) => current.map((item) => item.id === result.id ? result : item));
+    setNotice(checked ? "Criterion reviewed and confirmed." : "Criterion confirmation removed.");
+  }
   const requiredPackTypes = selected?.selection_criteria?.trim() ? packTypes : packTypes.slice(0, 2);
   const packReady = requiredPackTypes.every((type) => latestDocuments[type]);
   const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, applications.filter((application) => application.status === status).length])), [applications]);
@@ -844,6 +886,7 @@ export default function Home() {
               </details>
               {documents.length ? <>
                 {activeReviewer && <div className={activeReviewer.status === "pass" ? "reviewerResult pass" : "reviewerResult fail"}><strong>{activeReviewer.status === "pass" ? "Batch Reviewer passed" : "Batch Reviewer found issues"}</strong>{activeReviewer.status === "fail" && <ul>{activeReviewer.results.flatMap((result) => result.issues.map((issue) => <li key={`${result.criteria_id}-${issue.type}`}>{result.criteria_id}: {issue.description}</li>))}</ul>}</div>}
+                {activeType === "selection_criteria" && selectionPlan.length > 0 && <div className="criteriaReviewPanel"><div><strong>Selection Criteria evidence check</strong><p className="helper">Strong is ready for normal review. Transferable and Weak responses require your explicit confirmation.</p></div>{selectionPlan.map((item) => { const review = reviewerByCriteria[item.criteria_id]; const needsConfirmation = item.evidence_status !== "strong"; return <article className={`criterionReviewCard ${item.evidence_status}`} key={item.criteria_id}><div className="criterionReviewHeading"><span className="criterionStatus">{item.evidence_status === "strong" ? "Strong" : item.evidence_status === "transferable" ? "Transferable" : "Weak"}</span><span className={review?.status === "pass" ? "reviewStatus pass" : "reviewStatus fail"}>{review?.status === "pass" ? "Reviewer passed" : "Needs review"}</span></div><strong>{item.criteria_text}</strong><small>Target: {item.allocated_word_limit} words · {item.match_type} match · {item.coverage} coverage</small><div className="criterionSources"><small>Evidence sources</small>{item.matched_evidence.length ? <ul>{item.matched_evidence.map((evidenceId) => <li key={evidenceId}><code>{evidenceId}</code> {ckbById[evidenceId]?.source_section || "Uploaded Master CV"}</li>)}</ul> : <p>No direct evidence matched. Check this response carefully.</p>}</div>{review?.issues?.length > 0 && <ul className="criterionIssues">{review.issues.map((issue: { type: string; description: string }) => <li key={issue.type}>{issue.description}</li>)}</ul>}{needsConfirmation && <label className="criterionConfirmation"><input type="checkbox" checked={confirmedSelectionCriteria.includes(item.criteria_id)} onChange={(event) => setCriterionConfirmation(item.criteria_id, event.target.checked)} /> I reviewed this {item.evidence_status} response and confirm it is truthful.</label>}</article>; })}</div>}
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
                 <div className="templatePicker"><div><strong>Export style</strong><small>All options are single-column and ATS-friendly.</small></div><select aria-label="Export style" value={exportTemplate} onChange={(event) => setExportTemplate(event.target.value as "classic" | "modern" | "traditional")}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option></select></div>
                 {activeDocument && <div className="editor">{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}

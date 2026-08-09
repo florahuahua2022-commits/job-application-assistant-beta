@@ -18,9 +18,9 @@ from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
-from .selection_logic import build_selection_plan
+from .selection_logic import build_selection_plan, criteria_requiring_confirmation
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -76,6 +76,7 @@ def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
     for application in session.exec(select_for_user(JobApplication, user_id)).all():
         application.evidence_matches_json = "{}"
         application.selection_plan_json = "{}"
+        application.selection_confirmations_json = "[]"
         session.add(application)
     session.commit()
 
@@ -692,6 +693,7 @@ def update_application(
         )
         application.evidence_matches_json = "{}"
         application.selection_plan_json = "{}"
+        application.selection_confirmations_json = "[]"
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()
@@ -1243,6 +1245,9 @@ def generate(
         closing_styles_json=json.dumps(metadata["closing_styles"]),
     )
     session.add(document)
+    if payload.document_type == "selection_criteria":
+        application.selection_confirmations_json = "[]"
+        session.add(application)
     if selection_credit_key and user_id is not None:
         session.add(CreditLedger(
             user_id=user_id,
@@ -1261,6 +1266,30 @@ def generate(
     return document
 
 
+@app.post("/applications/{application_id}/selection-confirmations", response_model=JobApplication)
+def save_selection_confirmations(
+    application_id: int,
+    payload: SelectionCriteriaConfirmationRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    try:
+        plan = json.loads(application.selection_plan_json or "{}")
+    except json.JSONDecodeError as error:
+        raise HTTPException(400, "Selection Criteria plan is invalid. Regenerate the document.") from error
+    review_required = criteria_requiring_confirmation(plan)
+    confirmed = sorted(set(payload.criteria_ids) & review_required)
+    application.selection_confirmations_json = json.dumps(confirmed)
+    application.updated_at = datetime.utcnow()
+    session.add(application)
+    session.commit()
+    session.refresh(application)
+    return application
+
+
 @app.post("/applications/{application_id}/prepare-submission")
 def prepare_submission(
     application_id: int,
@@ -1270,5 +1299,13 @@ def prepare_submission(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application or not application.job_url:
         raise HTTPException(400, "A job URL is required before preparing a submission.")
+    try:
+        plan = json.loads(application.selection_plan_json or "{}")
+        confirmed = set(json.loads(application.selection_confirmations_json or "[]"))
+    except json.JSONDecodeError as error:
+        raise HTTPException(400, "Selection Criteria review state is invalid. Regenerate and review it again.") from error
+    required_confirmations = criteria_requiring_confirmation(plan)
+    if required_confirmations - confirmed:
+        raise HTTPException(400, "Review and confirm every Transferable or Weak Selection Criterion before continuing.")
     # V1 deliberately returns an explicit user-confirmed task. Platform-specific Playwright adapters come in phase 5.
     return {"mode": "user_confirmed", "job_url": application.job_url, "message": "Open the job URL, review every field and submit it yourself. CAPTCHA and final submission are never automated."}
