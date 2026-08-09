@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
 from .applicant_profile import applicant_profile_prompt
-from .generation_trace import build_generation_trace
+from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -1076,6 +1076,24 @@ def export_generated_document(
         payload = create_pdf(document.content, label.replace("_", " "), template)
         media_type = "application/pdf"
     return Response(payload, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'})
+
+
+@app.get("/documents/{document_id}/trace")
+def export_document_trace(
+    document_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    document = get_for_user(session, GeneratedDocument, document_id, user_id)
+    if not document:
+        raise HTTPException(404, "Generated document not found.")
+    bundle = build_trace_bundle(document)
+    filename = safe_filename(f"{document.document_type}_{document.run_id or document.id}_Trace")
+    return Response(
+        json.dumps(bundle, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.json"'},
+    )
 
 
 @app.get("/applications/{application_id}/export-pack")

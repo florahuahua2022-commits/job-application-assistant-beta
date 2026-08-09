@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 from .applicant_profile import APPLICANT_PROFILE_SCHEMA_VERSION
@@ -11,6 +12,29 @@ from .selection_logic import SELECTION_PLAN_SCHEMA_VERSION
 
 GENERATION_TRACE_SCHEMA_VERSION = "1.0"
 DOCUMENT_PROMPT_VERSION = "1.0"
+
+
+def _json_value(value: str, fallback: Any) -> Any:
+    try:
+        return json.loads(value or "")
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def build_trace_bundle(document: Any) -> dict[str, Any]:
+    return {
+        "bundle_schema_version": "1.0",
+        "run_id": str(document.run_id or ""),
+        "document_id": document.id,
+        "application_id": document.application_id,
+        "document_type": document.document_type,
+        "generated_at": document.created_at.isoformat() if hasattr(document.created_at, "isoformat") else str(document.created_at),
+        "manifest": _json_value(document.trace_json, {}),
+        "generation_plan": _json_value(document.structured_content_json, {}),
+        "reviewer": _json_value(document.reviewer_json, {}),
+        "used_evidence_ids": _json_value(document.used_experiences_json, []),
+        "final_output": document.content,
+    }
 
 
 def build_generation_trace(
@@ -46,4 +70,3 @@ def build_generation_trace(
             "finding_count": sum(len(item.get("issues") or []) for item in (reviewer or {}).get("results") or []),
         },
     }
-

@@ -1,6 +1,8 @@
 import unittest
+from datetime import datetime
+from types import SimpleNamespace
 
-from app.generation_trace import GENERATION_TRACE_SCHEMA_VERSION, build_generation_trace
+from app.generation_trace import GENERATION_TRACE_SCHEMA_VERSION, build_generation_trace, build_trace_bundle
 
 
 class GenerationTraceTests(unittest.TestCase):
@@ -40,6 +42,25 @@ class GenerationTraceTests(unittest.TestCase):
 
         self.assertEqual(trace["review"], {"status": "not_run", "finding_count": 0})
         self.assertTrue(trace["created_at"].endswith("+00:00"))
+
+    def test_export_bundle_contains_plan_review_evidence_and_final_output(self):
+        document = SimpleNamespace(
+            id=9, run_id="run-789", application_id=7, document_type="cover_letter",
+            created_at=datetime(2026, 8, 9, 10, 0, 0),
+            trace_json='{"schema_version":"1.0"}',
+            structured_content_json='{"priorities":[{"criteria_id":"C1"}]}',
+            reviewer_json='{"status":"pass","results":[]}',
+            used_experiences_json='["EV001"]',
+            content="Final cover letter text.",
+        )
+
+        bundle = build_trace_bundle(document)
+
+        self.assertEqual(bundle["bundle_schema_version"], "1.0")
+        self.assertEqual(bundle["manifest"]["schema_version"], "1.0")
+        self.assertEqual(bundle["generation_plan"]["priorities"][0]["criteria_id"], "C1")
+        self.assertEqual(bundle["used_evidence_ids"], ["EV001"])
+        self.assertEqual(bundle["final_output"], document.content)
 
 
 if __name__ == "__main__":
