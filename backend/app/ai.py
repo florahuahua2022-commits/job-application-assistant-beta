@@ -4,6 +4,7 @@ import re
 
 from openai import OpenAI, OpenAIError
 from .config import settings
+from .evidence_matcher import matched_evidence_pack, normalise_match_result, validate_match_result
 
 
 EVIDENCE_STOP_WORDS = {
@@ -86,6 +87,16 @@ class AIServiceError(Exception):
     """A safe, user-facing failure when the AI provider cannot generate a draft."""
 
 
+def _json_object(value: str) -> dict:
+    cleaned = value.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        raise ValueError("The AI matcher did not return a JSON object.")
+    return parsed
+
+
 def _openai_draft(prompt: str) -> str:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -119,6 +130,58 @@ def _deepseek_draft(prompt: str) -> str:
     return content
 
 
+def match_evidence_batch(ckb_json: str, job_model_json: str) -> dict:
+    try:
+        ckb = json.loads(ckb_json or "[]")
+        job_model = json.loads(job_model_json or "{}")
+    except json.JSONDecodeError as error:
+        raise ValueError("CKB or Job Model JSON is invalid.") from error
+    if not isinstance(ckb, list) or not isinstance(job_model, dict):
+        raise ValueError("CKB or Job Model has the wrong structure.")
+    if not job_model.get("criteria"):
+        return {"schema_version": "1.0", "matches": [], "unused_evidence": [str(item.get("evidence_id")) for item in ckb if item.get("evidence_id")]}
+    prompt = f"""You are a Selection Criteria evidence-matching assistant. Match all criteria in one batch so evidence choices are consistent across the application.
+
+Rules:
+- Return at most three evidence IDs per criterion, ranked by relevance.
+- Use match_type direct only for a clear evidence-to-requirement match.
+- Use inferred for genuinely adjacent or transferable evidence.
+- Use insufficient when no supportable evidence exists.
+- coverage must be strong, partial, or weak.
+- Relevance and factual strength outrank diversity. Prefer recency only between similarly strong evidence.
+- Do not invent evidence IDs. Do not downgrade a materially stronger match to create variety.
+- Return every criterion exactly once and list evidence not used anywhere in unused_evidence.
+
+SHARED JOB MODEL:
+{json.dumps(job_model, ensure_ascii=False)}
+
+CAREER KNOWLEDGE BASE:
+{json.dumps(ckb, ensure_ascii=False)}
+
+Return JSON only in this shape:
+{{"matches":[{{"criteria_id":"...","matched_evidence":["EV..."],"match_type":"direct|inferred|insufficient","coverage":"strong|partial|weak","reasoning":"one sentence"}}],"unused_evidence":["EV..."]}}"""
+    provider = settings.ai_provider.strip().lower()
+    try:
+        if provider == "deepseek":
+            raw = _deepseek_draft(prompt)
+        elif provider == "openai":
+            try:
+                raw = _openai_draft(prompt)
+            except OpenAIError:
+                if not settings.ai_fallback_to_deepseek:
+                    raise
+                raw = _deepseek_draft(prompt)
+        else:
+            raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
+        normalised = normalise_match_result(_json_object(raw), job_model, ckb)
+    except (OpenAIError, json.JSONDecodeError) as error:
+        raise AIServiceError("Evidence matching failed. Please try again.") from error
+    errors = validate_match_result(normalised, job_model, ckb)
+    if errors:
+        raise AIServiceError(errors[0])
+    return normalised
+
+
 def _finalise_date(content: str) -> str:
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
@@ -137,6 +200,7 @@ def generate_draft(
     used_experiences: str = "[]",
     used_closing_styles: str = "[]",
     structured_job_model: str = "{}",
+    evidence_matches_json: str = "{}",
 ) -> str:
     provider = settings.ai_provider.strip().lower()
     if provider not in {"openai", "deepseek"}:
@@ -156,10 +220,10 @@ def generate_draft(
         )
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
-    evidence_pack = build_evidence_pack(
+    evidence_pack = matched_evidence_pack(user_experiences_json, evidence_matches_json) or build_evidence_pack(
         master_resume, user_experiences_json, job_description, selection_criteria
     )
-    prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nMATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n{json.dumps(evidence_pack, ensure_ascii=False)}\n\nEVIDENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME (context only; do not introduce claims outside the matched evidence for Cover Letter or Selection Criteria):\n{master_resume}\n\nSHARED JOB MODEL (parsed employer requirements and limits; never applicant evidence):\n{structured_job_model}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES (requirements only, never applicant evidence):\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
+    prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nBATCH EVIDENCE MATCHES:\n{evidence_matches_json}\n\nMATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n{json.dumps(evidence_pack, ensure_ascii=False)}\n\nEVIDENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME (context only; do not introduce claims outside the matched evidence for Cover Letter or Selection Criteria):\n{master_resume}\n\nSHARED JOB MODEL (parsed employer requirements and limits; never applicant evidence):\n{structured_job_model}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES (requirements only, never applicant evidence):\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
 
     if provider == "deepseek":
         try:
