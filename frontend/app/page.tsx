@@ -267,9 +267,9 @@ export default function Home() {
         job_url: result.job_url || current.job_url,
       }));
       setJobImportState("done");
-      setNotice(result.source === "structured_job_posting"
+      setNotice(result.source === "structured_job_posting" || result.source === "page_body"
         ? "Job details imported. Please review them, then save the job."
-        : "The page supplied only partial details. Review and complete any blank fields before saving.");
+        : "The page supplied only a short summary. Paste the full advertisement below for the best result.");
     } catch {
       setJobImportState("error");
       setNotice("The automatic reader could not connect. Your link is still in the form; paste the job details manually below.");
