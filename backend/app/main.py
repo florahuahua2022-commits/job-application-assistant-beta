@@ -18,12 +18,15 @@ from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
 from .config import settings
+from .content_check import consolidate_quality_issues
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
+from .fact_boundaries import find_fact_boundary_issues
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
+from .jd_similarity import find_jd_similarity_issues
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
@@ -438,6 +441,7 @@ def document_release_blockers(
     application: JobApplication,
     profile: ApplicantProfile | None,
     expected_context_fingerprint: str | None = None,
+    evidence_text: str = "",
 ) -> list[str]:
     """Return deterministic P0 reasons that make a generated document unsafe to export."""
     blockers: list[str] = []
@@ -481,6 +485,22 @@ def document_release_blockers(
         )
         if availability == "not_specified" and any(claim in lowered for claim in availability_claims):
             blockers.append("The cover letter states availability that the applicant has not confirmed.")
+    if document.document_type in {"cover_letter", "tailored_resume"} and evidence_text:
+        motivation_confirmed = bool(profile and profile.motivation_confirmed)
+        blockers.extend(
+            issue["message"]
+            for issue in find_fact_boundary_issues(
+                document.content,
+                evidence_text,
+                motivation_confirmed=motivation_confirmed,
+            )
+            if issue["severity"] == "error"
+        )
+    blockers.extend(
+        issue["message"]
+        for issue in find_jd_similarity_issues(document.content, application.job_description)
+        if issue["severity"] == "error"
+    )
     return blockers
 
 
@@ -913,14 +933,61 @@ def quality_check(
                     message="The job, resume or applicant profile changed after this document was generated. Regenerate it before applying.",
                     document_type=document_type,
                 ))
+    if current_resume:
+        evidence_text = f"{current_resume.source_text}\n{current_resume.ckb_json or ''}"
+        for document_type in ("cover_letter", "tailored_resume"):
+            content = content_to_check.get(document_type, "")
+            if not content:
+                continue
+            for finding in find_fact_boundary_issues(
+                content,
+                evidence_text,
+                motivation_confirmed=bool(profile and profile.motivation_confirmed),
+            ):
+                issues.append(QualityCheckIssue(
+                    severity=finding["severity"],
+                    code=finding["code"],
+                    message=finding["message"],
+                    document_type=document_type,
+                ))
+    for document_type, content in content_to_check.items():
+        for finding in find_jd_similarity_issues(content, application.job_description):
+            issues.append(QualityCheckIssue(
+                severity=finding["severity"],
+                code=finding["code"],
+                message=finding["message"],
+                document_type=document_type,
+            ))
     for reviewed_type in ("selection_criteria", "cover_letter", "tailored_resume"):
         reviewed_document = latest.get(reviewed_type)
-        if not reviewed_document or (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
+        if not reviewed_document:
+            continue
+        if (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
+            issues.append(QualityCheckIssue(
+                severity="error",
+                code="reviewer_unavailable",
+                message=f"The {reviewed_type.replace('_', ' ').title()} factual review is unavailable. Run the check again before downloading.",
+                document_type=reviewed_type,
+                source="Factual reviewer",
+                rule="Every generated document must have a valid factual review result.",
+                recommended_action="Regenerate the document or rerun its factual review.",
+            ))
             continue
         try:
             reviewer = json.loads(reviewed_document.reviewer_json)
-        except json.JSONDecodeError:
-            reviewer = {"status": "fail", "results": []}
+        except (json.JSONDecodeError, TypeError):
+            reviewer = None
+        if not isinstance(reviewer, dict) or reviewer.get("status") not in {"pass", "fail"}:
+            issues.append(QualityCheckIssue(
+                severity="error",
+                code="reviewer_invalid_result",
+                message=f"The {reviewed_type.replace('_', ' ').title()} factual review returned an invalid result. No factual conclusion has been assumed.",
+                document_type=reviewed_type,
+                source="Factual reviewer",
+                rule="Reviewer failures must block release without fabricating a validation finding.",
+                recommended_action="Rerun the factual review. If the problem persists, contact support.",
+            ))
+            continue
         if reviewer.get("status") == "fail":
             reviewer_issues = [
                 issue
@@ -930,10 +997,14 @@ def quality_check(
             if reviewer_issues:
                 for issue in reviewer_issues:
                     issues.append(QualityCheckIssue(
-                        severity="error",
+                        severity=str(issue.get("severity") or "error"),
                         code=f"reviewer_{issue.get('type', 'finding')}",
                         message=str(issue.get("description") or f"The {reviewed_type.replace('_', ' ').title()} Reviewer found a material issue."),
                         document_type=reviewed_type,
+                        excerpt=str(issue.get("location") or "") or None,
+                        source=str(issue.get("evidence") or "") or "Factual reviewer",
+                        rule=str(issue.get("type") or "factual_review").replace("_", " "),
+                        recommended_action=str(issue.get("recommended_action") or "Review or regenerate the affected content."),
                     ))
             else:
                 issues.append(QualityCheckIssue(
@@ -1160,9 +1231,13 @@ def quality_check(
                 document_type="selection_criteria",
             ))
 
+    consolidated_issues = [
+        QualityCheckIssue(**item)
+        for item in consolidate_quality_issues([issue.model_dump() for issue in issues])
+    ]
     return QualityCheckResponse(
-        ready=not any(issue.severity == "error" for issue in issues),
-        issues=issues,
+        ready=not any(issue.severity == "error" for issue in consolidated_issues),
+        issues=consolidated_issues,
         checked_documents=sorted(content_to_check),
     )
 
@@ -1199,7 +1274,8 @@ def export_generated_document(
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
-    blockers = document_release_blockers(document, application, profile, expected_context)
+    evidence_text = f"{current_resume.source_text}\n{current_resume.ckb_json or ''}" if current_resume else ""
+    blockers = document_release_blockers(document, application, profile, expected_context, evidence_text)
     if blockers:
         raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(blockers))
     label = {
@@ -1263,10 +1339,11 @@ def export_application_pack(
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
+    evidence_text = f"{current_resume.source_text}\n{current_resume.ckb_json or ''}" if current_resume else ""
     blockers = [
         reason
         for document_type in required_types
-        for reason in document_release_blockers(latest[document_type], application, profile, expected_context)
+        for reason in document_release_blockers(latest[document_type], application, profile, expected_context, evidence_text)
     ]
     if blockers:
         raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(dict.fromkeys(blockers)))

@@ -266,10 +266,14 @@ class GeneratedDocumentUpdate(SQLModel):
 
 
 class QualityCheckIssue(SQLModel):
-    severity: str  # error | warning
+    severity: str  # error | warning | information
     code: str
     message: str
     document_type: str | None = None
+    excerpt: str | None = None
+    source: str | None = None
+    rule: str | None = None
+    recommended_action: str | None = None
 
 
 class QualityCheckResponse(SQLModel):

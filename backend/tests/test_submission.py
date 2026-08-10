@@ -199,6 +199,47 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertTrue(any("changed after" in blocker for blocker in blockers))
 
+    def test_release_blocker_rejects_fact_boundary_issue_even_when_reviewer_passed(self):
+        application = JobApplication(company="DTMI", position_title="Project Officer", job_description="JD")
+        document = GeneratedDocument(
+            application_id=1,
+            document_type="cover_letter",
+            content="Application for Project Officer. What draws me to this position is public service.",
+            reviewer_json='{"status":"pass","results":[]}',
+        )
+
+        blockers = document_release_blockers(
+            document,
+            application,
+            ApplicantProfile(first_name="Alex", last_name="Morgan", phone="0400000000", email="alex@example.com"),
+            evidence_text="Project support experience.",
+        )
+
+        self.assertTrue(any("personal motivation" in blocker for blocker in blockers))
+
+    def test_release_blocker_rejects_dtmi_multi_phrase_jd_copy(self):
+        application = JobApplication(
+            company="DTMI",
+            position_title="Project Officer",
+            job_description=(
+                "Maintain project documentation, contracts and technical records. "
+                "Manage competing priorities across multiple concurrent projects."
+            ),
+        )
+        document = GeneratedDocument(
+            application_id=1,
+            document_type="cover_letter",
+            content=(
+                "Application for Project Officer. I maintained project documentation, contracts and technical records "
+                "while managing competing priorities across multiple concurrent projects."
+            ),
+            reviewer_json='{"status":"pass","results":[]}',
+        )
+
+        blockers = document_release_blockers(document, application, None)
+
+        self.assertTrue(any("distinct JD phrases" in blocker for blocker in blockers))
+
     def test_organisation_match_accepts_common_acronym(self):
         self.assertTrue(organisation_is_named(
             "Minerals Research Institute of Western Australia",
@@ -439,9 +480,9 @@ class SubmissionRecordTests(unittest.TestCase):
             resume = session.exec(select(Resume)).first()
             context = generation_context_fingerprint(application, resume, profile)
             session.add_all([
-                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com", context_fingerprint=context),
-                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Senior Project Officer\n0400000000 applicant@example.com", context_fingerprint=context),
-                GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content="Evidence-based responses.", context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com", reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Senior Project Officer\n0400000000 applicant@example.com", reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content="Evidence-based responses.", reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context),
             ])
             session.commit()
 
@@ -461,8 +502,8 @@ class SubmissionRecordTests(unittest.TestCase):
             resume = session.exec(select(Resume)).first()
             context = generation_context_fingerprint(application, resume, profile)
             session.add_all([
-                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com", context_fingerprint=context),
-                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer at Example Agency\n0400000000 applicant@example.com " + "evidence " * 230, context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com", reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer at Example Agency\n0400000000 applicant@example.com " + "evidence " * 230, reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context),
             ])
             session.commit()
 
@@ -470,6 +511,35 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertTrue(response.json()["ready"])
         self.assertNotIn("missing_document", [issue["code"] for issue in response.json()["issues"]])
+
+    def test_quality_check_fails_closed_when_reviewer_is_unavailable(self):
+        with Session(self.engine) as session:
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer at Example Agency"),
+            ])
+            session.commit()
+
+        response = self.client.get(f"/applications/{self.application_id}/quality-check")
+
+        self.assertFalse(response.json()["ready"])
+        unavailable = [issue for issue in response.json()["issues"] if issue["code"] == "reviewer_unavailable"]
+        self.assertEqual(len(unavailable), 2)
+        self.assertTrue(all(issue["severity"] == "error" for issue in unavailable))
+
+    def test_quality_check_reports_invalid_reviewer_as_system_failure(self):
+        with Session(self.engine) as session:
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume", reviewer_json="not-json"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer at Example Agency", reviewer_json='{"status":"pass","results":[]}'),
+            ])
+            session.commit()
+
+        response = self.client.get(f"/applications/{self.application_id}/quality-check")
+
+        invalid = [issue for issue in response.json()["issues"] if issue["code"] == "reviewer_invalid_result"]
+        self.assertEqual(len(invalid), 1)
+        self.assertIn("No factual conclusion has been assumed", invalid[0]["message"])
 
     def test_job_change_marks_existing_document_stale_and_blocks_export(self):
         with Session(self.engine) as session:

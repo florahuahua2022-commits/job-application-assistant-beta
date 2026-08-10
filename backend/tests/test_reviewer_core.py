@@ -35,6 +35,16 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["results"][0]["criteria_id"], "cover_letter")
 
+    def test_llm_only_jd_similarity_is_advisory_until_deterministic_threshold_blocks(self):
+        result = normalise_document_review({"status": "fail", "issues": [{
+            "type": "jd_wording_repeated", "description": "The wording is semantically close to the JD."
+        }]}, "cover_letter")
+
+        finding = result["results"][0]["issues"][0]
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(finding["severity"], "advisory")
+        self.assertFalse(finding["blocks_release"])
+
 
 if __name__ == "__main__":
     unittest.main()

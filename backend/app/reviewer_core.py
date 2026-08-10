@@ -13,7 +13,7 @@ ISSUE_SEVERITY = {
     "unsupported_motivation": "major",
     "requirement_omission": "major",
     "limit_violation": "critical",
-    "jd_wording_repeated": "major",
+    "jd_wording_repeated": "advisory",
     "ai_tone": "major",
     "declared_evidence_unused": "major",
     "style_only": "advisory",
