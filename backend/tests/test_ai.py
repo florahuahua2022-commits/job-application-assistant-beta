@@ -78,6 +78,30 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("Keep meeting response", bundle["content"])
         self.assertEqual(bundle["telemetry"]["corrected_criteria"], 1)
 
+    def test_extractive_fallback_replaces_only_persistently_failed_criteria(self):
+        ckb = '[{"evidence_id":"EV001","source_section":"Work Experience > Agency","source_text":"Prepared monthly reports."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","matched_evidence":["EV001"]},{"criteria_id":"C2","criteria_text":"Procurement","matched_evidence":[]}]}'
+        existing = {"responses": [
+            {"criteria_id":"C1","evidence_used":["EV001"],"final_response":"Unsupported reporting claim.","word_count":3},
+            {"criteria_id":"C2","evidence_used":[],"final_response":"Keep this honest gap.","word_count":4},
+        ], "telemetry": {}}
+
+        bundle = ai.build_extractive_selection_fallback(ckb, plan, existing, {"C1"})
+
+        self.assertIn("the supplied resume states: Prepared monthly reports.", bundle["content"])
+        self.assertIn("Keep this honest gap", bundle["content"])
+        self.assertEqual(bundle["telemetry"]["extractive_fallback_criteria"], 1)
+
+    def test_invalid_generator_json_falls_back_without_failing_whole_bundle(self):
+        ckb = '[{"evidence_id":"EV001","source_section":"Work Experience > Agency","source_text":"Prepared monthly reports."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"]}]}'
+
+        with patch.object(ai, "_selection_provider_response", return_value="not-json"):
+            bundle = ai.generate_selection_criteria_bundle(ckb, plan)
+
+        self.assertIn("the supplied resume states: Prepared monthly reports.", bundle["content"])
+        self.assertEqual(bundle["responses"][0]["validation"]["fallback"], "extractive")
+
     def test_generates_and_validates_each_selection_criterion_separately(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'
         plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"],"match_type":"direct","coverage":"strong","evidence_status":"strong"},{"criteria_id":"C2","criteria_text":"Qualification","allocated_word_limit":100,"matched_evidence":["EV002"],"match_type":"direct","coverage":"strong","evidence_status":"strong"}]}'

@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
+from .ai import AIServiceError, build_evidence_pack, build_extractive_selection_fallback, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
 from .ai_runtime import AICallBudgetExceeded, ai_call_scope, begin_ai_run, current_ai_run, end_ai_run
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import DOCUMENT_PROMPT_VERSION, build_generation_trace, build_trace_bundle
@@ -1709,6 +1709,19 @@ def generate(
                     selection_review = review_selection_criteria_batch(
                         ckb_source_json, selection_plan_json, selection_bundle, master_resume.source_text
                     )
+                    if selection_review.get("status") == "fail":
+                        failed_ids = {
+                            str(result.get("criteria_id"))
+                            for result in selection_review.get("results") or []
+                            if result.get("status") == "fail"
+                        }
+                        if failed_ids:
+                            selection_bundle = build_extractive_selection_fallback(
+                                ckb_source_json, selection_plan_json, selection_bundle, failed_ids
+                            )
+                            selection_review = review_selection_criteria_batch(
+                                ckb_source_json, selection_plan_json, selection_bundle, master_resume.source_text
+                            )
             content = selection_bundle["content"]
         else:
             if payload.document_type == "cover_letter":

@@ -251,6 +251,40 @@ def _selection_provider_response(prompt: str) -> str:
         return _deepseek_draft(prompt)
 
 
+def _extractive_criterion_response(plan_item: dict, matched: list[dict]) -> dict:
+    evidence_ids: list[str] = []
+    statements: list[str] = []
+    for evidence in matched:
+        evidence_id = str(evidence.get("evidence_id") or "")
+        source = str(evidence.get("source_text") or "").strip(" \t-鈥?")
+        section = str(evidence.get("source_section") or "the supplied resume").strip()
+        if evidence_id:
+            evidence_ids.append(evidence_id)
+        if source:
+            statements.append(f"Under {section}, the supplied resume states: {source}")
+    final_response = " ".join(statements)
+    if final_response:
+        final_response += " No experience beyond these supplied records is claimed."
+    else:
+        final_response = (
+            "The supplied resume does not contain evidence for this criterion. "
+            "No additional experience is claimed."
+        )
+    return {
+        "criteria_id": str(plan_item.get("criteria_id") or ""),
+        "evidence_used": evidence_ids,
+        "star": {
+            "situation": "Source-preserving fallback",
+            "task": "Address the criterion without inference",
+            "action": "Present only matched resume evidence",
+            "result": "No unsupported result claimed",
+        },
+        "final_response": final_response,
+        "word_count": len(re.findall(r"\b[\w'-]+\b", final_response, flags=re.UNICODE)),
+        "validation": {"valid": True, "issues": [], "fallback": "extractive"},
+    }
+
+
 def generate_selection_criteria_bundle(
     ckb_json: str,
     selection_plan_json: str,
@@ -328,7 +362,11 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
                     response = _json_object(_selection_provider_response(base_prompt + retry_note))
             except (OpenAIError, ValueError) as error:
                 if attempt == 1:
-                    raise AIServiceError(f"Criterion {plan_item.get('criteria_id')} could not be generated as valid JSON.") from error
+                    validation = {"valid": False, "issues": [{
+                        "code": "invalid_json",
+                        "message": "The model did not return valid JSON after one retry.",
+                    }]}
+                    break
                 validation = {"issues": [{"code": "invalid_json", "message": "Return one valid JSON object only."}]}
                 continue
             if str(response.get("criteria_id") or "") != str(plan_item.get("criteria_id")):
@@ -338,11 +376,12 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
             if validation.get("valid"):
                 break
         if not validation or not validation.get("valid"):
-            issue = (validation or {}).get("issues", [{}])[0].get("message", "Unknown validation error")
-            raise AIServiceError(f"Criterion {plan_item.get('criteria_id')} failed validation: {issue}")
+            response = _extractive_criterion_response(plan_item, matched)
+            corrected_criteria += 1
+        else:
+            response["word_count"] = validation["actual_word_count"]
+            response["validation"] = validation
         generator_retries += attempt
-        response["word_count"] = validation["actual_word_count"]
-        response["validation"] = validation
         responses.append(response)
         for evidence_id in response.get("evidence_used") or []:
             if evidence_id not in used_ids:
@@ -361,6 +400,56 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
             "criterion_count": len(responses),
             "corrected_criteria": corrected_criteria,
         },
+    }
+
+
+def build_extractive_selection_fallback(
+    ckb_json: str,
+    selection_plan_json: str,
+    existing_bundle: dict,
+    failed_criteria_ids: set[str],
+) -> dict:
+    """Replace only persistently failing criteria with source-preserving prose."""
+    ckb = json.loads(ckb_json or "[]")
+    plan = json.loads(selection_plan_json or "{}")
+    evidence_by_id = {
+        str(item.get("evidence_id")): item for item in ckb if isinstance(item, dict)
+    }
+    existing_by_id = {
+        str(item.get("criteria_id")): item
+        for item in existing_bundle.get("responses") or []
+        if isinstance(item, dict)
+    }
+    responses: list[dict] = []
+    used_ids: list[str] = []
+    fallback_count = 0
+    for plan_item in plan.get("items") or []:
+        criteria_id = str(plan_item.get("criteria_id") or "")
+        if criteria_id not in failed_criteria_ids and criteria_id in existing_by_id:
+            response = existing_by_id[criteria_id]
+        else:
+            fallback_count += 1
+            matched = [
+                evidence_by_id[str(value)] for value in plan_item.get("matched_evidence") or []
+                if str(value) in evidence_by_id
+            ]
+            response = _extractive_criterion_response(plan_item, matched)
+        responses.append(response)
+        for evidence_id in response.get("evidence_used") or []:
+            if evidence_id not in used_ids:
+                used_ids.append(evidence_id)
+    content = "\n\n".join(
+        f"## {plan_item['criteria_text']}\n\n{response['final_response'].strip()}"
+        for plan_item, response in zip(plan.get("items") or [], responses)
+    )
+    telemetry = dict(existing_bundle.get("telemetry") or {})
+    telemetry["extractive_fallback_criteria"] = fallback_count
+    return {
+        "content": content,
+        "responses": responses,
+        "used_experiences": used_ids,
+        "actual_total_word_count": sum(int(item.get("word_count") or 0) for item in responses),
+        "telemetry": telemetry,
     }
 
 
@@ -392,7 +481,7 @@ For every criterion, check only these issue types:
 - declared_evidence_unused
 - unmatched_evidence_used
 
-Do not evaluate exact word counts, JSON structure, evidence reuse percentages or employer share; deterministic application logic already checks them. A stylistic preference alone must not fail a response.
+Do not evaluate exact word counts, JSON structure, evidence reuse percentages or employer share; deterministic application logic already checks them. A stylistic preference alone must not fail a response. When a response explicitly attributes wording to the supplied resume and preserves its source_text, accept that wording as evidence rather than treating the quotation itself as an inference.
 
 BATCH PACKAGE:
 {json.dumps(package, ensure_ascii=False)}
