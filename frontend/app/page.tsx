@@ -82,6 +82,15 @@ export default function Home() {
     return window.fetch(input, { ...init, headers });
   }
 
+  async function responseError(response: Response, fallback: string) {
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === "string") return payload.detail;
+      if (typeof payload?.detail?.message === "string") return payload.detail.message;
+    } catch { /* The server did not return JSON. */ }
+    return fallback;
+  }
+
   async function refresh() {
     const [profileResponse, resumeResponse, applicationResponse, backupResponse, selectionAccessResponse] = await Promise.all([
       authenticatedFetch(`${api}/profile`),
@@ -533,6 +542,13 @@ export default function Home() {
 
   async function reviewAndApply() {
     if (!selectedApplication) return;
+    if (draftSaveState === "dirty" || draftSaveState === "saving") {
+      const message = "Save your edits and run Final Check again before opening the employer page.";
+      setQualityResult(null);
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
     const application = applications.find((item) => item.id === selectedApplication);
     if (!application?.job_url?.trim()) {
       const message = "Add the application link under Edit saved job details before opening the employer page.";
@@ -567,7 +583,13 @@ export default function Home() {
     }
     const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/prepare-submission`, { method: "POST" });
     const result = await response.json();
-    if (!response.ok) return setNotice(result.detail || "Add the job application link before continuing.");
+    if (!response.ok) {
+      const message = typeof result.detail === "string" ? result.detail : result.detail?.message || "Add the job application link before continuing.";
+      setQualityResult(null);
+      setNotice(message);
+      window.alert(message);
+      return;
+    }
     const statusResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/status`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -643,8 +665,15 @@ export default function Home() {
 
   async function downloadDocument(format: "docx" | "pdf") {
     if (!activeDocument) return;
+    if (draftSaveState === "dirty" || draftSaveState === "saving") {
+      return setNotice("Save your edits and run Final Check again before downloading.");
+    }
     const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}/export?format=${format}&template=${exportTemplate}`);
-    if (!response.ok) return setNotice("Could not download this document.");
+    if (!response.ok) {
+      const message = await responseError(response, "Could not download this document.");
+      setQualityResult(null);
+      return setNotice(message);
+    }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = url;
@@ -655,8 +684,15 @@ export default function Home() {
 
   async function downloadPack(format: "docx" | "pdf") {
     if (!selectedApplication) return;
+    if (draftSaveState === "dirty" || draftSaveState === "saving") {
+      return setNotice("Save your edits and run Final Check again before downloading.");
+    }
     const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/export-pack?format=${format}&template=${exportTemplate}`);
-    if (!response.ok) return setNotice("Could not download the application pack.");
+    if (!response.ok) {
+      const message = await responseError(response, "Could not download the application pack.");
+      setQualityResult(null);
+      return setNotice(message);
+    }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = url;

@@ -541,6 +541,55 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(len(invalid), 1)
         self.assertIn("No factual conclusion has been assumed", invalid[0]["message"])
 
+    def test_final_check_gates_single_pack_and_prepare_then_edit_invalidates_it(self):
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.job_url = "https://example.com/apply"
+            resume = session.exec(select(Resume)).first()
+            context = generation_context_fingerprint(application, resume, None)
+            cv = GeneratedDocument(
+                application_id=self.application_id,
+                document_type="tailored_resume",
+                content="## Professional Summary\nProject support.\n## Key Skills\nReporting\n## Work Experience\nProject support.",
+                reviewer_json='{"status":"pass","results":[]}',
+                context_fingerprint=context,
+            )
+            cover = GeneratedDocument(
+                application_id=self.application_id,
+                document_type="cover_letter",
+                content="Application for Project Officer at Example Agency. " + "Project support evidence. " * 80,
+                reviewer_json='{"status":"pass","results":[]}',
+                context_fingerprint=context,
+            )
+            session.add_all([application, cv, cover])
+            session.commit()
+            session.refresh(cv)
+            cv_id = cv.id
+
+        before_check = self.client.get(f"/documents/{cv_id}/export?format=docx")
+        check = self.client.get(f"/applications/{self.application_id}/quality-check")
+        single = self.client.get(f"/documents/{cv_id}/export?format=docx")
+        pack = self.client.get(f"/applications/{self.application_id}/export-pack?format=docx")
+        prepare = self.client.post(f"/applications/{self.application_id}/prepare-submission")
+
+        self.assertEqual(before_check.status_code, 409)
+        self.assertIn("Run Final Check", before_check.json()["detail"])
+        self.assertTrue(check.json()["ready"])
+        self.assertEqual(single.status_code, 200)
+        self.assertEqual(pack.status_code, 200)
+        self.assertEqual(prepare.status_code, 200)
+
+        edited = self.client.patch(f"/documents/{cv_id}", json={"content": "Edited project support."})
+        stale_single = self.client.get(f"/documents/{cv_id}/export?format=pdf")
+        stale_pack = self.client.get(f"/applications/{self.application_id}/export-pack?format=pdf")
+        stale_prepare = self.client.post(f"/applications/{self.application_id}/prepare-submission")
+
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(stale_single.status_code, 409)
+        self.assertIn("changed after the last Final Check", stale_single.json()["detail"])
+        self.assertEqual(stale_pack.status_code, 409)
+        self.assertEqual(stale_prepare.status_code, 409)
+
     def test_job_change_marks_existing_document_stale_and_blocks_export(self):
         with Session(self.engine) as session:
             application = session.get(JobApplication, self.application_id)

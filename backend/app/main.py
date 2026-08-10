@@ -447,9 +447,11 @@ def document_release_blockers(
     blockers: list[str] = []
     try:
         reviewer = json.loads(document.reviewer_json or "{}")
-    except json.JSONDecodeError:
-        reviewer = {"status": "fail"}
-    if reviewer.get("status") == "fail":
+    except (json.JSONDecodeError, TypeError):
+        reviewer = None
+    if not isinstance(reviewer, dict) or reviewer.get("status") not in {"pass", "fail"}:
+        blockers.append("The factual review is missing or invalid. Run Final Check again before downloading.")
+    elif reviewer.get("status") == "fail":
         blockers.append("The factual reviewer found material issues.")
     if expected_context_fingerprint is not None:
         if not document.context_fingerprint:
@@ -502,6 +504,59 @@ def document_release_blockers(
         if issue["severity"] == "error"
     )
     return blockers
+
+
+def required_document_types(application: JobApplication) -> tuple[str, ...]:
+    return ("tailored_resume", "cover_letter") + (
+        ("selection_criteria",) if (application.selection_criteria or "").strip() else ()
+    )
+
+
+def current_pack_fingerprint(
+    application: JobApplication,
+    latest: dict[str, GeneratedDocument],
+    expected_context_fingerprint: str | None,
+) -> str:
+    required = required_document_types(application)
+    payload = {
+        "application": {
+            "id": application.id,
+            "company": application.company,
+            "position_title": application.position_title,
+            "job_description": application.job_description,
+            "selection_criteria": application.selection_criteria or "",
+        },
+        "expected_context": expected_context_fingerprint or "",
+        "documents": [
+            {
+                "type": document_type,
+                "id": latest[document_type].id if document_type in latest else None,
+                "content": latest[document_type].content if document_type in latest else "",
+                "reviewer": latest[document_type].reviewer_json if document_type in latest else "",
+                "context": latest[document_type].context_fingerprint if document_type in latest else "",
+            }
+            for document_type in required
+        ],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def final_check_gate_blockers(
+    application: JobApplication,
+    latest: dict[str, GeneratedDocument],
+    expected_context_fingerprint: str | None,
+) -> list[str]:
+    missing = [item for item in required_document_types(application) if item not in latest]
+    if missing:
+        return ["Generate all required application documents, then run Final Check."]
+    current = current_pack_fingerprint(application, latest, expected_context_fingerprint)
+    if not application.quality_check_fingerprint:
+        if application.quality_checked_at:
+            return ["The application materials changed after the last Final Check. Run Final Check again."]
+        return ["Run Final Check before downloading or opening the employer application page."]
+    if application.quality_check_fingerprint != current:
+        return ["The application materials changed after the last Final Check. Run Final Check again."]
+    return []
 
 
 def auto_polish_cover_letter(
@@ -906,9 +961,7 @@ def quality_check(
         latest.setdefault(document.document_type, document)
 
     issues: list[QualityCheckIssue] = []
-    required = ("tailored_resume", "cover_letter") + (
-        ("selection_criteria",) if (application.selection_criteria or "").strip() else ()
-    )
+    required = required_document_types(application)
     for document_type in required:
         if document_type not in latest:
             issues.append(QualityCheckIssue(
@@ -1235,8 +1288,15 @@ def quality_check(
         QualityCheckIssue(**item)
         for item in consolidate_quality_issues([issue.model_dump() for issue in issues])
     ]
+    ready = not any(issue.severity == "error" for issue in consolidated_issues)
+    application.quality_check_fingerprint = (
+        current_pack_fingerprint(application, latest, expected_context) if ready else ""
+    )
+    application.quality_checked_at = datetime.utcnow() if ready else None
+    session.add(application)
+    session.commit()
     return QualityCheckResponse(
-        ready=not any(issue.severity == "error" for issue in consolidated_issues),
+        ready=ready,
         issues=consolidated_issues,
         checked_documents=sorted(content_to_check),
     )
@@ -1253,6 +1313,12 @@ def update_generated_document(
     if not document:
         raise HTTPException(404, "Generated document not found.")
     document.content = payload.content
+    application = get_for_user(session, JobApplication, document.application_id, user_id)
+    if application:
+        application.quality_check_fingerprint = ""
+        if application.status == "ready_to_apply":
+            application.status = "draft"
+        session.add(application)
     session.add(document); session.commit(); session.refresh(document)
     return document
 
@@ -1275,7 +1341,20 @@ def export_generated_document(
     current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
     evidence_text = f"{current_resume.source_text}\n{current_resume.ckb_json or ''}" if current_resume else ""
-    blockers = document_release_blockers(document, application, profile, expected_context, evidence_text)
+    documents = session.exec(
+        select_for_user(GeneratedDocument, user_id)
+        .where(GeneratedDocument.application_id == application.id)
+        .order_by(GeneratedDocument.created_at.desc())
+    ).all()
+    latest: dict[str, GeneratedDocument] = {}
+    for candidate in documents:
+        latest.setdefault(candidate.document_type, candidate)
+    blockers = final_check_gate_blockers(application, latest, expected_context)
+    if latest.get(document.document_type) is not document and (
+        not latest.get(document.document_type) or latest[document.document_type].id != document.id
+    ):
+        blockers.append("This is not the latest generated version of the document.")
+    blockers.extend(document_release_blockers(document, application, profile, expected_context, evidence_text))
     if blockers:
         raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(blockers))
     label = {
@@ -1331,16 +1410,14 @@ def export_application_pack(
     for document in documents:
         if document.document_type in {"tailored_resume", "cover_letter", "selection_criteria"}:
             latest.setdefault(document.document_type, document)
-    required_types = ["tailored_resume", "cover_letter"]
-    if (application.selection_criteria or "").strip():
-        required_types.append("selection_criteria")
+    required_types = list(required_document_types(application))
     if any(document_type not in latest for document_type in required_types):
         raise HTTPException(400, "Generate all required application documents before downloading the pack.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
     evidence_text = f"{current_resume.source_text}\n{current_resume.ckb_json or ''}" if current_resume else ""
-    blockers = [
+    blockers = final_check_gate_blockers(application, latest, expected_context) + [
         reason
         for document_type in required_types
         for reason in document_release_blockers(latest[document_type], application, profile, expected_context, evidence_text)
@@ -1647,6 +1724,20 @@ def prepare_submission(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application or not application.job_url:
         raise HTTPException(400, "A job URL is required before preparing a submission.")
+    documents = session.exec(
+        select_for_user(GeneratedDocument, user_id)
+        .where(GeneratedDocument.application_id == application_id)
+        .order_by(GeneratedDocument.created_at.desc())
+    ).all()
+    latest: dict[str, GeneratedDocument] = {}
+    for document in documents:
+        latest.setdefault(document.document_type, document)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
+    gate_blockers = final_check_gate_blockers(application, latest, expected_context)
+    if gate_blockers:
+        raise HTTPException(409, " ".join(gate_blockers))
     try:
         plan = json.loads(application.selection_plan_json or "{}")
         confirmed = set(json.loads(application.selection_confirmations_json or "[]"))
