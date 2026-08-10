@@ -13,3 +13,5 @@ uploads/
 *.sqlite
 *.sqlite3
 docs/END_TO_END_VALIDATION_*.md
+regression/dtmi/live-report*.json
+backend/dtmi-live-regression-report.json

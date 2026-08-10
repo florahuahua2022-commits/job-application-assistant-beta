@@ -1,0 +1,59 @@
+{
+  "dataset_version": "1.0",
+  "source": "DTMI Project Officer product test, 2026-08-10",
+  "cases": [
+    {
+      "id": "DTMI-RISK-001", "detector": "release", "expected": "error",
+      "content": "Application for Project Officer. I hold permanent residency in Australia and am available following one month's notice.",
+      "evidence": "Project support experience.", "work_rights": "not_specified", "availability": "not_specified"
+    },
+    {
+      "id": "DTMI-RISK-002", "detector": "fact", "expected": "error",
+      "content": "This experience required adapting to changing requirements while keeping deliverables on track.",
+      "evidence": "Prepared reports for Pratt & Whitney."
+    },
+    {
+      "id": "DTMI-RISK-003", "detector": "fact", "expected": "error",
+      "content": "This work strengthened my ability to take responsibility for delivering accurate, timely administrative outputs.",
+      "evidence": "Liaised with stakeholders at China Communications Construction Company."
+    },
+    {
+      "id": "DTMI-RISK-004", "detector": "fact", "expected": "warning",
+      "content": "The role aligns closely with the work I have delivered throughout my career.",
+      "evidence": "Project coordination and administrative support."
+    },
+    {
+      "id": "DTMI-RISK-005", "detector": "fact", "expected": "error",
+      "content": "What draws me to this position is the opportunity to apply my coordination experience.",
+      "evidence": "Project coordination experience.", "motivation_confirmed": false
+    },
+    {
+      "id": "DTMI-RISK-006", "detector": "jd", "expected": "error",
+      "content": "I maintained project documentation, contracts and technical records while managing competing priorities across multiple concurrent projects.",
+      "jd": "Maintain project documentation, contracts and technical records. Manage competing priorities across multiple concurrent projects."
+    },
+    {
+      "id": "DTMI-RISK-007", "detector": "fact", "expected": "error",
+      "content": "Proven capability in preparing project documentation and a strong record of reporting.",
+      "evidence": "Assisted in the preparation of project documents and reports."
+    },
+    {
+      "id": "DTMI-RISK-008", "detector": "release", "expected": "error",
+      "content": "Application for Engineering Administrator at Example Agency.",
+      "evidence": "Project support experience.", "position_title": "Project Officer"
+    },
+
+    {"id": "DTMI-SAFE-001", "detector": "fact", "expected": "none", "content": "Managed competing priorities across several projects.", "evidence": "Managed competing priorities across several projects."},
+    {"id": "DTMI-SAFE-002", "detector": "fact", "expected": "none", "content": "Led monthly stakeholder meetings.", "evidence": "Led monthly stakeholder meetings."},
+    {"id": "DTMI-SAFE-003", "detector": "fact", "expected": "none", "content": "Delivered accurate and timely administrative outputs.", "evidence": "Delivered accurate and timely administrative outputs."},
+    {"id": "DTMI-SAFE-004", "detector": "fact", "expected": "none", "content": "I am motivated by improving public services.", "evidence": "Project support.", "motivation_confirmed": true},
+    {"id": "DTMI-SAFE-005", "detector": "jd", "expected": "none", "content": "I kept records organised and balanced deadlines across several workstreams.", "jd": "Maintain project documentation and manage competing priorities across multiple concurrent projects."},
+    {"id": "DTMI-SAFE-006", "detector": "jd", "expected": "none", "content": "Stakeholder engagement supported project reporting.", "jd": "Stakeholder engagement supported project reporting."},
+    {"id": "DTMI-SAFE-007", "detector": "release", "expected": "none", "content": "Application for Project Officer. I hold permanent residency in Australia.", "evidence": "Project support.", "work_rights": "permanent_resident", "work_rights_confirmed": true},
+    {"id": "DTMI-SAFE-008", "detector": "release", "expected": "none", "content": "Application for Project Officer. Available following one month's notice.", "evidence": "Project support.", "availability": "one_month", "availability_confirmed": true},
+    {"id": "DTMI-SAFE-009", "detector": "fact", "expected": "none", "content": "Assisted with project documentation.", "evidence": "Assisted with project documentation."},
+    {"id": "DTMI-SAFE-010", "detector": "fact", "expected": "none", "content": "Supported stakeholder liaison activities.", "evidence": "Supported stakeholder liaison activities."},
+    {"id": "DTMI-SAFE-011", "detector": "jd", "expected": "none", "content": "Project Officer", "jd": "Project Officer"},
+    {"id": "DTMI-SAFE-012", "detector": "fact", "expected": "none", "content": "Prepared reports by the agreed deadline.", "evidence": "Prepared reports by the agreed deadline."}
+  ]
+}
