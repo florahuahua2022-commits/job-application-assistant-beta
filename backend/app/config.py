@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
     ai_request_timeout_seconds: float = 90.0
+    openai_input_cost_per_million: float = 0.0
+    openai_output_cost_per_million: float = 0.0
+    deepseek_input_cost_per_million: float = 0.0
+    deepseek_output_cost_per_million: float = 0.0
     target_english_variant: str = "Australian English"
     default_sc_word_target: int = 350
     database_url: str = "sqlite:///./data/job_assistant.db"

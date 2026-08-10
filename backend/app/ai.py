@@ -9,6 +9,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review
+from .ai_runtime import ai_call_scope, record_ai_call, start_ai_call
 from .resume_plan import resume_evidence_pack
 
 
@@ -109,8 +110,31 @@ def _json_object(value: str) -> dict:
 def _openai_draft(prompt: str) -> str:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
-    client = OpenAI(api_key=settings.openai_api_key)
-    response = client.responses.create(model=settings.openai_model, input=prompt)
+    client = OpenAI(
+        api_key=settings.openai_api_key,
+        timeout=settings.ai_request_timeout_seconds,
+        max_retries=0,
+    )
+    call = start_ai_call()
+    try:
+        response = client.responses.create(model=settings.openai_model, input=prompt)
+    except Exception:
+        record_ai_call(
+            call, provider="openai", model=settings.openai_model,
+            input_tokens=0, output_tokens=0, estimated_cost=0.0, status="failed",
+        )
+        raise
+    usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    estimated_cost = (
+        input_tokens * settings.openai_input_cost_per_million
+        + output_tokens * settings.openai_output_cost_per_million
+    ) / 1_000_000
+    record_ai_call(
+        call, provider="openai", model=settings.openai_model,
+        input_tokens=input_tokens, output_tokens=output_tokens, estimated_cost=estimated_cost,
+    )
     return response.output_text
 
 
@@ -121,19 +145,38 @@ def _deepseek_draft(prompt: str) -> str:
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
         timeout=settings.ai_request_timeout_seconds,
-        max_retries=1,
+        max_retries=0,
     )
-    response = client.chat.completions.create(
-        model=settings.deepseek_model,
-        messages=[
-            {"role": "system", "content": safety_instruction()},
-            {"role": "user", "content": prompt},
-        ],
-        stream=False,
-        max_tokens=2000,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    call = start_ai_call()
+    try:
+        response = client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[
+                {"role": "system", "content": safety_instruction()},
+                {"role": "user", "content": prompt},
+            ],
+            stream=False,
+            max_tokens=2000,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+    except Exception:
+        record_ai_call(
+            call, provider="deepseek", model=settings.deepseek_model,
+            input_tokens=0, output_tokens=0, estimated_cost=0.0, status="failed",
+        )
+        raise
     content = response.choices[0].message.content
+    usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    estimated_cost = (
+        input_tokens * settings.deepseek_input_cost_per_million
+        + output_tokens * settings.deepseek_output_cost_per_million
+    ) / 1_000_000
+    record_ai_call(
+        call, provider="deepseek", model=settings.deepseek_model,
+        input_tokens=input_tokens, output_tokens=output_tokens, estimated_cost=estimated_cost,
+    )
     if not content:
         raise AIServiceError("DeepSeek returned an empty draft. Please try again.")
     return content
@@ -172,14 +215,17 @@ Return JSON only in this shape:
     provider = settings.ai_provider.strip().lower()
     try:
         if provider == "deepseek":
-            raw = _deepseek_draft(prompt)
+            with ai_call_scope("matching"):
+                raw = _deepseek_draft(prompt)
         elif provider == "openai":
             try:
-                raw = _openai_draft(prompt)
+                with ai_call_scope("matching"):
+                    raw = _openai_draft(prompt)
             except OpenAIError:
                 if not settings.ai_fallback_to_deepseek:
                     raise
-                raw = _deepseek_draft(prompt)
+                with ai_call_scope("matching", "provider_fallback"):
+                    raw = _deepseek_draft(prompt)
         else:
             raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
         normalised = normalise_match_result(_json_object(raw), job_model, ckb)
@@ -242,7 +288,8 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
             if validation and validation["issues"]:
                 retry_note = "\n\nYour previous output failed deterministic validation. Correct only these issues:\n" + json.dumps(validation["issues"], ensure_ascii=False)
             try:
-                response = _json_object(_selection_provider_response(base_prompt + retry_note))
+                with ai_call_scope("generation", "deterministic_validation_failed" if retry_note else ""):
+                    response = _json_object(_selection_provider_response(base_prompt + retry_note))
             except (OpenAIError, ValueError) as error:
                 if attempt == 1:
                     raise AIServiceError(f"Criterion {plan_item.get('criteria_id')} could not be generated as valid JSON.") from error
@@ -320,7 +367,8 @@ Return every criteria_id exactly once. Use pass with an empty issues array when 
     last_error = ""
     for attempt in range(2):
         try:
-            raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            with ai_call_scope("review", "invalid_reviewer_result" if last_error else ""):
+                raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             result = normalise_review_result(raw, criteria_ids)
             errors = validate_review_result(result, criteria_ids)
             if not errors:
@@ -390,7 +438,8 @@ Use pass with an empty issues array when there is no material issue."""
     last_error = ""
     for attempt in range(2):
         try:
-            raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            with ai_call_scope("review", "invalid_reviewer_result" if last_error else ""):
+                raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             result = normalise_document_review(raw, "cover_letter")
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
@@ -451,7 +500,8 @@ Use pass with an empty issues array when there is no material issue."""
     last_error = ""
     for attempt in range(2):
         try:
-            raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            with ai_call_scope("review", "invalid_reviewer_result" if last_error else ""):
+                raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             result = normalise_document_review(raw, "tailored_resume")
             result["telemetry"] = {"reviewer_retries": attempt}
             return result

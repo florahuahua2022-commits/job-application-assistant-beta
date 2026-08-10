@@ -10,7 +10,7 @@ from .reviewer import REVIEW_SCHEMA_VERSION
 from .selection_logic import SELECTION_PLAN_SCHEMA_VERSION
 
 
-GENERATION_TRACE_SCHEMA_VERSION = "1.0"
+GENERATION_TRACE_SCHEMA_VERSION = "1.1"
 DOCUMENT_PROMPT_VERSION = "1.0"
 
 
@@ -49,6 +49,7 @@ def build_generation_trace(
     reviewer: dict[str, Any] | None = None,
     latency_ms: int = 0,
     retry_count: int = 0,
+    ai_runtime: dict[str, Any] | None = None,
     profile_id: int | None = None,
     context_fingerprint: str = "",
 ) -> dict[str, Any]:
@@ -78,6 +79,15 @@ def build_generation_trace(
             "latency_ms": max(int(latency_ms), 0),
             "observed_retry_count": max(int(retry_count), 0),
             "retry_count_scope": "structured_generator_and_reviewer",
+            "ai_calls": ai_runtime or {
+                "call_count": 0,
+                "call_limits": {},
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost": 0.0,
+                "calls": [],
+            },
         },
         "trace": {"evidence_ids": sorted(set(evidence_ids))},
         "review": {

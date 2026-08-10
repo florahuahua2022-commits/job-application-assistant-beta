@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
+from .ai_runtime import AICallBudgetExceeded, ai_call_scope, begin_ai_run, current_ai_run, end_ai_run
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import DOCUMENT_PROMPT_VERSION, build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -1459,6 +1460,11 @@ def generate(
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
+    try:
+        criterion_count = len(json.loads(application.selection_plan_json or "{}").get("items") or [])
+    except (json.JSONDecodeError, AttributeError):
+        criterion_count = 0
+    ai_run_token = begin_ai_run(payload.document_type, criterion_count)
     new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
     selection_credit_key = (
         check_selection_criteria_credit(session, user_id, payload.pack_id)
@@ -1509,6 +1515,9 @@ def generate(
             application.selection_plan_json = selection_plan_json
             session.add(application)
             session.commit()
+        if payload.document_type == "selection_criteria" and current_ai_run():
+            criterion_count = len(json.loads(selection_plan_json or "{}").get("items") or [])
+            current_ai_run().limits["generation"] = max(criterion_count * 2, 1)
         selection_bundle = None
         selection_review = None
         cover_letter_plan = None
@@ -1557,23 +1566,24 @@ def generate(
             content = auto_polish_cover_letter(content, profile, application.job_description)
             role_title = application.position_title.split(" - ", 1)[0].strip()
             if role_title and role_title.lower() not in content.lower():
-                content = generate_draft(
-                    master_resume.source_text,
-                    application.job_description,
-                    payload.document_type,
-                    application.selection_criteria,
-                    profile_text,
-                    application.position_title,
-                    application.company,
-                    ckb_source_json,
-                    used_experiences,
-                    used_closing_styles,
-                    job_model_json,
-                    evidence_matches_json,
-                    selection_plan_json,
-                    json.dumps(cover_letter_plan or {}, ensure_ascii=False),
-                    json.dumps(resume_plan or {}, ensure_ascii=False),
-                )
+                with ai_call_scope("generation", "position_title_missing"):
+                    content = generate_draft(
+                        master_resume.source_text,
+                        application.job_description,
+                        payload.document_type,
+                        application.selection_criteria,
+                        profile_text,
+                        application.position_title,
+                        application.company,
+                        ckb_source_json,
+                        used_experiences,
+                        used_closing_styles,
+                        job_model_json,
+                        evidence_matches_json,
+                        selection_plan_json,
+                        json.dumps(cover_letter_plan or {}, ensure_ascii=False),
+                        json.dumps(resume_plan or {}, ensure_ascii=False),
+                    )
                 if profile:
                     content = enforce_profile_contact(content, profile, payload.document_type)
                 content = auto_polish_cover_letter(content, profile, application.job_description)
@@ -1583,8 +1593,10 @@ def generate(
                         "Check the saved job details and try again."
                     )
     except (RuntimeError, ValueError) as error:
+        end_ai_run(ai_run_token)
         raise HTTPException(400, str(error))
-    except AIServiceError as error:
+    except (AIServiceError, AICallBudgetExceeded) as error:
+        end_ai_run(ai_run_token)
         raise HTTPException(502, str(error))
     metadata = {
         "used_experiences": selection_bundle["used_experiences"] if selection_bundle else [],
@@ -1624,7 +1636,8 @@ def generate(
             )
         except ValueError as error:
             raise HTTPException(400, str(error))
-        except AIServiceError as error:
+        except (AIServiceError, AICallBudgetExceeded) as error:
+            end_ai_run(ai_run_token)
             raise HTTPException(502, str(error))
     if payload.document_type == "cover_letter":
         try:
@@ -1633,15 +1646,21 @@ def generate(
             )
         except ValueError as error:
             raise HTTPException(400, str(error))
-        except AIServiceError as error:
+        except (AIServiceError, AICallBudgetExceeded) as error:
+            end_ai_run(ai_run_token)
             raise HTTPException(502, str(error))
     run_id = str(uuid4())
     provider = settings.ai_provider.strip().lower()
     model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
     review_result = selection_review or cover_letter_review or resume_review or {}
+    ai_runtime = current_ai_run().snapshot() if current_ai_run() else {}
     retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
     retry_count += int(review_result.get("telemetry", {}).get("reviewer_retries", 0))
     context_fingerprint = generation_context_fingerprint(application, master_resume, profile)
+    retry_count = max(
+        retry_count,
+        sum(bool(call.get("retry_reason")) for call in ai_runtime.get("calls") or []),
+    )
     trace = build_generation_trace(
         run_id=run_id,
         document_type=payload.document_type,
@@ -1653,6 +1672,7 @@ def generate(
         reviewer=review_result,
         latency_ms=round((perf_counter() - generation_started) * 1000),
         retry_count=retry_count,
+        ai_runtime=ai_runtime,
         profile_id=profile.id if profile else None,
         context_fingerprint=context_fingerprint,
     )
@@ -1688,6 +1708,7 @@ def generate(
             pack_id=payload.pack_id,
         ))
     session.commit(); session.refresh(document)
+    end_ai_run(ai_run_token)
     return document
 
 

@@ -21,9 +21,14 @@ class GenerationTraceTests(unittest.TestCase):
             ]},
             latency_ms=1250,
             retry_count=2,
+            ai_runtime={
+                "call_count": 2, "call_limits": {"generation": 1, "review": 1},
+                "input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500,
+                "estimated_cost": 0.0123, "calls": [],
+            },
         )
 
-        self.assertEqual(GENERATION_TRACE_SCHEMA_VERSION, "1.0")
+        self.assertEqual(GENERATION_TRACE_SCHEMA_VERSION, "1.1")
         self.assertEqual(trace["run_id"], "run-123")
         self.assertEqual(trace["input_refs"], {
             "application_id": 7, "resume_id": 3, "profile_id": None, "context_fingerprint": "",
@@ -35,6 +40,8 @@ class GenerationTraceTests(unittest.TestCase):
         self.assertEqual(trace["runtime"]["status"], "completed")
         self.assertEqual(trace["runtime"]["latency_ms"], 1250)
         self.assertEqual(trace["runtime"]["observed_retry_count"], 2)
+        self.assertEqual(trace["runtime"]["ai_calls"]["total_tokens"], 1500)
+        self.assertEqual(trace["runtime"]["ai_calls"]["estimated_cost"], 0.0123)
 
     def test_non_reviewed_document_is_explicit(self):
         trace = build_generation_trace(
