@@ -20,6 +20,29 @@ def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(engine)
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
+    # P0 safety migration: older releases silently defaulted every profile to
+    # permanent residency. Reset that legacy value once so it must be declared
+    # again explicitly before it can appear in an application document.
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE IF NOT EXISTS appmigration "
+            "(migration_key VARCHAR(160) PRIMARY KEY)"
+        ))
+        migration_key = "20260810_reset_implicit_permanent_residency"
+        applied = connection.execute(
+            text("SELECT migration_key FROM appmigration WHERE migration_key = :migration_key"),
+            {"migration_key": migration_key},
+        ).first()
+        if not applied:
+            if "applicantprofile" in table_names:
+                connection.execute(text(
+                    "UPDATE applicantprofile SET work_rights = 'not_specified' "
+                    "WHERE work_rights = 'permanent_resident'"
+                ))
+            connection.execute(
+                text("INSERT INTO appmigration (migration_key) VALUES (:migration_key)"),
+                {"migration_key": migration_key},
+            )
     if engine.dialect.name == "postgresql":
         with engine.begin() as connection:
             if "resume" in table_names:
@@ -42,6 +65,8 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE generateddocument ADD COLUMN run_id VARCHAR"))
                 if "trace_json" not in document_columns:
                     connection.execute(text("ALTER TABLE generateddocument ADD COLUMN trace_json TEXT NOT NULL DEFAULT '{}'"))
+                if "context_fingerprint" not in document_columns:
+                    connection.execute(text("ALTER TABLE generateddocument ADD COLUMN context_fingerprint VARCHAR NOT NULL DEFAULT ''"))
             if "jobapplication" in table_names:
                 application_columns = {column["name"] for column in inspector.get_columns("jobapplication")}
                 if "job_model_json" not in application_columns:
@@ -62,6 +87,12 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR NOT NULL DEFAULT 'natural_professional'"))
                 if "preferences_notes" not in profile_columns:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
+                if "work_rights_confirmed" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN work_rights_confirmed BOOLEAN NOT NULL DEFAULT FALSE"))
+                if "availability_confirmed" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN availability_confirmed BOOLEAN NOT NULL DEFAULT FALSE"))
+                if "motivation_confirmed" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN motivation_confirmed BOOLEAN NOT NULL DEFAULT FALSE"))
     if engine.dialect.name == "sqlite":
         existing = {column["name"] for column in inspector.get_columns("jobapplication")}
         with engine.begin() as connection:
@@ -96,6 +127,8 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE generateddocument ADD COLUMN run_id VARCHAR"))
             if "trace_json" not in document_columns:
                 connection.execute(text("ALTER TABLE generateddocument ADD COLUMN trace_json TEXT DEFAULT '{}'"))
+            if "context_fingerprint" not in document_columns:
+                connection.execute(text("ALTER TABLE generateddocument ADD COLUMN context_fingerprint VARCHAR DEFAULT ''"))
             for table_name in ("applicantprofile", "referee", "resume", "jobapplication", "generateddocument"):
                 if table_name in inspector.get_table_names():
                     columns = {column["name"] for column in inspector.get_columns(table_name)}
@@ -113,6 +146,12 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR DEFAULT 'natural_professional'"))
                 if "preferences_notes" not in profile_columns:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
+                if "work_rights_confirmed" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN work_rights_confirmed BOOLEAN DEFAULT 0"))
+                if "availability_confirmed" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN availability_confirmed BOOLEAN DEFAULT 0"))
+                if "motivation_confirmed" not in profile_columns:
+                    connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN motivation_confirmed BOOLEAN DEFAULT 0"))
 
 
 def get_session():

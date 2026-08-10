@@ -6,11 +6,11 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.database import get_session
 from app.auth import get_current_user
-from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, enforce_profile_contact, organisation_is_named
+from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, document_release_blockers, enforce_profile_contact, generation_context_fingerprint, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
 from app import backup
 
@@ -114,6 +114,7 @@ class SubmissionRecordTests(unittest.TestCase):
         profile = ApplicantProfile(
             first_name="Alex", last_name="Morgan", phone="0400000000",
             email="applicant@example.com", availability_notice="one_month",
+            availability_confirmed=True,
         )
 
         polished = auto_polish_cover_letter(
@@ -123,6 +124,80 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertIn("I am available following one month's notice.", polished)
         self.assertNotIn("mid-September", polished)
+
+    def test_release_blocker_rejects_unconfirmed_residency_and_notice_period(self):
+        profile = ApplicantProfile(
+            first_name="Alex", last_name="Morgan", phone="0400000000",
+            email="applicant@example.com", work_rights="not_specified",
+            availability_notice="not_specified",
+        )
+        application = JobApplication(
+            company="DTMI", position_title="Project Officer",
+            job_description="Project Officer job description",
+        )
+        document = GeneratedDocument(
+            application_id=1,
+            document_type="cover_letter",
+            content=(
+                "Application for Project Officer at DTMI. "
+                "I hold permanent residency and am available following one month's notice."
+            ),
+            reviewer_json='{"status":"pass","results":[]}',
+        )
+
+        blockers = document_release_blockers(document, application, profile)
+
+        self.assertTrue(any("work rights" in blocker for blocker in blockers))
+        self.assertTrue(any("availability" in blocker for blocker in blockers))
+
+    def test_release_blocker_rejects_failed_reviewer_and_wrong_title(self):
+        application = JobApplication(
+            company="DTMI", position_title="Project Officer",
+            job_description="Project Officer job description",
+        )
+        document = GeneratedDocument(
+            application_id=1,
+            document_type="cover_letter",
+            content="Application for an unrelated role.",
+            reviewer_json='{"status":"fail","results":[]}',
+        )
+
+        blockers = document_release_blockers(document, application, None)
+
+        self.assertTrue(any("reviewer" in blocker for blocker in blockers))
+        self.assertTrue(any("position title" in blocker for blocker in blockers))
+
+    def test_generation_context_fingerprint_changes_with_each_fact_source(self):
+        application = JobApplication(company="DTMI", position_title="Project Officer", job_description="Original JD")
+        resume = Resume(source_text="Original resume", experiences_json="[]", ckb_json="[]")
+        profile = ApplicantProfile(
+            first_name="Alex", last_name="Morgan", phone="0400000000", email="alex@example.com",
+        )
+        original = generation_context_fingerprint(application, resume, profile)
+
+        application.job_description = "Changed JD"
+        changed_job = generation_context_fingerprint(application, resume, profile)
+        application.job_description = "Original JD"
+        resume.source_text = "Changed resume"
+        changed_resume = generation_context_fingerprint(application, resume, profile)
+        resume.source_text = "Original resume"
+        profile.phone = "0411111111"
+        changed_profile = generation_context_fingerprint(application, resume, profile)
+
+        self.assertEqual(len(original), 64)
+        self.assertEqual(len({original, changed_job, changed_resume, changed_profile}), 4)
+
+    def test_release_blocker_rejects_stale_generation_context(self):
+        application = JobApplication(company="DTMI", position_title="Project Officer", job_description="JD")
+        document = GeneratedDocument(
+            application_id=1, document_type="cover_letter",
+            content="Application for Project Officer", reviewer_json='{"status":"pass"}',
+            context_fingerprint="old-context",
+        )
+
+        blockers = document_release_blockers(document, application, None, "current-context")
+
+        self.assertTrue(any("changed after" in blocker for blocker in blockers))
 
     def test_organisation_match_accepts_common_acronym(self):
         self.assertTrue(organisation_is_named(
@@ -183,7 +258,10 @@ class SubmissionRecordTests(unittest.TestCase):
                 position_title="Project Officer",
                 job_description="Coordinate projects.",
             )
-            session.add(application)
+            session.add_all([
+                application,
+                Resume(title="Master Resume", source_text="Alex Morgan\nProject support experience.", experiences_json="[]", ckb_json="[]"),
+            ])
             session.commit()
             session.refresh(application)
             self.application_id = application.id
@@ -297,7 +375,9 @@ class SubmissionRecordTests(unittest.TestCase):
             "phone": "0400000000",
             "email": "applicant@example.com",
             "work_rights": "permanent_resident",
+            "work_rights_confirmed": True,
             "availability_notice": "two_weeks",
+            "availability_confirmed": True,
             "referees": [
                 {
                     "organisation": "Example Agency",
@@ -317,22 +397,51 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(loaded.status_code, 200)
         self.assertEqual(loaded.json()["first_name"], "Hua")
         self.assertEqual(loaded.json()["availability_notice"], "two_weeks")
+        self.assertTrue(loaded.json()["work_rights_confirmed"])
+        self.assertTrue(loaded.json()["availability_confirmed"])
         self.assertEqual(len(loaded.json()["referees"]), 1)
+
+    def test_profile_save_does_not_confirm_sensitive_values_implicitly(self):
+        payload = {
+            "first_name": "Hua",
+            "last_name": "Zhong",
+            "phone": "0400000000",
+            "email": "applicant@example.com",
+            "work_rights": "permanent_resident",
+            "availability_notice": "one_month",
+            "motivation": "I want to contribute to public services.",
+            "referees": [],
+        }
+
+        response = self.client.put("/profile", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        saved = response.json()
+        self.assertEqual(saved["work_rights"], "not_specified")
+        self.assertFalse(saved["work_rights_confirmed"])
+        self.assertEqual(saved["availability_notice"], "not_specified")
+        self.assertFalse(saved["availability_confirmed"])
+        self.assertIsNone(saved["motivation"])
+        self.assertFalse(saved["motivation_confirmed"])
 
     def test_quality_check_passes_consistent_application_pack(self):
         with Session(self.engine) as session:
             application = session.get(JobApplication, self.application_id)
             application.position_title = "Senior Project Officer - Level 5"
-            session.add(ApplicantProfile(
+            profile = ApplicantProfile(
                 first_name="Alex",
                 last_name="Morgan",
                 phone="0400000000",
                 email="applicant@example.com",
-            ))
+            )
+            session.add(profile)
+            session.flush()
+            resume = session.exec(select(Resume)).first()
+            context = generation_context_fingerprint(application, resume, profile)
             session.add_all([
-                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com"),
-                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Senior Project Officer\n0400000000 applicant@example.com"),
-                GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content="Evidence-based responses."),
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com", context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Senior Project Officer\n0400000000 applicant@example.com", context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content="Evidence-based responses.", context_fingerprint=context),
             ])
             session.commit()
 
@@ -343,12 +452,17 @@ class SubmissionRecordTests(unittest.TestCase):
 
     def test_private_job_does_not_require_selection_criteria(self):
         with Session(self.engine) as session:
-            session.add(ApplicantProfile(
+            application = session.get(JobApplication, self.application_id)
+            profile = ApplicantProfile(
                 first_name="Alex", last_name="Morgan", phone="0400000000", email="applicant@example.com"
-            ))
+            )
+            session.add(profile)
+            session.flush()
+            resume = session.exec(select(Resume)).first()
+            context = generation_context_fingerprint(application, resume, profile)
             session.add_all([
-                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com"),
-                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer at Example Agency\n0400000000 applicant@example.com " + "evidence " * 230),
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Alex Morgan 0400000000 applicant@example.com", context_fingerprint=context),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer at Example Agency\n0400000000 applicant@example.com " + "evidence " * 230, context_fingerprint=context),
             ])
             session.commit()
 
@@ -356,6 +470,40 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertTrue(response.json()["ready"])
         self.assertNotIn("missing_document", [issue["code"] for issue in response.json()["issues"]])
+
+    def test_job_change_marks_existing_document_stale_and_blocks_export(self):
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            resume = session.exec(select(Resume)).first()
+            profile = ApplicantProfile(
+                first_name="Alex", last_name="Morgan", phone="0400000000", email="applicant@example.com",
+            )
+            session.add(profile)
+            session.flush()
+            context = generation_context_fingerprint(application, resume, profile)
+            document = GeneratedDocument(
+                application_id=self.application_id,
+                document_type="cover_letter",
+                content="Application for Project Officer at Example Agency",
+                reviewer_json='{"status":"pass","results":[]}',
+                context_fingerprint=context,
+            )
+            session.add(document)
+            session.commit()
+            session.refresh(document)
+            document_id = document.id
+
+        updated = self.client.patch(
+            f"/applications/{self.application_id}",
+            json={"job_description": "Changed project coordination duties."},
+        )
+        quality = self.client.get(f"/applications/{self.application_id}/quality-check")
+        exported = self.client.get(f"/documents/{document_id}/export?format=docx")
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertIn("stale_generation_context", [issue["code"] for issue in quality.json()["issues"]])
+        self.assertEqual(exported.status_code, 409)
+        self.assertIn("changed after", exported.json()["detail"])
 
     def test_selection_criteria_is_required_when_job_supplies_criteria(self):
         with Session(self.engine) as session:

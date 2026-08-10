@@ -30,7 +30,7 @@ class GenerateDraftTests(unittest.TestCase):
             result = ai.review_cover_letter(ckb, job_model, plan, "Motivation: Not provided", "Cover letter text")
 
         prompt = provider.call_args.args[0]
-        self.assertIn("intent may support motivation", prompt)
+        self.assertIn("motivation may support a motivational statement only when it is explicitly supplied", prompt)
         self.assertIn("requirement_omission", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
@@ -158,6 +158,25 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("employer requirement, not as evidence", instruction)
         self.assertIn("Never compare the value, scale, complexity", instruction)
         self.assertIn("state the gap plainly", instruction)
+        self.assertIn("Never upgrade assisted to prepared or delivered", instruction)
+        self.assertIn("Never invent work rights, residency, visa status, notice period", instruction)
+        self.assertIn("personal motivation is allowed only", instruction)
+
+    def test_cover_letter_prompt_does_not_require_invented_motivation(self):
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as provider:
+            ai.generate_draft(
+                "Resume", "Job description", "cover_letter",
+                applicant_profile="Motivation: Not provided",
+                position_title="Project Officer",
+                company="DTMI",
+            )
+
+        prompt = provider.call_args.args[0]
+        self.assertNotIn("At least 60% of the body must explain why", prompt)
+        self.assertIn("Use a neutral application-intent sentence", prompt)
+        self.assertIn("Preserve each source's responsibility level exactly", prompt)
 
     def test_cover_letter_prompt_requires_evidence_for_recruiter_relationship_and_matching_signoff(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(

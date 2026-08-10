@@ -25,7 +25,9 @@ class GenerationTraceTests(unittest.TestCase):
 
         self.assertEqual(GENERATION_TRACE_SCHEMA_VERSION, "1.0")
         self.assertEqual(trace["run_id"], "run-123")
-        self.assertEqual(trace["input_refs"], {"application_id": 7, "resume_id": 3})
+        self.assertEqual(trace["input_refs"], {
+            "application_id": 7, "resume_id": 3, "profile_id": None, "context_fingerprint": "",
+        })
         self.assertEqual(trace["trace"]["evidence_ids"], ["EV001", "EV002"])
         self.assertEqual(trace["review"], {"status": "fail", "finding_count": 1})
         self.assertEqual(trace["versions"]["government_writing_rules"], "1.0")

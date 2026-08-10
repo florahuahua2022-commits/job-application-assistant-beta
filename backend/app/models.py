@@ -35,10 +35,13 @@ class ApplicantProfile(SQLModel, table=True):
     state: str = "WA"
     postcode: str | None = None
     country: str = "Australia"
-    work_rights: str = "permanent_resident"
+    work_rights: str = "not_specified"
+    work_rights_confirmed: bool = False
     availability_notice: str = "not_specified"
+    availability_confirmed: bool = False
     target_direction: str | None = None
     motivation: str | None = None
+    motivation_confirmed: bool = False
     writing_tone: str = "natural_professional"
     preferences_notes: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -93,6 +96,7 @@ class GeneratedDocument(SQLModel, table=True):
     reviewer_json: str = "{}"
     run_id: str = Field(default_factory=lambda: str(uuid4()), index=True)
     trace_json: str = "{}"
+    context_fingerprint: str = ""
     used_experiences_json: str = "[]"
     closing_styles_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -158,10 +162,13 @@ class ApplicantProfilePayload(SQLModel):
     state: str = "WA"
     postcode: str | None = None
     country: str = "Australia"
-    work_rights: str = "permanent_resident"
+    work_rights: str = "not_specified"
+    work_rights_confirmed: bool = False
     availability_notice: str = "not_specified"
+    availability_confirmed: bool = False
     target_direction: str | None = None
     motivation: str | None = None
+    motivation_confirmed: bool = False
     writing_tone: str = "natural_professional"
     preferences_notes: str | None = None
     referees: list[RefereePayload] = Field(default_factory=list)

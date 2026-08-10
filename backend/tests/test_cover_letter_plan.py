@@ -24,6 +24,7 @@ class CoverLetterPlanTests(unittest.TestCase):
     def test_plan_prioritises_strong_requirements_and_selects_at_most_two_evidence_items(self):
         profile = SimpleNamespace(
             target_direction="Government project roles", motivation="Improve public services",
+            motivation_confirmed=True,
             writing_tone="concise_direct", preferences_notes="One page",
         )
 
@@ -35,7 +36,19 @@ class CoverLetterPlanTests(unittest.TestCase):
         self.assertEqual(plan["evidence_gaps"], ["C3"])
         self.assertEqual(sum(item["target_share"] for item in plan["narrative_plan"]), 1.0)
         self.assertEqual(plan["declared_intent"]["source"], "user_declared_intent_not_career_evidence")
+        self.assertEqual(plan["declared_intent"]["motivation"], "Improve public services")
         self.assertEqual(selected_cover_letter_evidence_ids(plan), {"EV1", "EV2"})
+
+    def test_plan_omits_unconfirmed_motivation(self):
+        profile = SimpleNamespace(
+            target_direction="Government project roles", motivation="Improve public services",
+            motivation_confirmed=False,
+            writing_tone="concise_direct", preferences_notes="One page",
+        )
+
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, profile)
+
+        self.assertEqual(plan["declared_intent"]["motivation"], "")
 
     def test_plan_prefers_evidence_not_already_detailed_in_selection_criteria(self):
         plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_already_detailed=["EV1"])

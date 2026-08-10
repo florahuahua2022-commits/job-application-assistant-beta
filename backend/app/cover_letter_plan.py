@@ -60,7 +60,11 @@ def build_cover_letter_plan(
     intent = {
         "source": "user_declared_intent_not_career_evidence",
         "target_direction": getattr(applicant_profile, "target_direction", None) or "",
-        "motivation": getattr(applicant_profile, "motivation", None) or "",
+        "motivation": (
+            getattr(applicant_profile, "motivation", None) or ""
+            if getattr(applicant_profile, "motivation_confirmed", False)
+            else ""
+        ),
         "writing_tone": getattr(applicant_profile, "writing_tone", "natural_professional") or "natural_professional",
         "preferences_notes": getattr(applicant_profile, "preferences_notes", None) or "",
     }

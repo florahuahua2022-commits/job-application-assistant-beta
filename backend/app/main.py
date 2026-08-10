@@ -1,4 +1,5 @@
 from datetime import datetime
+import hashlib
 from io import BytesIO
 import json
 import re
@@ -12,7 +13,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
 from .applicant_profile import applicant_profile_prompt
-from .generation_trace import build_generation_trace, build_trace_bundle
+from .generation_trace import DOCUMENT_PROMPT_VERSION, build_generation_trace, build_trace_bundle
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
@@ -80,6 +81,44 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(model, ensure_ascii=False)
+
+
+def generation_context_fingerprint(
+    application: JobApplication,
+    resume: Resume,
+    profile: ApplicantProfile | None,
+) -> str:
+    """Fingerprint every mutable input that may affect generated application facts."""
+    payload = {
+        "application": {
+            "id": application.id,
+            "company": application.company,
+            "position_title": application.position_title,
+            "job_description": application.job_description,
+            "selection_criteria": application.selection_criteria or "",
+            "job_model_json": application.job_model_json or "{}",
+        },
+        "resume": {
+            "id": resume.id,
+            "source_text": resume.source_text,
+            "experiences_json": resume.experiences_json or "[]",
+            "ckb_json": resume.ckb_json or "[]",
+        },
+        "profile": None if profile is None else {
+            "id": profile.id,
+            "name": [profile.title, profile.first_name, profile.last_name, profile.preferred_name],
+            "contact": [profile.phone, profile.email, profile.postal_address, profile.suburb, profile.state, profile.postcode, profile.country],
+            "work_rights": profile.work_rights if profile.work_rights_confirmed else "not_specified",
+            "availability_notice": profile.availability_notice if profile.availability_confirmed else "not_specified",
+            "target_direction": profile.target_direction or "",
+            "motivation": profile.motivation if profile.motivation_confirmed else "",
+            "writing_tone": profile.writing_tone,
+            "preferences_notes": profile.preferences_notes or "",
+        },
+        "prompt_version": DOCUMENT_PROMPT_VERSION,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
@@ -394,6 +433,57 @@ def confirmed_availability_wording(value: str) -> str:
     }.get(value, "Do not state availability")
 
 
+def document_release_blockers(
+    document: GeneratedDocument,
+    application: JobApplication,
+    profile: ApplicantProfile | None,
+    expected_context_fingerprint: str | None = None,
+) -> list[str]:
+    """Return deterministic P0 reasons that make a generated document unsafe to export."""
+    blockers: list[str] = []
+    try:
+        reviewer = json.loads(document.reviewer_json or "{}")
+    except json.JSONDecodeError:
+        reviewer = {"status": "fail"}
+    if reviewer.get("status") == "fail":
+        blockers.append("The factual reviewer found material issues.")
+    if expected_context_fingerprint is not None:
+        if not document.context_fingerprint:
+            blockers.append("This document predates generation-context tracking and must be regenerated.")
+        elif document.context_fingerprint != expected_context_fingerprint:
+            blockers.append("The job, resume or applicant profile changed after this document was generated.")
+
+    lowered = document.content.lower()
+    if document.document_type == "cover_letter":
+        role_title = application.position_title.split(" - ", 1)[0].strip()
+        if role_title and role_title.lower() not in lowered:
+            blockers.append("The cover letter does not contain the current position title.")
+        work_rights = (
+            profile.work_rights
+            if profile and profile.work_rights_confirmed
+            else "not_specified"
+        )
+        residency_claims = (
+            "permanent resident", "permanent residency", "australian citizen",
+            "visa holder", "right to work", "rights to work",
+        )
+        if work_rights == "not_specified" and any(claim in lowered for claim in residency_claims):
+            blockers.append("The cover letter states work rights that the applicant has not confirmed.")
+        availability = (
+            profile.availability_notice
+            if profile and profile.availability_confirmed
+            else "not_specified"
+        )
+        availability_claims = (
+            "one month's notice", "one month notice", "two weeks' notice",
+            "two weeks notice", "available to commence", "available to start",
+            "start date is negotiable",
+        )
+        if availability == "not_specified" and any(claim in lowered for claim in availability_claims):
+            blockers.append("The cover letter states availability that the applicant has not confirmed.")
+    return blockers
+
+
 def auto_polish_cover_letter(
     content: str,
     profile: ApplicantProfile | None,
@@ -432,12 +522,13 @@ def auto_polish_cover_letter(
         )
 
     if profile:
-        availability = confirmed_availability_wording(profile.availability_notice)
+        availability_value = profile.availability_notice if profile.availability_confirmed else "not_specified"
+        availability = confirmed_availability_wording(availability_value)
         availability_sentence = {
             "two_weeks": "I am available following two weeks' notice.",
             "one_month": "I am available following one month's notice.",
             "negotiable": "My start date is negotiable.",
-        }.get(profile.availability_notice)
+        }.get(availability_value)
         if availability_sentence:
             polished = re.sub(
                 r"(?i)I am available to commence[^.]*\.",
@@ -500,6 +591,15 @@ def save_profile(
         raise HTTPException(400, "A maximum of two referees can be saved.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     profile_values = payload.model_dump(exclude={"referees"})
+    if not payload.work_rights_confirmed or payload.work_rights == "not_specified":
+        profile_values["work_rights"] = "not_specified"
+        profile_values["work_rights_confirmed"] = False
+    if not payload.availability_confirmed or payload.availability_notice == "not_specified":
+        profile_values["availability_notice"] = "not_specified"
+        profile_values["availability_confirmed"] = False
+    if not payload.motivation_confirmed or not (payload.motivation or "").strip():
+        profile_values["motivation"] = None
+        profile_values["motivation_confirmed"] = False
     if profile:
         for key, value in profile_values.items():
             setattr(profile, key, value)
@@ -799,7 +899,20 @@ def quality_check(
             ))
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
     content_to_check = {key: value.content for key, value in latest.items() if key in required}
+    if expected_context:
+        for document_type, document in latest.items():
+            if document_type not in required:
+                continue
+            if not document.context_fingerprint or document.context_fingerprint != expected_context:
+                issues.append(QualityCheckIssue(
+                    severity="error",
+                    code="stale_generation_context",
+                    message="The job, resume or applicant profile changed after this document was generated. Regenerate it before applying.",
+                    document_type=document_type,
+                ))
     for reviewed_type in ("selection_criteria", "cover_letter", "tailored_resume"):
         reviewed_document = latest.get(reviewed_type)
         if not reviewed_document or (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
@@ -900,7 +1013,11 @@ def quality_check(
                 document_type=document_type,
             ))
         if "available to commence immediately" in lowered or "available to commence promptly" in lowered:
-            availability = profile.availability_notice if profile else "not_specified"
+            availability = (
+                profile.availability_notice
+                if profile and profile.availability_confirmed
+                else "not_specified"
+            )
             expected = {
                 "two_weeks": "two weeks' notice",
                 "one_month": "one month's notice",
@@ -955,6 +1072,21 @@ def quality_check(
 
     if cover:
         lowered_cover = cover.lower()
+        for message in document_release_blockers(latest["cover_letter"], application, profile):
+            code = "reviewer_failed"
+            if "position title" in message:
+                code = "position_title_mismatch"
+            elif "work rights" in message:
+                code = "unconfirmed_work_rights"
+            elif "availability" in message:
+                code = "unconfirmed_availability"
+            if not any(issue.code == code and issue.document_type == "cover_letter" for issue in issues):
+                issues.append(QualityCheckIssue(
+                    severity="error",
+                    code=code,
+                    message=message,
+                    document_type="cover_letter",
+                ))
         speculative_relationships = (
             "may be coordinating this recruitment on behalf of",
             "may be recruiting on behalf of",
@@ -1064,6 +1196,12 @@ def export_generated_document(
     application = get_for_user(session, JobApplication, document.application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
+    blockers = document_release_blockers(document, application, profile, expected_context)
+    if blockers:
+        raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(blockers))
     label = {
         "tailored_resume": "Tailored_Resume",
         "cover_letter": "Cover_Letter",
@@ -1122,6 +1260,16 @@ def export_application_pack(
         required_types.append("selection_criteria")
     if any(document_type not in latest for document_type in required_types):
         raise HTTPException(400, "Generate all required application documents before downloading the pack.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
+    blockers = [
+        reason
+        for document_type in required_types
+        for reason in document_release_blockers(latest[document_type], application, profile, expected_context)
+    ]
+    if blockers:
+        raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(dict.fromkeys(blockers)))
 
     archive_stream = BytesIO()
     labels = {
@@ -1253,6 +1401,33 @@ def generate(
             content = auto_polish_tailored_resume(content)
         if payload.document_type == "cover_letter":
             content = auto_polish_cover_letter(content, profile, application.job_description)
+            role_title = application.position_title.split(" - ", 1)[0].strip()
+            if role_title and role_title.lower() not in content.lower():
+                content = generate_draft(
+                    master_resume.source_text,
+                    application.job_description,
+                    payload.document_type,
+                    application.selection_criteria,
+                    profile_text,
+                    application.position_title,
+                    application.company,
+                    ckb_source_json,
+                    used_experiences,
+                    used_closing_styles,
+                    job_model_json,
+                    evidence_matches_json,
+                    selection_plan_json,
+                    json.dumps(cover_letter_plan or {}, ensure_ascii=False),
+                    json.dumps(resume_plan or {}, ensure_ascii=False),
+                )
+                if profile:
+                    content = enforce_profile_contact(content, profile, payload.document_type)
+                content = auto_polish_cover_letter(content, profile, application.job_description)
+                if role_title.lower() not in content.lower():
+                    raise AIServiceError(
+                        "The generated cover letter did not include the current position title after retrying. "
+                        "Check the saved job details and try again."
+                    )
     except (RuntimeError, ValueError) as error:
         raise HTTPException(400, str(error))
     except AIServiceError as error:
@@ -1312,6 +1487,7 @@ def generate(
     review_result = selection_review or cover_letter_review or resume_review or {}
     retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
     retry_count += int(review_result.get("telemetry", {}).get("reviewer_retries", 0))
+    context_fingerprint = generation_context_fingerprint(application, master_resume, profile)
     trace = build_generation_trace(
         run_id=run_id,
         document_type=payload.document_type,
@@ -1323,6 +1499,8 @@ def generate(
         reviewer=review_result,
         latency_ms=round((perf_counter() - generation_started) * 1000),
         retry_count=retry_count,
+        profile_id=profile.id if profile else None,
+        context_fingerprint=context_fingerprint,
     )
     document = GeneratedDocument(
         user_id=user_id,
@@ -1333,6 +1511,7 @@ def generate(
         reviewer_json=json.dumps(selection_review or cover_letter_review or resume_review or {}, ensure_ascii=False),
         run_id=run_id,
         trace_json=json.dumps(trace, ensure_ascii=False),
+        context_fingerprint=context_fingerprint,
         used_experiences_json=json.dumps(metadata["used_experiences"]),
         closing_styles_json=json.dumps(metadata["closing_styles"]),
     )

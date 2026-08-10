@@ -49,13 +49,20 @@ def build_generation_trace(
     reviewer: dict[str, Any] | None = None,
     latency_ms: int = 0,
     retry_count: int = 0,
+    profile_id: int | None = None,
+    context_fingerprint: str = "",
 ) -> dict[str, Any]:
     return {
         "schema_version": GENERATION_TRACE_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "document_type": document_type,
-        "input_refs": {"application_id": application_id, "resume_id": resume_id},
+        "input_refs": {
+            "application_id": application_id,
+            "resume_id": resume_id,
+            "profile_id": profile_id,
+            "context_fingerprint": context_fingerprint,
+        },
         "versions": {
             "prompt": DOCUMENT_PROMPT_VERSION,
             "ckb_schema": CKB_SCHEMA_VERSION,
