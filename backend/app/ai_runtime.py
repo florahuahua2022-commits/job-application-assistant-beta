@@ -76,7 +76,7 @@ def begin_ai_run(document_type: str, criterion_count: int = 0) -> Token:
         limits={
             "matching": 1,
             "generation": generation_limit,
-            "review": 2 if document_type == "selection_criteria" else 1,
+            "review": 3 if document_type == "selection_criteria" else 1,
             "compression": 1,
         },
     )

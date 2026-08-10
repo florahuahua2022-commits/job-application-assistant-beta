@@ -58,6 +58,26 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][1]["issues"][0]["type"], "unsupported_claim")
 
+    def test_selection_correction_regenerates_only_failed_criteria(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Coordinated meetings."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"]},{"criteria_id":"C2","criteria_text":"Meetings","allocated_word_limit":100,"matched_evidence":["EV002"]}]}'
+        existing = {"responses": [
+            {"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"S","task":"T","action":"A","result":"R"},"final_response":"Old reporting response.","word_count":3},
+            {"criteria_id":"C2","evidence_used":["EV002"],"star":{"situation":"S","task":"T","action":"A","result":"R"},"final_response":"Keep meeting response.","word_count":3},
+        ], "telemetry": {"generator_retries": 0}}
+        corrected = '{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"S","task":"T","action":"A","result":"R"},"final_response":"I prepared monthly reports.","word_count":4}'
+
+        with patch.object(ai, "_selection_provider_response", return_value=corrected) as provider:
+            bundle = ai.generate_selection_criteria_bundle(
+                ckb, plan, existing_bundle=existing,
+                review_feedback={"C1":[{"type":"unsupported_claim","description":"Rewrite it."}]},
+            )
+
+        self.assertEqual(provider.call_count, 1)
+        self.assertIn("I prepared monthly reports", bundle["content"])
+        self.assertIn("Keep meeting response", bundle["content"])
+        self.assertEqual(bundle["telemetry"]["corrected_criteria"], 1)
+
     def test_generates_and_validates_each_selection_criterion_separately(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'
         plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"],"match_type":"direct","coverage":"strong","evidence_status":"strong"},{"criteria_id":"C2","criteria_text":"Qualification","allocated_word_limit":100,"matched_evidence":["EV002"],"match_type":"direct","coverage":"strong","evidence_status":"strong"}]}'

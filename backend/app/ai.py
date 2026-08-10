@@ -251,7 +251,12 @@ def _selection_provider_response(prompt: str) -> str:
         return _deepseek_draft(prompt)
 
 
-def generate_selection_criteria_bundle(ckb_json: str, selection_plan_json: str) -> dict:
+def generate_selection_criteria_bundle(
+    ckb_json: str,
+    selection_plan_json: str,
+    existing_bundle: dict | None = None,
+    review_feedback: dict[str, list[dict]] | None = None,
+) -> dict:
     try:
         ckb = json.loads(ckb_json or "[]")
         plan = json.loads(selection_plan_json or "{}")
@@ -262,9 +267,31 @@ def generate_selection_criteria_bundle(ckb_json: str, selection_plan_json: str) 
     evidence_by_id = {str(item.get("evidence_id")): item for item in ckb if isinstance(item, dict)}
     responses: list[dict] = []
     used_ids: list[str] = []
-    generator_retries = 0
+    generator_retries = int((existing_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
+    corrected_criteria = 0
+    existing_responses = {
+        str(item.get("criteria_id")): item
+        for item in (existing_bundle or {}).get("responses") or []
+        if isinstance(item, dict)
+    }
     for plan_item in plan["items"]:
+        criteria_id = str(plan_item.get("criteria_id") or "")
+        if review_feedback is not None and criteria_id not in review_feedback and criteria_id in existing_responses:
+            response = existing_responses[criteria_id]
+            responses.append(response)
+            for evidence_id in response.get("evidence_used") or []:
+                if evidence_id not in used_ids:
+                    used_ids.append(evidence_id)
+            continue
         matched = [evidence_by_id[value] for value in plan_item.get("matched_evidence") or [] if value in evidence_by_id]
+        correction_context = ""
+        if review_feedback is not None:
+            corrected_criteria += 1
+            correction_context = (
+                "\n\nCORRECTION REQUIRED. Rewrite the complete response, preserving supported facts only.\n"
+                f"PREVIOUS RESPONSE:\n{json.dumps(existing_responses.get(criteria_id, {}), ensure_ascii=False)}\n"
+                f"REVIEWER FINDINGS TO CORRECT:\n{json.dumps(review_feedback.get(criteria_id, []), ensure_ascii=False)}"
+            )
         base_prompt = f"""You are writing one Selection Criterion response for an Australian government application.
 
 {government_writing_rules(target_english_variant())}
@@ -289,7 +316,7 @@ MATCHED CKB EVIDENCE (the only factual source):
 Write about {plan_item.get('allocated_word_limit')} words. Return JSON only:
 {{"criteria_id":"{plan_item.get('criteria_id')}","evidence_used":["EV..."],"star":{{"situation":"...","task":"...","action":"...","result":"..."}},"final_response":"natural paragraph text","word_count":0}}
 
-Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include only IDs materially used in final_response. The STAR fields are audit fields; do not print S/T/A/R labels inside final_response."""
+Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include only IDs materially used in final_response. The STAR fields are audit fields; do not print S/T/A/R labels inside final_response.{correction_context}"""
         validation = None
         response: dict = {}
         for attempt in range(2):
@@ -329,7 +356,11 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
         "responses": responses,
         "used_experiences": used_ids,
         "actual_total_word_count": sum(item["word_count"] for item in responses),
-        "telemetry": {"generator_retries": generator_retries, "criterion_count": len(responses)},
+        "telemetry": {
+            "generator_retries": generator_retries,
+            "criterion_count": len(responses),
+            "corrected_criteria": corrected_criteria,
+        },
     }
 
 
@@ -427,7 +458,7 @@ Check only these issue types:
 - declared_evidence_unused
 - style_only
 
-Applicant Profile motivation may support a motivational statement only when it is explicitly supplied and is not 'Not provided'. Target direction is not personal motivation. A neutral statement that the applicant is applying for the named role is allowed. Conventional neutral application language such as 'I would welcome the opportunity to contribute', 'I am happy to provide further information' and 'I look forward to hearing from you' is not personal motivation and must not be flagged. The CURRENT DATE supplied by the application is system context and must not be checked against resume evidence. Treat a broad statement about alignment or career-wide fit as style_only when it adds no duty, ability, result, motivation or personal value. Use unsupported_inference when wording adds an ability, responsibility, performance quality or result. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
+Applicant Profile motivation may support a motivational statement only when it is explicitly supplied and is not 'Not provided'. Target direction is not personal motivation. A neutral statement that the applicant is applying for the named role is allowed. Conventional neutral application language such as 'I would welcome the opportunity to contribute', 'I am happy to provide further information' and 'I look forward to hearing from you' is not personal motivation and must not be flagged. The CURRENT DATE supplied by the application is system context and must not be checked against resume evidence. Treat a broad statement about alignment or career-wide fit as style_only when it adds no duty, ability, result, motivation or personal value. Use unsupported_inference when wording adds an ability, responsibility, performance quality or result. Do not flag omission of a JD sub-task when the supplied evidence does not support it; the letter must never invent missing experience merely to cover every requirement. A cover letter may select the strongest evidence and is not required to restate every criterion. Never return an issue whose own description says the wording is supported, accurate, acceptable, neutral, not flagged or not material. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
 
 SHARED JOB MODEL:
 {json.dumps(job_model, ensure_ascii=False)}

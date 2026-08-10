@@ -25,11 +25,21 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
     issue_type = str(issue.get("type") or "")
     if issue_type not in SHARED_REVIEW_ISSUE_TYPES:
         return None
+    description = str(issue.get("description") or "Review required.").strip()
+    lowered = description.lower()
+    if any(marker in lowered for marker in (
+        "no material issue",
+        "no additional flag",
+        "is not flagged",
+        "not an issue by itself",
+        "no material tone issue",
+    )):
+        return None
     severity = ISSUE_SEVERITY[issue_type]
     return {
         "type": issue_type,
         "severity": severity,
-        "description": str(issue.get("description") or "Review required.").strip(),
+        "description": description,
         "evidence": str(issue.get("evidence") or "").strip(),
         "location": str(issue.get("location") or "").strip(),
         "recommended_action": str(issue.get("recommended_action") or "Review or regenerate the affected content.").strip(),

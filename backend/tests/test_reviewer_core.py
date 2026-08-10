@@ -4,6 +4,15 @@ from app.reviewer_core import SHARED_REVIEWER_SCHEMA_VERSION, findings_block_rel
 
 
 class SharedReviewerCoreTests(unittest.TestCase):
+    def test_reviewer_self_declared_non_issue_is_discarded(self):
+        result = normalise_document_review({"issues": [{
+            "type": "unsupported_claim",
+            "description": "The wording is supported and is not a material issue; no additional flag is needed.",
+        }]}, "cover_letter")
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["results"][0]["issues"], [])
+
     def test_material_grounding_issues_have_deterministic_severity_and_block(self):
         finding = normalise_finding({
             "type": "fabricated_figure",

@@ -132,6 +132,19 @@ class FrozenSelectionCriteriaAcceptanceTests(unittest.TestCase):
         self.assertIn("unsupported_evaluative_wording", {issue["code"] for issue in result["issues"]})
         self.assertIn("jd_wording_repeated", {issue["code"] for issue in result["issues"]})
 
+    def test_generator_retries_common_semantic_upgrade_phrases(self):
+        response = {
+            "criteria_id": "C1",
+            "evidence_used": ["EV1"],
+            "star": {"situation": "S", "task": "T", "action": "A", "result": "R"},
+            "final_response": "These tasks strengthened my writing and my experience demonstrates directly transferable skills.",
+        }
+        plan_item = {"criteria_text": "Written communication", "allocated_word_limit": 200, "matched_evidence": ["EV1"]}
+
+        result = hard_validate_response(response, plan_item)
+
+        self.assertIn("unsupported_semantic_upgrade", {issue["code"] for issue in result["issues"]})
+
     def test_reviewer_surfaces_fabricated_figures_and_over_inference(self):
         raw = {"results": [
             {"criteria_id": "C1", "status": "fail", "issues": [{

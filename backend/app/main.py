@@ -1693,6 +1693,22 @@ def generate(
             selection_review = review_selection_criteria_batch(
                 ckb_source_json, selection_plan_json, selection_bundle, master_resume.source_text
             )
+            if selection_review.get("status") == "fail":
+                review_feedback = {
+                    str(result.get("criteria_id")): result.get("issues") or []
+                    for result in selection_review.get("results") or []
+                    if result.get("status") == "fail" and result.get("issues")
+                }
+                if review_feedback:
+                    selection_bundle = generate_selection_criteria_bundle(
+                        ckb_source_json,
+                        selection_plan_json,
+                        existing_bundle=selection_bundle,
+                        review_feedback=review_feedback,
+                    )
+                    selection_review = review_selection_criteria_batch(
+                        ckb_source_json, selection_plan_json, selection_bundle, master_resume.source_text
+                    )
             content = selection_bundle["content"]
         else:
             if payload.document_type == "cover_letter":
@@ -1792,43 +1808,11 @@ def generate(
             allowed_evidence_ids = selected_resume_evidence_ids(resume_plan)
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids and payload.document_type == "cover_letter":
-            try:
-                repeated_phrases = sorted({
-                    phrase
-                    for issue in find_jd_similarity_issues(content, application.job_description)
-                    if issue["severity"] == "error"
-                    for phrase in issue.get("matches") or []
-                })
-                with ai_call_scope("generation", "unmatched_evidence_id"):
-                    content = generate_draft(
-                        master_resume.source_text, application.job_description, payload.document_type,
-                        application.selection_criteria, profile_text, application.position_title,
-                        application.company, ckb_source_json, used_experiences, used_closing_styles,
-                        job_model_json, evidence_matches_json, selection_plan_json,
-                        json.dumps(cover_letter_plan or {}, ensure_ascii=False),
-                        json.dumps(resume_plan or {}, ensure_ascii=False),
-                        "Regenerate the complete letter and cite only these permitted evidence IDs in "
-                        f"GENERATION_META: {sorted(allowed_evidence_ids)}. Do not cite, rename or invent any other ID. "
-                        f"Also paraphrase or omit these repeated Job Description phrases: {repeated_phrases}.",
-                    )
-                cover_generation_retried = True
-                if profile:
-                    content = enforce_profile_contact(content, profile, payload.document_type)
-                content = auto_polish_cover_letter(content, profile, application.job_description)
-                metadata = {"used_experiences": [], "closing_styles": []}
-                match = re.search(r"<!--\s*GENERATION_META\s+(\{.*?\})\s*-->", content, re.DOTALL)
-                if match:
-                    try:
-                        parsed = json.loads(match.group(1))
-                        metadata["used_experiences"] = parsed.get("used_experiences", [])
-                        metadata["closing_styles"] = parsed.get("closing_styles", [])
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
-                    content = content[:match.start()].rstrip()
-                invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
-            except (AIServiceError, AICallBudgetExceeded) as error:
-                end_ai_run(ai_run_token)
-                raise HTTPException(502, str(error))
+            # Evidence selection is deterministic and the model only receives the
+            # selected pack. A malformed hidden ID must not consume the sole prose
+            # correction call; record the authoritative plan IDs instead.
+            metadata["used_experiences"] = sorted(allowed_evidence_ids)
+            invalid_evidence_ids = set()
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
         cover_similarity_errors = (

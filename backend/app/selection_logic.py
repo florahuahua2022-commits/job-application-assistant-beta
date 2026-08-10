@@ -140,6 +140,16 @@ def hard_validate_response(
             "code": "unsupported_evaluative_wording",
             "message": "Replace 'proven capability' or 'strong record' with plain evidence-based wording.",
         })
+    if re.search(
+        r"(?i)\b(?:strengthened|developed) my\b|\bmy experience demonstrates\b|"
+        r"\bsubstantial experience\b|\bdirectly transferable\b|\bdistill(?:ed|ing)? complex\b|"
+        r"\baccessible written formats?\b",
+        final_response,
+    ):
+        issues.append({
+            "code": "unsupported_semantic_upgrade",
+            "message": "Remove inferred skill development, evaluative conclusions and unsupported complexity or transferability.",
+        })
     if any(
         item["severity"] == "error"
         for item in find_jd_similarity_issues(final_response, str(plan_item.get("criteria_text") or ""))
