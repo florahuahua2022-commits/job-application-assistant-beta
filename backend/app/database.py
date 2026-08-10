@@ -81,6 +81,8 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN quality_check_fingerprint VARCHAR NOT NULL DEFAULT ''"))
                 if "quality_checked_at" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN quality_checked_at TIMESTAMP"))
+                if "quality_override_ids_json" not in application_columns:
+                    connection.execute(text("ALTER TABLE jobapplication ADD COLUMN quality_override_ids_json TEXT NOT NULL DEFAULT '[]'"))
             if "applicantprofile" in table_names:
                 profile_columns = {column["name"] for column in inspector.get_columns("applicantprofile")}
                 if "target_direction" not in profile_columns:
@@ -117,6 +119,8 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN quality_check_fingerprint VARCHAR DEFAULT ''"))
             if "quality_checked_at" not in existing:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN quality_checked_at DATETIME"))
+            if "quality_override_ids_json" not in existing:
+                connection.execute(text("ALTER TABLE jobapplication ADD COLUMN quality_override_ids_json TEXT DEFAULT '[]'"))
             resume_columns = {column["name"] for column in inspector.get_columns("resume")}
             if "experiences_json" not in resume_columns:
                 connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT DEFAULT '[]'"))

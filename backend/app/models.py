@@ -80,6 +80,7 @@ class JobApplication(SQLModel, table=True):
     selection_confirmations_json: str = "[]"
     quality_check_fingerprint: str = ""
     quality_checked_at: datetime | None = None
+    quality_override_ids_json: str = "[]"
     deadline: date | None = None
     status: ApplicationStatus = ApplicationStatus.draft
     submission_reference: str | None = None
@@ -129,6 +130,25 @@ class Referral(SQLModel, table=True):
     status: str = "earned"
     reward_credits: int = 1
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ContentCheckOverride(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    # Audit references deliberately remain immutable identifiers rather than
+    # cascading foreign keys, so a normal backup restore cannot erase history.
+    application_id: int = Field(index=True)
+    document_id: int | None = None
+    applicant_user_id: UUID | None = Field(default=None, index=True)
+    admin_user_id: UUID = Field(index=True)
+    issue_id: str = Field(index=True)
+    issue_code: str
+    document_type: str | None = None
+    original_issue_json: str
+    reason: str
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    revoked_at: datetime | None = None
+    export_count: int = 0
+    last_exported_at: datetime | None = None
     earned_at: datetime | None = Field(default_factory=datetime.utcnow)
 
 
@@ -268,6 +288,7 @@ class GeneratedDocumentUpdate(SQLModel):
 
 
 class QualityCheckIssue(SQLModel):
+    issue_id: str = ""
     severity: str  # error | warning | information
     code: str
     message: str
@@ -276,12 +297,25 @@ class QualityCheckIssue(SQLModel):
     source: str | None = None
     rule: str | None = None
     recommended_action: str | None = None
+    overridden: bool = False
+    override_reason: str | None = None
+
+
+class ContentCheckOverrideRequest(SQLModel):
+    issue_ids: list[str] = Field(default_factory=list)
+    reason: str
 
 
 class QualityCheckResponse(SQLModel):
     ready: bool
     issues: list[QualityCheckIssue]
     checked_documents: list[str]
+
+
+class ContentCheckOverrideResponse(SQLModel):
+    application_id: int
+    overridden_issue_ids: list[str]
+    quality_check: QualityCheckResponse
 
 
 class ResumeContentCheckItem(SQLModel):

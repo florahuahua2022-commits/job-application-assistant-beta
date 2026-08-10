@@ -1,7 +1,7 @@
 from functools import lru_cache
 from uuid import UUID
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 
 from .config import settings
 
@@ -47,3 +47,16 @@ def get_current_user(authorization: str | None = Header(default=None)) -> UUID |
         # PyJWT is loaded only in online mode so the current local installation
         # remains usable before cloud dependencies are installed.
         raise HTTPException(401, "Your session is invalid or has expired. Sign in again.") from error
+
+
+def get_admin_user(user_id: UUID | None = Depends(get_current_user)) -> UUID:
+    if user_id is None:
+        raise HTTPException(403, "Administrator access is not available in local user mode.")
+    configured = {
+        value.strip().lower()
+        for value in settings.admin_user_ids.split(",")
+        if value.strip()
+    }
+    if str(user_id).lower() not in configured:
+        raise HTTPException(403, "Administrator access is required.")
+    return user_id

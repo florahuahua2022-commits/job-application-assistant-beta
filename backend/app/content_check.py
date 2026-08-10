@@ -1,4 +1,5 @@
 import re
+import hashlib
 from typing import Any
 
 
@@ -65,7 +66,7 @@ def consolidate_quality_issues(issues: list[dict[str, Any]]) -> list[dict[str, A
             if not existing.get(field) and issue.get(field):
                 existing[field] = issue[field]
 
-    return sorted(
+    result = sorted(
         consolidated.values(),
         key=lambda item: (
             -SEVERITY_ORDER[str(item.get("severity") or "information")],
@@ -73,3 +74,9 @@ def consolidate_quality_issues(issues: list[dict[str, Any]]) -> list[dict[str, A
             str(item.get("code") or ""),
         ),
     )
+    for issue in result:
+        identity = "|".join(str(issue.get(field) or "") for field in (
+            "document_type", "code", "message", "excerpt",
+        ))
+        issue["issue_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return result

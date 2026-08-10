@@ -15,7 +15,7 @@ from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_se
 from .ai_runtime import AICallBudgetExceeded, ai_call_scope, begin_ai_run, current_ai_run, end_ai_run
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import DOCUMENT_PROMPT_VERSION, build_generation_trace, build_trace_bundle
-from .auth import get_current_user
+from .auth import get_admin_user, get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
 from .config import settings
@@ -28,13 +28,26 @@ from .fact_boundaries import find_fact_boundary_issues
 from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .jd_similarity import find_jd_similarity_issues
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ContentCheckOverride, ContentCheckOverrideRequest, ContentCheckOverrideResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+NON_OVERRIDABLE_ISSUE_CODES = {
+    "missing_document",
+    "stale_generation_context",
+    "position_title_mismatch",
+    "phone_mismatch",
+    "email_mismatch",
+    "unconfirmed_work_rights",
+    "unconfirmed_availability",
+    "unsupported_motivation",
+    "reviewer_unavailable",
+    "reviewer_invalid_result",
+}
 
 
 @app.on_event("startup")
@@ -558,6 +571,30 @@ def final_check_gate_blockers(
     if application.quality_check_fingerprint != current:
         return ["The application materials changed after the last Final Check. Run Final Check again."]
     return []
+
+
+def record_override_export(session: Session, application_id: int) -> None:
+    application = session.get(JobApplication, application_id)
+    try:
+        used_issue_ids = set(json.loads(application.quality_override_ids_json or "[]")) if application else set()
+    except (json.JSONDecodeError, TypeError):
+        used_issue_ids = set()
+    if not used_issue_ids:
+        return
+    overrides = session.exec(
+        select(ContentCheckOverride)
+        .where(ContentCheckOverride.application_id == application_id)
+        .where(ContentCheckOverride.revoked_at.is_(None))
+    ).all()
+    overrides = [item for item in overrides if item.issue_id in used_issue_ids]
+    if not overrides:
+        return
+    exported_at = datetime.utcnow()
+    for override in overrides:
+        override.export_count += 1
+        override.last_exported_at = exported_at
+        session.add(override)
+    session.commit()
 
 
 def auto_polish_cover_letter(
@@ -1289,7 +1326,23 @@ def quality_check(
         QualityCheckIssue(**item)
         for item in consolidate_quality_issues([issue.model_dump() for issue in issues])
     ]
+    active_overrides = session.exec(
+        select(ContentCheckOverride)
+        .where(ContentCheckOverride.application_id == application_id)
+        .where(ContentCheckOverride.revoked_at.is_(None))
+    ).all()
+    overrides_by_issue = {item.issue_id: item for item in active_overrides}
+    for issue in consolidated_issues:
+        override = overrides_by_issue.get(issue.issue_id)
+        if not override or issue.code in NON_OVERRIDABLE_ISSUE_CODES or issue.severity != "error":
+            continue
+        issue.severity = "information"
+        issue.overridden = True
+        issue.override_reason = override.reason
+        issue.recommended_action = "An administrator reviewed this finding as a confirmed false positive."
     ready = not any(issue.severity == "error" for issue in consolidated_issues)
+    applied_override_ids = sorted(issue.issue_id for issue in consolidated_issues if issue.overridden)
+    application.quality_override_ids_json = json.dumps(applied_override_ids)
     application.quality_check_fingerprint = (
         current_pack_fingerprint(application, latest, expected_context) if ready else ""
     )
@@ -1301,6 +1354,95 @@ def quality_check(
         issues=consolidated_issues,
         checked_documents=sorted(content_to_check),
     )
+
+
+@app.post(
+    "/admin/applications/{application_id}/content-check-overrides",
+    response_model=ContentCheckOverrideResponse,
+)
+def create_content_check_overrides(
+    application_id: int,
+    payload: ContentCheckOverrideRequest,
+    session: Session = Depends(get_session),
+    admin_user_id: UUID = Depends(get_admin_user),
+):
+    application = session.get(JobApplication, application_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    reason = payload.reason.strip()
+    requested_ids = list(dict.fromkeys(value.strip() for value in payload.issue_ids if value.strip()))
+    if not requested_ids:
+        raise HTTPException(400, "Select at least one specific Blocking Error to override.")
+    if len(reason) < 10:
+        raise HTTPException(400, "Provide a specific review reason of at least 10 characters.")
+
+    current = quality_check(application_id, session, application.user_id)
+    blocking_by_id = {
+        issue.issue_id: issue
+        for issue in current.issues
+        if issue.severity == "error" and issue.issue_id
+    }
+    missing_ids = [issue_id for issue_id in requested_ids if issue_id not in blocking_by_id]
+    if missing_ids:
+        raise HTTPException(409, "One or more selected issues are no longer active Blocking Errors. Run Content Check again.")
+    protected = [blocking_by_id[issue_id].code for issue_id in requested_ids if blocking_by_id[issue_id].code in NON_OVERRIDABLE_ISSUE_CODES]
+    if protected:
+        raise HTTPException(409, "These high-risk issues cannot be overridden and must be fixed: " + ", ".join(sorted(set(protected))))
+
+    latest_documents = session.exec(
+        select(GeneratedDocument)
+        .where(GeneratedDocument.application_id == application_id)
+        .order_by(GeneratedDocument.created_at.desc())
+    ).all()
+    latest_by_type: dict[str, GeneratedDocument] = {}
+    for document in latest_documents:
+        latest_by_type.setdefault(document.document_type, document)
+    existing_ids = {
+        item.issue_id
+        for item in session.exec(
+            select(ContentCheckOverride)
+            .where(ContentCheckOverride.application_id == application_id)
+            .where(ContentCheckOverride.revoked_at.is_(None))
+        ).all()
+    }
+    for issue_id in requested_ids:
+        if issue_id in existing_ids:
+            continue
+        issue = blocking_by_id[issue_id]
+        document = latest_by_type.get(issue.document_type or "")
+        session.add(ContentCheckOverride(
+            application_id=application_id,
+            document_id=document.id if document else None,
+            applicant_user_id=application.user_id,
+            admin_user_id=admin_user_id,
+            issue_id=issue.issue_id,
+            issue_code=issue.code,
+            document_type=issue.document_type,
+            original_issue_json=json.dumps(issue.model_dump(mode="json"), ensure_ascii=False),
+            reason=reason,
+        ))
+    session.commit()
+    updated = quality_check(application_id, session, application.user_id)
+    return ContentCheckOverrideResponse(
+        application_id=application_id,
+        overridden_issue_ids=requested_ids,
+        quality_check=updated,
+    )
+
+
+@app.get("/admin/applications/{application_id}/content-check-overrides", response_model=list[ContentCheckOverride])
+def list_content_check_overrides(
+    application_id: int,
+    session: Session = Depends(get_session),
+    _admin_user_id: UUID = Depends(get_admin_user),
+):
+    if not session.get(JobApplication, application_id):
+        raise HTTPException(404, "Application not found.")
+    return session.exec(
+        select(ContentCheckOverride)
+        .where(ContentCheckOverride.application_id == application_id)
+        .order_by(ContentCheckOverride.created_at.desc())
+    ).all()
 
 
 @app.patch("/documents/{document_id}", response_model=GeneratedDocument)
@@ -1351,11 +1493,12 @@ def export_generated_document(
     for candidate in documents:
         latest.setdefault(candidate.document_type, candidate)
     blockers = final_check_gate_blockers(application, latest, expected_context)
+    if expected_context and document.context_fingerprint != expected_context:
+        blockers.append("The job, resume or applicant profile changed after this document was generated.")
     if latest.get(document.document_type) is not document and (
         not latest.get(document.document_type) or latest[document.document_type].id != document.id
     ):
         blockers.append("This is not the latest generated version of the document.")
-    blockers.extend(document_release_blockers(document, application, profile, expected_context, evidence_text))
     if blockers:
         raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(blockers))
     label = {
@@ -1370,6 +1513,7 @@ def export_generated_document(
     else:
         payload = create_pdf(document.content, label.replace("_", " "), template)
         media_type = "application/pdf"
+    record_override_export(session, application.id)
     return Response(payload, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'})
 
 
@@ -1418,11 +1562,7 @@ def export_application_pack(
     current_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     expected_context = generation_context_fingerprint(application, current_resume, profile) if current_resume else None
     evidence_text = f"{current_resume.source_text}\n{current_resume.ckb_json or ''}" if current_resume else ""
-    blockers = final_check_gate_blockers(application, latest, expected_context) + [
-        reason
-        for document_type in required_types
-        for reason in document_release_blockers(latest[document_type], application, profile, expected_context, evidence_text)
-    ]
+    blockers = final_check_gate_blockers(application, latest, expected_context)
     if blockers:
         raise HTTPException(409, "Fix blocking content issues before downloading: " + " ".join(dict.fromkeys(blockers)))
 
@@ -1439,6 +1579,7 @@ def export_application_pack(
             payload = create_docx(document.content, label.replace("_", " "), template) if format == "docx" else create_pdf(document.content, label.replace("_", " "), template)
             archive.writestr(f"{safe_filename(application.position_title)}_{label}.{format}", payload)
     filename = safe_filename(f"{application.position_title}_Application_Pack_{format.upper()}")
+    record_override_export(session, application.id)
     return Response(archive_stream.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}.zip"'})
 
 

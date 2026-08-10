@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.database import get_session
-from app.auth import get_current_user
+from app.auth import get_admin_user, get_current_user
 from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, document_release_blockers, enforce_profile_contact, generation_context_fingerprint, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
 from app import backup
@@ -589,6 +589,89 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertIn("changed after the last Final Check", stale_single.json()["detail"])
         self.assertEqual(stale_pack.status_code, 409)
         self.assertEqual(stale_prepare.status_code, 409)
+
+    def test_admin_can_override_specific_false_positive_and_export_is_audited(self):
+        admin_id = uuid4()
+        app.dependency_overrides[get_admin_user] = lambda: admin_id
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            resume = session.exec(select(Resume)).first()
+            context = generation_context_fingerprint(application, resume, None)
+            session.add_all([
+                GeneratedDocument(
+                    application_id=self.application_id,
+                    document_type="tailored_resume",
+                    content="## Professional Summary\nProven capability in project support.\n## Key Skills\nReporting\n## Work Experience\nProject support.",
+                    reviewer_json='{"status":"pass","results":[]}',
+                    context_fingerprint=context,
+                ),
+                GeneratedDocument(
+                    application_id=self.application_id,
+                    document_type="cover_letter",
+                    content="Application for Project Officer at Example Agency. " + "Project support evidence. " * 80,
+                    reviewer_json='{"status":"pass","results":[]}',
+                    context_fingerprint=context,
+                ),
+            ])
+            session.commit()
+
+        initial = self.client.get(f"/applications/{self.application_id}/quality-check").json()
+        issue = next(item for item in initial["issues"] if item["code"] == "unsupported_evaluative_claim")
+        overridden = self.client.post(
+            f"/admin/applications/{self.application_id}/content-check-overrides",
+            json={"issue_ids": [issue["issue_id"]], "reason": "Confirmed false positive against the original CV source."},
+        )
+
+        self.assertEqual(overridden.status_code, 200)
+        result = overridden.json()["quality_check"]
+        applied = next(item for item in result["issues"] if item["issue_id"] == issue["issue_id"])
+        self.assertTrue(result["ready"])
+        self.assertTrue(applied["overridden"])
+        self.assertEqual(applied["severity"], "information")
+
+        exported = self.client.get(f"/applications/{self.application_id}/export-pack?format=docx")
+        audit = self.client.get(f"/admin/applications/{self.application_id}/content-check-overrides")
+
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(audit.status_code, 200)
+        self.assertEqual(audit.json()[0]["admin_user_id"], str(admin_id))
+        self.assertEqual(audit.json()[0]["export_count"], 1)
+        self.assertIsNotNone(audit.json()[0]["last_exported_at"])
+        self.assertIn("original CV", audit.json()[0]["reason"])
+
+    def test_admin_cannot_override_position_context_risk(self):
+        app.dependency_overrides[get_admin_user] = lambda: uuid4()
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            resume = session.exec(select(Resume)).first()
+            context = generation_context_fingerprint(application, resume, None)
+            session.add_all([
+                GeneratedDocument(
+                    application_id=self.application_id, document_type="tailored_resume",
+                    content="## Professional Summary\nProject support.\n## Key Skills\nReporting\n## Work Experience\nSupport.",
+                    reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context,
+                ),
+                GeneratedDocument(
+                    application_id=self.application_id, document_type="cover_letter",
+                    content="Application for an unrelated role at Example Agency. " + "Project support. " * 80,
+                    reviewer_json='{"status":"pass","results":[]}', context_fingerprint=context,
+                ),
+            ])
+            session.commit()
+
+        initial = self.client.get(f"/applications/{self.application_id}/quality-check").json()
+        issue = next(item for item in initial["issues"] if item["code"] == "position_title_mismatch")
+        response = self.client.post(
+            f"/admin/applications/{self.application_id}/content-check-overrides",
+            json={"issue_ids": [issue["issue_id"]], "reason": "Manual review requested for this protected issue."},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("cannot be overridden", response.json()["detail"])
+
+    def test_normal_user_has_no_override_access(self):
+        response = self.client.get(f"/admin/applications/{self.application_id}/content-check-overrides")
+        self.assertEqual(response.status_code, 403)
 
     def test_job_change_marks_existing_document_stale_and_blocks_export(self):
         with Session(self.engine) as session:
