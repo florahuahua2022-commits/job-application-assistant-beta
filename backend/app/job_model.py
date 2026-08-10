@@ -3,7 +3,7 @@ import re
 from typing import Any
 
 
-JOB_MODEL_SCHEMA_VERSION = "1.0"
+JOB_MODEL_SCHEMA_VERSION = "1.1"
 CRITERION_CATEGORIES = {"behaviour", "technical", "knowledge", "qualification", "experience"}
 
 
@@ -20,6 +20,13 @@ def _meaningful_lines(value: str) -> list[str]:
     for raw in value.splitlines():
         cleaned = _clean(re.sub(r"^\s*(?:\d+[.)]|[a-z][.)])\s*", "", raw, flags=re.IGNORECASE))
         if re.search(r"(?i)\b(?:maximum|limit|no more than|not exceed|up to|total|overall|combined)\b.*\b[\d,]+\s*words?\b", cleaned):
+            continue
+        if re.search(
+            r"(?i)(?:^position description\b|\.pdf$|^to learn more\b|^for (?:further )?enquiries\b|"
+            r"^for enquiries\b|recruitment process|\bcontact\s+[A-Z][a-z]+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|"
+            r"^note:\s*employment checks|^employment checks will include)",
+            cleaned,
+        ):
             continue
         if len(cleaned) >= 12 and not re.fullmatch(r"(?i)(?:essential|desirable|selection criteria|requirements|responsibilities):?", cleaned):
             lines.append(cleaned)

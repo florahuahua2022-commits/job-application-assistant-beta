@@ -1,4 +1,4 @@
-"""Run the configured DTMI application through five paid, real generation rounds.
+"""Run the configured application through up to five paid, real generation rounds.
 
 Required environment variables:
   DTMI_APPLICATION_ID, API_BASE_URL
@@ -35,6 +35,13 @@ def main() -> int:
     base = os.getenv("API_BASE_URL", "http://localhost:8000")
     token = os.getenv("API_BEARER_TOKEN", "")
     application_id = os.getenv("DTMI_APPLICATION_ID", "").strip()
+    try:
+        round_limit = int(os.getenv("LIVE_REGRESSION_ROUNDS", "5"))
+    except ValueError:
+        round_limit = 0
+    if not 1 <= round_limit <= 5:
+        print("Set LIVE_REGRESSION_ROUNDS to a number from 1 to 5.", file=sys.stderr)
+        return 2
     if not application_id.isdigit():
         print("Set DTMI_APPLICATION_ID to the saved DTMI test application ID.", file=sys.stderr)
         return 2
@@ -47,35 +54,53 @@ def main() -> int:
     if (application.get("selection_criteria") or "").strip():
         document_types.append("selection_criteria")
 
+    output = Path(sys.argv[1] if len(sys.argv) > 1 else "dtmi-live-regression-report.json")
     rounds = []
-    for round_number in range(1, 6):
+
+    def write_report(status: str, error: str = "") -> dict:
+        report = {
+            "schema_version": "1.1",
+            "status": status,
+            "application_id": int(application_id),
+            "requested_round_count": round_limit,
+            "completed_round_count": len(rounds),
+            "all_rounds_ready": len(rounds) == round_limit and all(
+                (item.get("quality_check") or {}).get("ready", False) for item in rounds
+            ),
+            "rounds": rounds,
+        }
+        if error:
+            report["error"] = error
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
+
+    for round_number in range(1, round_limit + 1):
         pack_id = str(uuid4())
         generated = []
-        for document_type in document_types:
-            document = request_json(
-                base, "/generate", token, method="POST",
-                body={"application_id": int(application_id), "document_type": document_type, "pack_id": pack_id},
-            )
-            trace = request_json(base, f"/documents/{document['id']}/trace", token)
-            generated.append({
-                "document_id": document["id"],
-                "document_type": document_type,
-                "content": document["content"],
-                "trace": trace,
-            })
+        try:
+            for document_type in document_types:
+                document = request_json(
+                    base, "/generate", token, method="POST",
+                    body={"application_id": int(application_id), "document_type": document_type, "pack_id": pack_id},
+                )
+                trace = request_json(base, f"/documents/{document['id']}/trace", token)
+                generated.append({
+                    "document_id": document["id"],
+                    "document_type": document_type,
+                    "content": document["content"],
+                    "trace": trace,
+                })
+        except RuntimeError as error:
+            rounds.append({"round": round_number, "pack_id": pack_id, "documents": generated})
+            write_report("failed", str(error))
+            print(f"Regression stopped in round {round_number}: {error}", file=sys.stderr)
+            return 1
         quality = request_json(base, f"/applications/{application_id}/quality-check", token)
         rounds.append({"round": round_number, "pack_id": pack_id, "quality_check": quality, "documents": generated})
-        print(f"Completed DTMI round {round_number}/5; ready={quality['ready']}")
+        write_report("running")
+        print(f"Completed regression round {round_number}/{round_limit}; ready={quality['ready']}")
 
-    report = {
-        "schema_version": "1.0",
-        "application_id": int(application_id),
-        "round_count": 5,
-        "all_rounds_ready": all(item["quality_check"]["ready"] for item in rounds),
-        "rounds": rounds,
-    }
-    output = Path(sys.argv[1] if len(sys.argv) > 1 else "dtmi-live-regression-report.json")
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = write_report("complete")
     print(f"Report written to {output.resolve()}")
     return 0 if report["all_rounds_ready"] else 1
 

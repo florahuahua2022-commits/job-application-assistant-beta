@@ -51,6 +51,21 @@ Applicants must demonstrate knowledge of government policy.
         self.assertIsNone(limits["total_word_limit"])
         self.assertEqual(limits["limit_instruction"], "")
 
+    def test_filters_job_administration_lines_from_explicit_criteria(self):
+        criteria = """Selection Criteria
+1. Proven experience in event coordination and stakeholder engagement.
+2. Strong financial administration skills and accurate reporting.
+Note: Employment checks will include misconduct screening.
+Position description: PD [Project Officer] [524054].pdf
+To learn more about this opportunity, please contact Fiona at fiona@example.edu.au
+For enquiries on the recruitment process, contact Petrina at recruitment@example.edu.au
+"""
+
+        model = build_job_model("Project Officer role", criteria)
+
+        self.assertEqual(len(model["criteria"]), 2)
+        self.assertTrue(all("contact" not in item["criteria_text"].lower() for item in model["criteria"]))
+
 
 if __name__ == "__main__":
     unittest.main()

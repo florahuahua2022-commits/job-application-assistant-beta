@@ -270,6 +270,12 @@ def generate_selection_criteria_bundle(ckb_json: str, selection_plan_json: str) 
 {government_writing_rules(target_english_variant())}
 
 If evidence is transferable or weak, frame it conservatively. If evidence is insufficient, do not fabricate a story.
+Do not claim that education developed skills unless the evidence explicitly says so. Do not add self-assessments such as
+strong, organised, proactive, fast-paced, complex, effective, conscientious, methodical, careful, able to deliver,
+able to build relationships, or accustomed to checking work. Do not describe how experience developed or strengthened
+an ability. Do not infer hidden steps such as checking figures, resolving discrepancies, invoice processing or budget
+monitoring. Coordination is not management. If a requested capability is absent, state the exact supported transferable
+work and the exact gap briefly, without inventing willingness, future training, interview availability or personal qualities.
 
 CRITERION PLAN:
 {json.dumps(plan_item, ensure_ascii=False)}
@@ -324,7 +330,7 @@ Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include o
     }
 
 
-def review_selection_criteria_batch(ckb_json: str, selection_plan_json: str, bundle: dict) -> dict:
+def review_selection_criteria_batch(ckb_json: str, selection_plan_json: str, bundle: dict, master_resume: str = "") -> dict:
     try:
         ckb = json.loads(ckb_json or "[]")
         plan = json.loads(selection_plan_json or "{}")
@@ -360,6 +366,9 @@ BATCH PACKAGE:
 FULL CAREER KNOWLEDGE BASE WITH SOURCE TEXT:
 {json.dumps(ckb, ensure_ascii=False)}
 
+ORIGINAL MASTER RESUME (also authoritative for exact roles, employers, dates, education and qualifications):
+{master_resume or 'Not provided'}
+
 Return JSON only:
 {{"results":[{{"criteria_id":"...","status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"response phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}]}}
 
@@ -386,6 +395,7 @@ def review_cover_letter(
     cover_letter_plan_json: str,
     applicant_profile: str | None,
     content: str,
+    master_resume: str = "",
 ) -> dict:
     try:
         ckb = json.loads(ckb_json or "[]")
@@ -414,7 +424,7 @@ Check only these issue types:
 - declared_evidence_unused
 - style_only
 
-Applicant Profile motivation may support a motivational statement only when it is explicitly supplied and is not 'Not provided'. Target direction is not personal motivation. A neutral statement that the applicant is applying for the named role is allowed. Treat a broad statement about alignment or career-wide fit as style_only when it adds no duty, ability, result, motivation or personal value. Use unsupported_inference when wording adds an ability, responsibility, performance quality or result. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
+Applicant Profile motivation may support a motivational statement only when it is explicitly supplied and is not 'Not provided'. Target direction is not personal motivation. A neutral statement that the applicant is applying for the named role is allowed. Conventional neutral application language such as 'I would welcome the opportunity to contribute', 'I am happy to provide further information' and 'I look forward to hearing from you' is not personal motivation and must not be flagged. The CURRENT DATE supplied by the application is system context and must not be checked against resume evidence. Treat a broad statement about alignment or career-wide fit as style_only when it adds no duty, ability, result, motivation or personal value. Use unsupported_inference when wording adds an ability, responsibility, performance quality or result. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
 
 SHARED JOB MODEL:
 {json.dumps(job_model, ensure_ascii=False)}
@@ -427,6 +437,9 @@ APPLICANT PROFILE DECLARATIONS:
 
 FULL CKB WITH SOURCE TEXT:
 {json.dumps(ckb, ensure_ascii=False)}
+
+ORIGINAL MASTER RESUME (also authoritative for exact roles, employers, dates, education and qualifications):
+{master_resume or 'Not provided'}
 
 FINAL COVER LETTER:
 {content}
@@ -453,6 +466,8 @@ def review_tailored_resume(
     job_model_json: str,
     resume_plan_json: str,
     content: str,
+    master_resume: str = "",
+    applicant_profile: str = "",
 ) -> dict:
     try:
         ckb = json.loads(ckb_json or "[]")
@@ -489,6 +504,12 @@ RESUME CURATION PLAN:
 
 FULL CKB WITH SOURCE TEXT:
 {json.dumps(ckb, ensure_ascii=False)}
+
+ORIGINAL MASTER RESUME (also authoritative for exact roles, employers, dates, education and qualifications):
+{master_resume or 'Not provided'}
+
+APPLICANT PROFILE DECLARATIONS (authoritative for confirmed personal details such as residency and notice period):
+{applicant_profile or 'Not provided'}
 
 FINAL TAILORED CV:
 {content}
@@ -532,6 +553,7 @@ def generate_draft(
     selection_plan_json: str = "{}",
     cover_letter_plan_json: str = "{}",
     resume_plan_json: str = "{}",
+    correction_instructions: str = "",
 ) -> str:
     provider = settings.ai_provider.strip().lower()
     if provider not in {"openai", "deepseek"}:
@@ -544,11 +566,24 @@ def generate_draft(
     }.get(document_type)
     if not task:
         raise ValueError("Unsupported document_type")
+    task += (
+        " FACT BOUNDARY: Do not say an experience strengthened, developed or deepened a skill or understanding. "
+        "Do not describe the applicant as highly organised, proactive, adaptable, effective under pressure, "
+        "experienced in complex settings or able to deliver outcomes unless the applicant evidence explicitly "
+        "states that quality or result. Do not invent an assessment that the applicant's background focused more "
+        "or less on an area. Do not infer defence experience from engineering work."
+    )
     if document_type == "selection_criteria":
         mode = selection_input_mode(selection_criteria)
         task += (
             f" SELECTION INPUT MODE: {mode}. When the mode is brief user guidance, use the guidance to prioritise only explicit requirements found in the Job Description, create clear requirement-based headings, and expand them into useful responses. Do not invent additional employer criteria. When the mode is full selection criteria, respond separately to every supplied criterion."
+            " OVERRIDING RESULT RULE: If the matched evidence has no explicit result, do not add a qualitative outcome, "
+            "benefit, deadline, pressure, adaptability or delivery statement; end with the supported action. "
+            "Do not turn journals or reconciliation into invoice processing or budget monitoring, and do not turn "
+            "task prioritisation into meeting reporting deadlines."
         )
+    if correction_instructions.strip():
+        task += f" CORRECTION REQUIRED (overrides the prior draft): {correction_instructions.strip()}"
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
     evidence_pack = resume_evidence_pack(user_experiences_json, resume_plan_json) if document_type == "tailored_resume" else []

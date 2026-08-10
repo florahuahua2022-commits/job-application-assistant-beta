@@ -13,11 +13,15 @@ class GenerateDraftTests(unittest.TestCase):
         plan = '{"selected_evidence":[{"evidence_id":"EV001"}],"required_sections":["Professional Summary","Key Skills","Work Experience"]}'
         reviewer_output = '{"status":"fail","issues":[{"type":"fabricated_figure","description":"The 40% result is not in the CKB."}]}'
         with patch.object(ai, "_openai_draft", return_value=reviewer_output) as provider:
-            result = ai.review_tailored_resume(ckb, job_model, plan, "## Professional Summary\nText")
+            result = ai.review_tailored_resume(
+                ckb, job_model, plan, "## Professional Summary\nText", "Bachelor of Arts, Example University"
+            )
 
         prompt = provider.call_args.args[0]
         self.assertIn("factual and relevance Reviewer", prompt)
         self.assertIn("Do not penalise factual compression or reordering", prompt)
+        self.assertIn("ORIGINAL MASTER RESUME", prompt)
+        self.assertIn("Bachelor of Arts, Example University", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
@@ -27,11 +31,14 @@ class GenerateDraftTests(unittest.TestCase):
         plan = '{"priorities":[{"criteria_id":"C1"}],"selected_evidence":[{"evidence_id":"EV001"}]}'
         reviewer_output = '{"status":"fail","issues":[{"type":"unsupported_motivation","description":"The motivation was not declared."}],"recommendation":"Remove the claim."}'
         with patch.object(ai, "_openai_draft", return_value=reviewer_output) as provider:
-            result = ai.review_cover_letter(ckb, job_model, plan, "Motivation: Not provided", "Cover letter text")
+            result = ai.review_cover_letter(
+                ckb, job_model, plan, "Motivation: Not provided", "Cover letter text", "Project Officer, Example Org"
+            )
 
         prompt = provider.call_args.args[0]
         self.assertIn("motivation may support a motivational statement only when it is explicitly supplied", prompt)
         self.assertIn("requirement_omission", prompt)
+        self.assertIn("Project Officer, Example Org", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 

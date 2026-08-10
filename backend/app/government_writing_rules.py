@@ -1,4 +1,4 @@
-GOVERNMENT_WRITING_RULES_VERSION = "1.1"
+GOVERNMENT_WRITING_RULES_VERSION = "1.2"
 
 
 def government_writing_rules(english_variant: str = "Australian English") -> str:
@@ -10,6 +10,9 @@ def government_writing_rules(english_variant: str = "Australian English") -> str
 - Every factual claim must be traceable to supplied CKB source_text; never invent or alter employers, roles, dates, actions, achievements, motivations or figures.
 - Preserve the evidence's responsibility level: assisted is not prepared or delivered, supported is not managed or led, liaised is not took responsibility, and participated is not owned.
 - Do not add adaptability, accuracy, timeliness, success or delivery outcomes unless the source_text states that quality or result.
+- Do not claim that an experience strengthened, developed, deepened or demonstrated an ability, skill or understanding unless the source explicitly states that development or assessment.
+- Do not describe the applicant as highly organised, proactive, adaptable, effective under pressure, experienced in complex settings or able to deliver outcomes unless those exact qualities or results are supported by applicant evidence.
+- Do not invent an applicant's assessment of an experience gap, such as saying their background focused more or less on an area, unless the applicant supplied that assessment.
 - Do not use evaluative claims such as proven capability or strong record unless supplied evidence directly supports the evaluation.
 - A neutral application statement is allowed, but personal motivation, attraction, enthusiasm, values alignment and career goals require an explicit confirmed applicant declaration.
 - Treat every duty, system and requirement in the Job Description as an employer requirement, not as evidence that the applicant has performed the work.
