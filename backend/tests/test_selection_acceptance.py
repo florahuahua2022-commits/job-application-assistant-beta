@@ -116,6 +116,22 @@ class FrozenSelectionCriteriaAcceptanceTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertIn("unmatched_evidence_used", {issue["code"] for issue in result["issues"]})
 
+    def test_generator_retries_evaluative_and_copied_criterion_wording(self):
+        criterion = "Proven experience in event management stakeholder engagement and project coordination."
+        response = {
+            "criteria_id": "C1",
+            "evidence_used": ["EV1"],
+            "star": {"situation": "S", "task": "T", "action": "A", "result": "R"},
+            "final_response": criterion + " This demonstrates proven capability in the area.",
+        }
+        plan_item = {"criteria_text": criterion, "allocated_word_limit": 300, "matched_evidence": ["EV1"]}
+
+        result = hard_validate_response(response, plan_item)
+
+        self.assertFalse(result["valid"])
+        self.assertIn("unsupported_evaluative_wording", {issue["code"] for issue in result["issues"]})
+        self.assertIn("jd_wording_repeated", {issue["code"] for issue in result["issues"]})
+
     def test_reviewer_surfaces_fabricated_figures_and_over_inference(self):
         raw = {"results": [
             {"criteria_id": "C1", "status": "fail", "issues": [{

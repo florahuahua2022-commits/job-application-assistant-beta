@@ -208,6 +208,20 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("role_and_organisation_alignment", prompt)
         self.assertIn("follow the COVER LETTER PLAN as authoritative", prompt)
 
+    def test_cover_letter_correction_overrides_repeated_jd_wording(self):
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as provider:
+            ai.generate_draft(
+                "Resume", "Job description", "cover_letter",
+                correction_instructions="Omit the repeated phrase and cite EV1 only.",
+            )
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("CORRECTION REQUIRED", prompt)
+        self.assertIn("cite EV1 only", prompt)
+        self.assertIn("never reproduce a list of employer activities", prompt)
+
     def test_resume_prompt_requires_standard_sections_and_two_page_limit(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
             ai, "_deepseek_draft", return_value="Draft"

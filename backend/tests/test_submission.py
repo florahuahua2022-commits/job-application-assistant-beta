@@ -10,12 +10,20 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.database import get_session
 from app.auth import get_admin_user, get_current_user
-from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, document_release_blockers, enforce_profile_contact, generation_context_fingerprint, organisation_is_named
+from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, content_for_jd_similarity, document_release_blockers, enforce_profile_contact, generation_context_fingerprint, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
 from app import backup
 
 
 class SubmissionRecordTests(unittest.TestCase):
+    def test_selection_criteria_headings_are_excluded_from_jd_similarity_input(self):
+        content = "## Exact employer criterion wording\n\nApplicant evidence in original language."
+
+        checked = content_for_jd_similarity("selection_criteria", content)
+
+        self.assertNotIn("Exact employer criterion wording", checked)
+        self.assertIn("Applicant evidence", checked)
+
     def test_resume_content_check_matches_source_and_flags_unsupported_edit(self):
         resume = Resume(
             source_text="Alex Morgan\n0400 000 000\nalex@example.com\nProject Officer\nExample Agency\nPrepared monthly reports and project registers.",
@@ -72,6 +80,16 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertIn("Application for Project Administrator", polished)
         self.assertNotIn("RE:", polished)
+
+    def test_auto_polish_removes_restatement_of_employer_requirements(self):
+        polished = auto_polish_cover_letter(
+            "I understand the Institute requires strong financial administration, including budget monitoring.\n"
+            "I process journals and complete reconciliations.",
+            None,
+        )
+
+        self.assertNotIn("Institute requires", polished)
+        self.assertIn("I process journals", polished)
 
     def test_resume_polish_standardises_sections_and_reference_wording(self):
         polished = auto_polish_tailored_resume(

@@ -73,7 +73,12 @@ def begin_ai_run(document_type: str, criterion_count: int = 0) -> Token:
     generation_limit = max(criterion_count * 2, 1) if document_type == "selection_criteria" else (2 if document_type == "cover_letter" else 1)
     tracker = AIRunTelemetry(
         document_type=document_type,
-        limits={"matching": 1, "generation": generation_limit, "review": 1, "compression": 1},
+        limits={
+            "matching": 1,
+            "generation": generation_limit,
+            "review": 2 if document_type == "selection_criteria" else 1,
+            "compression": 1,
+        },
     )
     return _RUN.set(tracker)
 

@@ -3,6 +3,8 @@ import re
 from collections import Counter
 from typing import Any
 
+from .jd_similarity import find_jd_similarity_issues
+
 
 SELECTION_PLAN_SCHEMA_VERSION = "1.0"
 
@@ -133,6 +135,19 @@ def hard_validate_response(
         issues.append({"code": "word_limit_exceeded", "message": f"The response contains {actual} words; the allowed tolerance is {math.floor(allocated * 1.05)}."})
     if not final_response.strip():
         issues.append({"code": "missing_final_response", "message": "The Generator returned no final response."})
+    if re.search(r"(?i)\b(?:proven capability|strong record)\b", final_response):
+        issues.append({
+            "code": "unsupported_evaluative_wording",
+            "message": "Replace 'proven capability' or 'strong record' with plain evidence-based wording.",
+        })
+    if any(
+        item["severity"] == "error"
+        for item in find_jd_similarity_issues(final_response, str(plan_item.get("criteria_text") or ""))
+    ):
+        issues.append({
+            "code": "jd_wording_repeated",
+            "message": "Paraphrase the criterion instead of repeating its distinctive wording in the response.",
+        })
     star = response.get("star")
     if not isinstance(star, dict) or not all(key in star for key in ("situation", "task", "action", "result")):
         issues.append({"code": "invalid_star_structure", "message": "The structured STAR audit fields are incomplete."})

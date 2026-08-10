@@ -64,6 +64,22 @@ class AIRuntimeTests(unittest.TestCase):
         finally:
             end_ai_run(token)
 
+    def test_selection_reviewer_allows_one_invalid_result_retry(self):
+        token = begin_ai_run("selection_criteria", criterion_count=5)
+        try:
+            for reason in ("", "invalid_reviewer_result"):
+                with ai_call_scope("review", reason):
+                    call = start_ai_call()
+                    record_ai_call(
+                        call, provider="deepseek", model="test", input_tokens=1,
+                        output_tokens=1, estimated_cost=0,
+                    )
+            with ai_call_scope("review", "invalid_reviewer_result"):
+                with self.assertRaises(AICallBudgetExceeded):
+                    start_ai_call()
+        finally:
+            end_ai_run(token)
+
 
 if __name__ == "__main__":
     unittest.main()

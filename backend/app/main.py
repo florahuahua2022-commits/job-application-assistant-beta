@@ -642,6 +642,14 @@ def auto_polish_cover_letter(
             polished,
         )
 
+    # Evidence should do the matching; restating what the employer requires is
+    # redundant and is a common source of copied JD wording.
+    polished = re.sub(
+        r"(?im)^\s*I (?:understand|recognise) (?:that )?(?:the |your )?.*?\brequires?\b[^.]*\.\s*",
+        "",
+        polished,
+    )
+
     if profile:
         availability_value = profile.availability_notice if profile.availability_confirmed else "not_specified"
         availability = confirmed_availability_wording(availability_value)
@@ -1677,6 +1685,7 @@ def generate(
         selection_review = None
         cover_letter_plan = None
         cover_letter_review = None
+        cover_generation_retried = False
         resume_plan = None
         resume_review = None
         if payload.document_type == "selection_criteria":
@@ -1741,6 +1750,7 @@ def generate(
                         json.dumps(cover_letter_plan or {}, ensure_ascii=False),
                         json.dumps(resume_plan or {}, ensure_ascii=False),
                     )
+                cover_generation_retried = True
                 if profile:
                     content = enforce_profile_contact(content, profile, payload.document_type)
                 content = auto_polish_cover_letter(content, profile, application.job_description)
@@ -1783,6 +1793,12 @@ def generate(
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids and payload.document_type == "cover_letter":
             try:
+                repeated_phrases = sorted({
+                    phrase
+                    for issue in find_jd_similarity_issues(content, application.job_description)
+                    if issue["severity"] == "error"
+                    for phrase in issue.get("matches") or []
+                })
                 with ai_call_scope("generation", "unmatched_evidence_id"):
                     content = generate_draft(
                         master_resume.source_text, application.job_description, payload.document_type,
@@ -1792,8 +1808,10 @@ def generate(
                         json.dumps(cover_letter_plan or {}, ensure_ascii=False),
                         json.dumps(resume_plan or {}, ensure_ascii=False),
                         "Regenerate the complete letter and cite only these permitted evidence IDs in "
-                        f"GENERATION_META: {sorted(allowed_evidence_ids)}. Do not cite, rename or invent any other ID.",
+                        f"GENERATION_META: {sorted(allowed_evidence_ids)}. Do not cite, rename or invent any other ID. "
+                        f"Also paraphrase or omit these repeated Job Description phrases: {repeated_phrases}.",
                     )
+                cover_generation_retried = True
                 if profile:
                     content = enforce_profile_contact(content, profile, payload.document_type)
                 content = auto_polish_cover_letter(content, profile, application.job_description)
@@ -1813,6 +1831,56 @@ def generate(
                 raise HTTPException(502, str(error))
         if invalid_evidence_ids:
             raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
+        cover_similarity_errors = (
+            [
+                issue for issue in find_jd_similarity_issues(content, application.job_description)
+                if issue["severity"] == "error"
+            ]
+            if payload.document_type == "cover_letter"
+            else []
+        )
+        if cover_similarity_errors and not cover_generation_retried:
+            try:
+                repeated_phrases = sorted({
+                    phrase
+                    for issue in cover_similarity_errors
+                    for phrase in issue.get("matches") or []
+                })
+                with ai_call_scope("generation", "jd_wording_repeated"):
+                    content = generate_draft(
+                        master_resume.source_text, application.job_description, payload.document_type,
+                        application.selection_criteria, profile_text, application.position_title,
+                        application.company, ckb_source_json, used_experiences, used_closing_styles,
+                        job_model_json, evidence_matches_json, selection_plan_json,
+                        json.dumps(cover_letter_plan or {}, ensure_ascii=False),
+                        json.dumps(resume_plan or {}, ensure_ascii=False),
+                        "Regenerate the complete letter. Paraphrase or omit these phrases detected from the Job "
+                        f"Description: {repeated_phrases}. Preserve facts, target title, organisation and permitted "
+                        f"evidence IDs only: {sorted(allowed_evidence_ids)}.",
+                    )
+                cover_generation_retried = True
+                if profile:
+                    content = enforce_profile_contact(content, profile, payload.document_type)
+                content = auto_polish_cover_letter(content, profile, application.job_description)
+                metadata = {"used_experiences": [], "closing_styles": []}
+                match = re.search(r"<!--\s*GENERATION_META\s+(\{.*?\})\s*-->", content, re.DOTALL)
+                if match:
+                    try:
+                        parsed = json.loads(match.group(1))
+                        metadata["used_experiences"] = parsed.get("used_experiences", [])
+                        metadata["closing_styles"] = parsed.get("closing_styles", [])
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+                    content = content[:match.start()].rstrip()
+                invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
+                if invalid_evidence_ids:
+                    raise AIServiceError("The corrected letter cited resume evidence that was not supplied.")
+                role_title = application.position_title.split(" - ", 1)[0].strip()
+                if role_title and role_title.lower() not in content.lower():
+                    raise AIServiceError("The corrected letter omitted the current position title.")
+            except (AIServiceError, AICallBudgetExceeded) as error:
+                end_ai_run(ai_run_token)
+                raise HTTPException(502, str(error))
     if payload.document_type == "tailored_resume":
         validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
         if not validation["valid"]:
