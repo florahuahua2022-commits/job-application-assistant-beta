@@ -511,10 +511,27 @@ export default function Home() {
 
   async function runFinalCheck() {
     if (!selectedApplication) return null;
-    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
-    const result = await response.json();
-    if (!response.ok) {
-      setNotice(result.detail || "Could not run the final check.");
+    setNotice("Running Final Check…");
+    let response: Response;
+    try {
+      response = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
+    } catch {
+      setNotice("Final Check could not reach the service. Wait for the online service to wake up, then try again.");
+      return null;
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const result = contentType.includes("application/json")
+      ? await response.json().catch(() => null)
+      : null;
+    if (!response.ok || !result) {
+      const detail = typeof result?.detail === "string" ? result.detail : "";
+      const fallback = response.status === 401
+        ? "Your session has expired. Sign in again, then run Final Check."
+        : response.status >= 500
+          ? "Final Check is temporarily unavailable. Wait a moment, then try again."
+          : "Could not run Final Check. Refresh the page and try again.";
+      setNotice(detail || fallback);
       return null;
     }
     setQualityResult(result);
