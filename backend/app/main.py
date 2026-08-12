@@ -1046,6 +1046,9 @@ def update_generated_document(
     if not document:
         raise HTTPException(404, "Generated document not found.")
     document.content = payload.content
+    # Reviewer findings describe the generated content. Once the applicant edits
+    # that content, those findings are stale and must not block Final Check.
+    document.reviewer_json = "{}"
     session.add(document); session.commit(); session.refresh(document)
     return document
 
