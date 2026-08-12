@@ -341,6 +341,27 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["ready"])
 
+    def test_editing_document_clears_stale_reviewer_findings(self):
+        with Session(self.engine) as session:
+            document = GeneratedDocument(
+                application_id=self.application_id,
+                document_type="cover_letter",
+                content="Original generated draft",
+                reviewer_json='{"status":"fail","results":[{"issues":[{"type":"unsupported_claim","description":"Old finding"}]}]}',
+            )
+            session.add(document)
+            session.commit()
+            session.refresh(document)
+            document_id = document.id
+
+        response = self.client.patch(
+            f"/documents/{document_id}",
+            json={"content": "Applicant-reviewed draft"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["reviewer_json"], "{}")
+
     def test_private_job_does_not_require_selection_criteria(self):
         with Session(self.engine) as session:
             session.add(ApplicantProfile(
