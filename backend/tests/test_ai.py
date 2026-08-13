@@ -92,6 +92,17 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 
+    def test_cover_letter_repair_removes_unsupported_claim_and_rechecks(self):
+        failed = {"status":"fail","results":[{"issues":[{"type":"unsupported_claim","severity":"critical","description":"Over a decade is unsupported.","location":"over a decade"}]}],"telemetry":{}}
+        passed = {"status":"pass","results":[{"issues":[]}],"telemetry":{}}
+        with patch.object(ai, "review_cover_letter", side_effect=[failed, passed]), patch.object(
+            ai, "_selection_provider_response", return_value="I have administrative experience."
+        ) as provider:
+            content, review = ai.repair_cover_letter("I have over a decade of experience.", "[]", "{}", "{}", "Residency: permanent resident")
+        self.assertEqual(content, "I have administrative experience.")
+        self.assertEqual(review["generation_status"], "clean")
+        self.assertIn("must not become more specific", provider.call_args.args[0])
+
     def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'

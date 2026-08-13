@@ -485,6 +485,85 @@ Use pass with an empty issues array when there is no material issue."""
     raise AIServiceError(f"Cover Letter Reviewer failed validation: {last_error or 'unknown error'}")
 
 
+def auto_fix_cover_letter(
+    content: str,
+    review: dict,
+    ckb_json: str,
+    job_model_json: str,
+    cover_letter_plan_json: str,
+    applicant_profile: str | None,
+) -> str:
+    issues = [
+        issue for result in review.get("results") or [] for issue in result.get("issues") or []
+        if issue.get("severity") != "advisory" and issue.get("type") != "style_only"
+    ]
+    if not issues:
+        return content
+    prompt = f"""You are correcting a Cover Letter after factual validation. Return the full corrected letter only.
+
+PREVIOUS COVER LETTER:
+---
+{content}
+---
+
+VALIDATOR ERRORS:
+{json.dumps(issues, ensure_ascii=False)}
+
+CKB SOURCE_TEXT (the only ground truth for the applicant's employment, skills, achievements, dates and tools):
+{ckb_json}
+
+APPLICANT PROFILE DECLARATIONS (ground truth only for personal declarations; preserve its exact level of specificity):
+{applicant_profile or 'Not provided'}
+
+SHARED JOB MODEL (ground truth for the advertised role and organisation only; never applicant evidence):
+{job_model_json}
+
+COVER LETTER PLAN:
+{cover_letter_plan_json}
+
+Repair every validator error using these rules:
+- Delete a claim that has no support. Do not replace it with another unverified claim.
+- Soften an overstated claim to the CKB source_text's own wording and responsibility level (for example, "assisted in prioritising" must not become "managed").
+- Do not calculate or infer tenure. Remove "over a decade", "10+ years" and similar duration claims unless that exact duration appears in source_text.
+- Job or organisation facts may come from the Shared Job Model, but describe them as advertised role facts, never as the applicant's experience.
+- Personal declarations must not become more specific than the Applicant Profile (for example, keep "permanent resident" rather than adding a country).
+- Remove subjective suitability, confidence, trust, discretion or success claims unless directly supported by the correct source.
+- Paraphrase Job Description wording and never present it as proven experience without independent CKB support.
+- Preserve the letter's contact details, position title, salutation, sign-off and natural readability.
+- Do not add any new factual claim while repairing.
+"""
+    return _selection_provider_response(prompt).strip()
+
+
+def repair_cover_letter(
+    content: str,
+    ckb_json: str,
+    job_model_json: str,
+    cover_letter_plan_json: str,
+    applicant_profile: str | None,
+    max_rounds: int = 2,
+) -> tuple[str, dict]:
+    current = content
+    repair_rounds = 0
+    for _ in range(max_rounds):
+        review = review_cover_letter(ckb_json, job_model_json, cover_letter_plan_json, applicant_profile, current)
+        if review.get("status") == "pass":
+            review["generation_status"] = "clean"
+            review.setdefault("telemetry", {})["repair_rounds"] = repair_rounds
+            return current, review
+        current = auto_fix_cover_letter(
+            current, review, ckb_json, job_model_json, cover_letter_plan_json, applicant_profile
+        )
+        repair_rounds += 1
+    final_review = review_cover_letter(ckb_json, job_model_json, cover_letter_plan_json, applicant_profile, current)
+    final_review["generation_status"] = "clean" if final_review.get("status") == "pass" else "needs_ckb_update"
+    final_review["remaining_issues"] = [
+        issue for result in final_review.get("results") or [] for issue in result.get("issues") or []
+    ]
+    final_review.setdefault("telemetry", {})["repair_rounds"] = repair_rounds
+    return current, final_review
+
+
 def review_tailored_resume(
     ckb_json: str,
     job_model_json: str,

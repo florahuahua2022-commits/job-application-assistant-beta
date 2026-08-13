@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_selection_criteria_bundle, repair_tailored_resume, review_cover_letter
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -809,15 +809,17 @@ def quality_check(
         except json.JSONDecodeError:
             reviewer = {"status": "fail", "results": []}
         if reviewer.get("status") == "fail":
-            if reviewed_type == "tailored_resume" and reviewer.get("generation_status") == "needs_ckb_update":
+            if reviewed_type in {"tailored_resume", "cover_letter", "selection_criteria"} and reviewer.get("generation_status") == "needs_ckb_update":
                 remaining = reviewer.get("remaining_issues") or []
                 claims = [str(item.get("claim") or "").strip() for item in remaining if item.get("claim")]
                 summary = ", ".join(claims[:5])
-                message = "The CV needs additional source information in your saved Master Resume before it can be finalised."
+                document_label = reviewed_type.replace("_", " ").title()
+                message = f"The {document_label} needs additional source information before it can be finalised."
                 if summary:
-                    message = f"The CV could not support a few requested details. Add or confirm the source information for: {summary}."
+                    message = f"The {document_label} could not support a few requested details. Add or confirm the source information for: {summary}."
+                issue_code = "resume_needs_ckb_update" if reviewed_type == "tailored_resume" else f"{reviewed_type}_needs_ckb_update"
                 issues.append(QualityCheckIssue(
-                    severity="error", code="resume_needs_ckb_update", message=message,
+                    severity="error", code=issue_code, message=message,
                     document_type=reviewed_type,
                 ))
                 continue
@@ -1026,18 +1028,6 @@ def quality_check(
                 code="resume_length",
                 message=f"The CV has about {resume_word_count} words and may run beyond two pages.",
                 document_type="tailored_resume",
-            ))
-
-    selection_response = content_to_check.get("selection_criteria", "")
-    if (application.selection_criteria or "").strip() and selection_response:
-        lowered_selection = selection_response.lower()
-        result_signals = ("result", "outcome", "as a result", "this enabled", "leading to", "which allowed")
-        if not any(signal in lowered_selection for signal in result_signals):
-            issues.append(QualityCheckIssue(
-                severity="warning",
-                code="selection_result_unclear",
-                message="The selection criteria response does not clearly signal outcomes. Check that each example explains what changed or was achieved.",
-                document_type="selection_criteria",
             ))
 
     return QualityCheckResponse(
@@ -1320,8 +1310,9 @@ def generate(
             raise HTTPException(502, str(error))
     if payload.document_type == "cover_letter":
         try:
-            cover_letter_review = review_cover_letter(
-                ckb_source_json, job_model_json, json.dumps(cover_letter_plan or {}, ensure_ascii=False), profile_text, content
+            content, cover_letter_review = repair_cover_letter(
+                content, ckb_source_json, job_model_json,
+                json.dumps(cover_letter_plan or {}, ensure_ascii=False), profile_text,
             )
         except ValueError as error:
             raise HTTPException(400, str(error))
