@@ -48,6 +48,7 @@ export default function Home() {
   const [activeType, setActiveType] = useState<string>("tailored_resume");
   const [draftText, setDraftText] = useState("");
   const [qualityResult, setQualityResult] = useState<QualityResult | null>(null);
+  const [finalCheckState, setFinalCheckState] = useState<"idle" | "checking">("idle");
   const [resumeContentCheck, setResumeContentCheck] = useState<ResumeContentCheckResult | null>(null);
   const [resumeCheckState, setResumeCheckState] = useState<"idle" | "checking" | "done" | "error">("idle");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -510,14 +511,29 @@ export default function Home() {
   }
 
   async function runFinalCheck() {
-    if (!selectedApplication) return null;
+    if (!selectedApplication || finalCheckState === "checking") return null;
+    if (draftSaveState === "dirty" || draftSaveState === "saving") {
+      setNotice("Save your document changes before running Final Check.");
+      return null;
+    }
+    setFinalCheckState("checking");
+    setQualityResult(null);
     setNotice("Running Final Check…");
     let response: Response;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 45000);
     try {
-      response = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
-    } catch {
-      setNotice("Final Check could not reach the service. Wait for the online service to wake up, then try again.");
+      response = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`, {
+        signal: controller.signal,
+      });
+    } catch (error) {
+      setNotice(error instanceof DOMException && error.name === "AbortError"
+        ? "Final Check timed out after 45 seconds. The online service may still be waking up; wait a moment and try again."
+        : "Final Check could not reach the service. Wait for the online service to wake up, then try again.");
       return null;
+    } finally {
+      window.clearTimeout(timeout);
+      setFinalCheckState("idle");
     }
 
     const contentType = response.headers.get("content-type") || "";
@@ -924,7 +940,7 @@ export default function Home() {
                 {activeType === "selection_criteria" && selectionPlan.length > 0 && <div className="criteriaReviewPanel"><div><strong>Selection Criteria evidence check</strong><p className="helper">Strong is ready for normal review. Transferable and Weak responses require your explicit confirmation.</p></div>{selectionPlan.map((item) => { const review = reviewerByCriteria[item.criteria_id]; const needsConfirmation = item.evidence_status !== "strong"; return <article className={`criterionReviewCard ${item.evidence_status}`} key={item.criteria_id}><div className="criterionReviewHeading"><span className="criterionStatus">{item.evidence_status === "strong" ? "Strong" : item.evidence_status === "transferable" ? "Transferable" : "Weak"}</span><span className={review?.status === "pass" ? "reviewStatus pass" : "reviewStatus fail"}>{review?.status === "pass" ? "Reviewer passed" : "Needs review"}</span></div><strong>{item.criteria_text}</strong><small>Target: {item.allocated_word_limit} words · {item.match_type} match · {item.coverage} coverage</small><div className="criterionSources"><small>Evidence sources</small>{item.matched_evidence.length ? <ul>{item.matched_evidence.map((evidenceId) => <li key={evidenceId}><code>{evidenceId}</code> {ckbById[evidenceId]?.source_section || "Uploaded Master CV"}</li>)}</ul> : <p>No direct evidence matched. Check this response carefully.</p>}</div>{review?.issues?.length > 0 && <ul className="criterionIssues">{review.issues.map((issue: { type: string; description: string }) => <li key={issue.type}>{issue.description}</li>)}</ul>}{needsConfirmation && <label className="criterionConfirmation"><input type="checkbox" checked={confirmedSelectionCriteria.includes(item.criteria_id)} onChange={(event) => setCriterionConfirmation(item.criteria_id, event.target.checked)} /> I reviewed this {item.evidence_status} response and confirm it is truthful.</label>}</article>; })}</div>}
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
                 <div className="templatePicker"><div><strong>Export style</strong><small>All options are single-column and ATS-friendly.</small></div><select aria-label="Export style" value={exportTemplate} onChange={(event) => setExportTemplate(event.target.value as "classic" | "modern" | "traditional")}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option></select></div>
-                {activeDocument && <div className="editor">{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck}>Run Final Check</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
+                {activeDocument && <div className="editor">{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck} disabled={finalCheckState === "checking"}>{finalCheckState === "checking" ? "Checking…" : "Run Final Check"}</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
               </> : <div className="emptyState"><strong>Your CV and cover letter will appear here.</strong><p>If the saved job includes Selection Criteria, those responses will be added as an optional third document.</p></div>}
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
           </div>
