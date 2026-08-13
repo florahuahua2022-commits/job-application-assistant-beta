@@ -460,6 +460,89 @@ Use pass with an empty issues array when there is no material issue."""
     raise AIServiceError(f"Resume Reviewer failed validation: {last_error or 'unknown error'}")
 
 
+def classify_resume_review_errors(review: dict) -> list[dict]:
+    """Convert material reviewer findings into the two safe repair actions."""
+    errors = []
+    for result in review.get("results") or []:
+        for issue in result.get("issues") or []:
+            if issue.get("severity") == "advisory" or issue.get("type") == "style_only":
+                continue
+            description = str(issue.get("description") or "")
+            lowered = description.lower()
+            partial_support = issue.get("type") == "unsupported_inference" or any(marker in lowered for marker in (
+                "duration", "tenure", "qualifier", "overstated", "stronger than", "upgrade",
+            ))
+            complete_absence = not partial_support and any(marker in lowered for marker in (
+                "not mentioned", "not present", "no evidence", "not in the ckb", "does not appear",
+            ))
+            errors.append({
+                "id": f"err_{len(errors) + 1}",
+                "location": str(issue.get("location") or "Tailored CV"),
+                "claim": str(issue.get("location") or description),
+                "issue": description,
+                "fix_type": "remove" if complete_absence else "remove_or_soften",
+            })
+    return errors
+
+
+def auto_fix_tailored_resume(content: str, errors: list[dict], ckb_json: str) -> str:
+    if not errors:
+        return content
+    prompt = f"""You are correcting an ATS-friendly tailored CV after factual validation. Return the full corrected CV only.
+
+PREVIOUS CV:
+---
+{content}
+---
+
+UNSUPPORTED CLAIMS:
+{json.dumps(errors, ensure_ascii=False)}
+
+CKB SOURCE_TEXT (the only ground truth):
+---
+{ckb_json}
+---
+
+Rules:
+- For fix_type "remove", delete the unsupported claim entirely. Do not replace it with another unverified claim.
+- For fix_type "remove_or_soften", rewrite using only what CKB source_text actually supports.
+- Do not introduce any new claim not present in source_text.
+- Preserve truthful names, roles, employers, dates, contact details, Markdown headings and overall CV structure.
+- Keep sentences natural after removal and output the full corrected CV, not a diff.
+- Do not output commentary, JSON, reviewer notes or GENERATION_META."""
+    try:
+        fixed = _selection_provider_response(prompt).strip()
+    except OpenAIError as error:
+        raise AIServiceError(f"Resume automatic correction failed: {error}") from error
+    if not fixed:
+        raise AIServiceError("Resume automatic correction returned no content.")
+    return fixed
+
+
+def repair_tailored_resume(
+    content: str,
+    ckb_json: str,
+    job_model_json: str,
+    resume_plan_json: str,
+    max_rounds: int = 2,
+) -> tuple[str, dict]:
+    """Validate and repair a CV with a strict upper bound on AI correction calls."""
+    review: dict = {}
+    for _round in range(max_rounds):
+        review = review_tailored_resume(ckb_json, job_model_json, resume_plan_json, content)
+        errors = classify_resume_review_errors(review)
+        if not errors:
+            review["generation_status"] = "clean"
+            review["remaining_issues"] = []
+            return content, review
+        content = auto_fix_tailored_resume(content, errors, ckb_json)
+    review = review_tailored_resume(ckb_json, job_model_json, resume_plan_json, content)
+    errors = classify_resume_review_errors(review)
+    review["generation_status"] = "needs_ckb_update" if errors else "clean"
+    review["remaining_issues"] = errors
+    return content, review
+
+
 def _finalise_date(content: str) -> str:
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
@@ -487,7 +570,7 @@ def generate_draft(
     if provider not in {"openai", "deepseek"}:
         raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
     task = {
-        "tailored_resume": "Curate a clean ATS-friendly CV according to the deterministic RESUME CURATION PLAN, targeting about 550-750 words and no more than two pages when exported. Use these exact Markdown section headings in this order: '## Professional Summary', '## Key Skills', and '## Work Experience'. Finish with '## References' followed by 'Available upon request'. Treat the selected CKB evidence as the only source for employment bullets. Turn responsibility into concise action-led bullets and include context only where it clarifies scope. Use a supplied exact result or rough range when available; when result is blank or marked unavailable, write a restrained qualitative outcome and never invent a number. Use present tense for the current role and past tense for earlier roles. Keep original employers, titles and dates truthful. Do not use tables, columns, graphics, first-person pronouns, selection criteria, reviewer notes or match scores. After the submission-ready CV, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->. Every evidence ID must exist in RESUME CURATION PLAN selected_evidence.",
+        "tailored_resume": "Curate a clean ATS-friendly CV according to the deterministic RESUME CURATION PLAN, targeting about 550-750 words and no more than two pages when exported. Use these exact Markdown section headings in this order: '## Professional Summary', '## Key Skills', and '## Work Experience'. Finish with '## References' followed by 'Available upon request'. Treat the selected CKB evidence as the only source for employment bullets. Turn responsibility into concise action-led bullets and include context only where it clarifies scope. Use a supplied exact result or rough range when available; when result is blank or marked unavailable, write a restrained qualitative outcome and never invent a number. Use present tense for the current role and past tense for earlier roles. Keep original employers, titles and dates truthful. Do not use tables, columns, graphics, first-person pronouns, selection criteria, reviewer notes or match scores. CRITICAL CONSTRAINT: Every factual claim (dates, tenure, tools/software, skills, employer names, policies and frameworks) must be directly traceable to CKB source_text. Never infer duration without explicit dates; never name tools that do not literally appear; never upgrade vague terms into formal ones; never repeat JD wording as a proven skill unless source_text independently supports it; when uncertain, use source_text's own weaker wording. After the submission-ready CV, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->. Every evidence ID must exist in RESUME CURATION PLAN selected_evidence.",
         "cover_letter": "Write a concise one-page cover letter of about 300-450 words. Never use 'RE:' or 'Subject:' as a heading; use a natural 'Application for [position]' heading if a heading is helpful. This letter must work as a standalone companion to the CV even when no selection criteria document exists. Select only one or two of the strongest items from MATCHED RESUME EVIDENCE and summarise them briefly instead of retelling the CV. When evidence IDs were detailed in selection criteria, those items may receive at most one brief sentence total; do not repeat their detail or the same skill claims. At least 60% of the body must explain why this role, why this organisation, what the work means to the candidate, and how the candidate's work style and values align with the organisation's mission. Use the supplied organisation mission/values when present. If the JD mentions roster/shift work, medical checks, right to work, police clearance or a licence, add a brief factual confirmation paragraph at the end, confirming only facts present in the evidence. Begin with the supplied date. Use 'Yours sincerely' only for a named addressee; use 'Yours faithfully' after a generic salutation. After the submission-ready letter, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->.",
         "selection_criteria": "Respond separately to every supplied criterion. Every response must follow a natural Situation–Task–Action–Result flow without printing S/T/A/R labels. Use only MATCHED RESUME EVIDENCE. Never treat the JD as proof of applicant experience. Use only results supplied by the user; never invent a number. When no result metric was supplied, use a truthful, restrained qualitative outcome. If evidence is insufficient, state the transferable evidence conservatively instead of inventing a story. End each criterion with one of four approaches—A value alignment, B next action/willingness, C transferable capability, D personal work style—and never use the same approach more than once in this generation. After the submission-ready text, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[\"A\"]} -->. Every evidence ID must exist in MATCHED RESUME EVIDENCE.",
         "ats_analysis": "List key JD keywords as Covered, Missing, or Evidence needed, with a transparent qualitative match assessment.",
