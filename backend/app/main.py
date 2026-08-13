@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_tailored_resume, review_cover_letter, review_selection_criteria_batch
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -809,6 +809,18 @@ def quality_check(
         except json.JSONDecodeError:
             reviewer = {"status": "fail", "results": []}
         if reviewer.get("status") == "fail":
+            if reviewed_type == "tailored_resume" and reviewer.get("generation_status") == "needs_ckb_update":
+                remaining = reviewer.get("remaining_issues") or []
+                claims = [str(item.get("claim") or "").strip() for item in remaining if item.get("claim")]
+                summary = ", ".join(claims[:5])
+                message = "The CV needs additional source information in your saved Master Resume before it can be finalised."
+                if summary:
+                    message = f"The CV could not support a few requested details. Add or confirm the source information for: {summary}."
+                issues.append(QualityCheckIssue(
+                    severity="error", code="resume_needs_ckb_update", message=message,
+                    document_type=reviewed_type,
+                ))
+                continue
             reviewer_issues = [
                 issue
                 for result in reviewer.get("results") or []
@@ -1293,9 +1305,13 @@ def generate(
         if not validation["valid"]:
             raise HTTPException(502, validation["issues"][0]["message"] + " Please regenerate it.")
         try:
-            resume_review = review_tailored_resume(
-                ckb_source_json, job_model_json, json.dumps(resume_plan or {}, ensure_ascii=False), content
+            content, resume_review = repair_tailored_resume(
+                content, ckb_source_json, job_model_json,
+                json.dumps(resume_plan or {}, ensure_ascii=False),
             )
+            repaired_validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
+            if not repaired_validation["valid"]:
+                raise HTTPException(502, repaired_validation["issues"][0]["message"] + " Please regenerate it.")
         except ValueError as error:
             raise HTTPException(400, str(error))
         except AIServiceError as error:
