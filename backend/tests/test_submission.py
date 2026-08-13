@@ -341,6 +341,32 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["ready"])
 
+    def test_quality_check_summarises_remaining_resume_source_gaps(self):
+        with Session(self.engine) as session:
+            session.add(ApplicantProfile(
+                first_name="Alex", last_name="Morgan", phone="0400000000", email="applicant@example.com"
+            ))
+            session.add_all([
+                GeneratedDocument(
+                    application_id=self.application_id,
+                    document_type="tailored_resume",
+                    content="Alex Morgan 0400000000 applicant@example.com",
+                    reviewer_json='{"status":"fail","generation_status":"needs_ckb_update","remaining_issues":[{"claim":"Advanced Excel"},{"claim":"10+ years"}],"results":[]}',
+                ),
+                GeneratedDocument(
+                    application_id=self.application_id,
+                    document_type="cover_letter",
+                    content="Application for Project Officer at Example Agency 0400000000 applicant@example.com",
+                ),
+            ])
+            session.commit()
+
+        response = self.client.get(f"/applications/{self.application_id}/quality-check")
+        source_gap_issues = [item for item in response.json()["issues"] if item["code"] == "resume_needs_ckb_update"]
+
+        self.assertEqual(len(source_gap_issues), 1)
+        self.assertIn("Advanced Excel", source_gap_issues[0]["message"])
+
     def test_editing_document_clears_stale_reviewer_findings(self):
         with Session(self.engine) as session:
             document = GeneratedDocument(
