@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_tailored_resume, review_cover_letter, review_selection_criteria_batch
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_selection_criteria_bundle, repair_tailored_resume, review_cover_letter
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -1230,7 +1230,9 @@ def generate(
         resume_review = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
-            selection_review = review_selection_criteria_batch(ckb_source_json, selection_plan_json, selection_bundle)
+            selection_bundle, selection_review = repair_selection_criteria_bundle(
+                ckb_source_json, selection_plan_json, selection_bundle
+            )
             content = selection_bundle["content"]
         else:
             if payload.document_type == "cover_letter":

@@ -332,6 +332,92 @@ Return every criteria_id exactly once. Use pass with an empty issues array when 
     raise AIServiceError(f"Batch Reviewer failed validation: {last_error or 'unknown error'}")
 
 
+def auto_fix_selection_criteria_bundle(ckb_json: str, selection_plan_json: str, bundle: dict, review: dict) -> dict:
+    """Repair only criteria that the factual reviewer failed, without expanding their evidence."""
+    ckb = json.loads(ckb_json or "[]")
+    plan = json.loads(selection_plan_json or "{}")
+    evidence_by_id = {str(item.get("evidence_id")): item for item in ckb if isinstance(item, dict)}
+    plan_by_id = {str(item.get("criteria_id")): item for item in plan.get("items") or []}
+    issues_by_id = {
+        str(item.get("criteria_id")): item.get("issues") or []
+        for item in review.get("results") or [] if item.get("status") == "fail"
+    }
+    repaired_responses = []
+    for response in bundle.get("responses") or []:
+        criteria_id = str(response.get("criteria_id") or "")
+        issues = issues_by_id.get(criteria_id)
+        if not issues:
+            repaired_responses.append(response)
+            continue
+        plan_item = plan_by_id.get(criteria_id) or {}
+        allowed_ids = [str(value) for value in plan_item.get("matched_evidence") or []]
+        matched = [evidence_by_id[value] for value in allowed_ids if value in evidence_by_id]
+        prompt = f"""You are repairing one Selection Criterion response after factual validation.
+
+PREVIOUS RESPONSE:
+{json.dumps(response, ensure_ascii=False)}
+
+VALIDATOR ERRORS:
+{json.dumps(issues, ensure_ascii=False)}
+
+CRITERION PLAN:
+{json.dumps(plan_item, ensure_ascii=False)}
+
+MATCHED CKB SOURCE TEXT (the only factual ground truth):
+{json.dumps(matched, ensure_ascii=False)}
+
+Return the full corrected response as JSON only, using the same schema as PREVIOUS RESPONSE.
+- Delete unsupported outcomes, suitability claims, confidence claims, trust/reputation claims and other subjective conclusions. Do not replace them with a new outcome.
+- If a phrase combines separate source facts into a stronger claim, separate or soften it using the source_text's own wording.
+- Never treat the criterion or Job Description as evidence of an applicant achievement.
+- Do not invent a result merely to complete STAR. If no result is evidenced, set star.result to an empty string and end final_response with the last supported action or responsibility.
+- Use only evidence IDs listed in CRITERION PLAN matched_evidence, and include only IDs actually used.
+- Do not add any fact, tool, duration, outcome or positive judgement absent from source_text.
+- Avoid phrases such as 'I am confident', 'prepared me well', 'earned trust', and 'successfully' unless the exact claim is supported.
+- Keep the response natural after deletion and return the exact criteria_id {criteria_id}."""
+        fixed = _json_object(_selection_provider_response(prompt))
+        if str(fixed.get("criteria_id") or "") != criteria_id:
+            raise AIServiceError(f"Criterion {criteria_id} repair returned the wrong criteria_id.")
+        validation = hard_validate_response(fixed, plan_item)
+        if not validation.get("valid"):
+            raise AIServiceError(f"Criterion {criteria_id} repair failed deterministic validation.")
+        fixed["word_count"] = validation["actual_word_count"]
+        fixed["validation"] = validation
+        repaired_responses.append(fixed)
+    used_ids = []
+    for response in repaired_responses:
+        for evidence_id in response.get("evidence_used") or []:
+            if evidence_id not in used_ids:
+                used_ids.append(evidence_id)
+    content = "\n\n".join(
+        f"## {plan_by_id[str(response.get('criteria_id'))]['criteria_text']}\n\n{response['final_response'].strip()}"
+        for response in repaired_responses
+    )
+    return {**bundle, "content": content, "responses": repaired_responses, "used_experiences": used_ids,
+            "actual_total_word_count": sum(item.get("word_count", 0) for item in repaired_responses)}
+
+
+def repair_selection_criteria_bundle(ckb_json: str, selection_plan_json: str, bundle: dict, max_rounds: int = 2) -> tuple[dict, dict]:
+    """Run a bounded reviewer/repair loop and expose a user-friendly terminal status."""
+    current = bundle
+    total_repairs = 0
+    for _ in range(max_rounds):
+        review = review_selection_criteria_batch(ckb_json, selection_plan_json, current)
+        if review.get("status") == "pass":
+            review["generation_status"] = "clean"
+            review.setdefault("telemetry", {})["repair_rounds"] = total_repairs
+            return current, review
+        current = auto_fix_selection_criteria_bundle(ckb_json, selection_plan_json, current, review)
+        total_repairs += 1
+    final_review = review_selection_criteria_batch(ckb_json, selection_plan_json, current)
+    final_review["generation_status"] = "clean" if final_review.get("status") == "pass" else "needs_ckb_update"
+    final_review["remaining_issues"] = [
+        issue for item in final_review.get("results") or [] for issue in item.get("issues") or []
+    ]
+    final_review.setdefault("telemetry", {})["repair_rounds"] = total_repairs
+    return current, final_review
+
+
 def review_cover_letter(
     ckb_json: str,
     job_model_json: str,

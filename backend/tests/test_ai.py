@@ -108,6 +108,21 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][1]["issues"][0]["type"], "unsupported_claim")
 
+    def test_selection_repair_removes_unsupported_outcome_and_rechecks(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"]}]}'
+        bundle = {"content": "old", "responses": [{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"S","task":"T","action":"Prepared reports","result":"Earned trust"},"final_response":"I prepared reports and earned trust.","word_count":8}]}
+        failed = {"status":"fail","results":[{"criteria_id":"C1","status":"fail","issues":[{"type":"unsupported_claim","description":"Trust is unsupported."}]}],"telemetry":{}}
+        passed = {"status":"pass","results":[{"criteria_id":"C1","status":"pass","issues":[]}],"telemetry":{}}
+        fixed = '{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"S","task":"T","action":"Prepared monthly reports","result":""},"final_response":"I prepared monthly reports."}'
+        with patch.object(ai, "review_selection_criteria_batch", side_effect=[failed, passed]), patch.object(
+            ai, "_selection_provider_response", return_value=fixed
+        ):
+            repaired, review = ai.repair_selection_criteria_bundle(ckb, plan, bundle)
+        self.assertEqual(review["generation_status"], "clean")
+        self.assertEqual(review["telemetry"]["repair_rounds"], 1)
+        self.assertNotIn("trust", repaired["content"].lower())
+
     def test_generates_and_validates_each_selection_criterion_separately(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'
         plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting","allocated_word_limit":100,"matched_evidence":["EV001"],"match_type":"direct","coverage":"strong","evidence_status":"strong"},{"criteria_id":"C2","criteria_text":"Qualification","allocated_word_limit":100,"matched_evidence":["EV002"],"match_type":"direct","coverage":"strong","evidence_status":"strong"}]}'
