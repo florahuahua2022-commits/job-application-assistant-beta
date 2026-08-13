@@ -7,6 +7,54 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_resume_review_errors_use_only_safe_fix_types(self):
+        review = {"results": [{"issues": [
+            {"type": "unsupported_claim", "severity": "critical", "description": "Excel is not mentioned in source_text.", "location": "Advanced Excel"},
+            {"type": "unsupported_inference", "severity": "major", "description": "The CKB does not provide dates supporting this duration.", "location": "10+ years"},
+            {"type": "style_only", "severity": "advisory", "description": "Split a long sentence.", "location": "Summary"},
+        ]}]}
+
+        errors = ai.classify_resume_review_errors(review)
+
+        self.assertEqual([item["fix_type"] for item in errors], ["remove", "remove_or_soften"])
+        self.assertEqual([item["id"] for item in errors], ["err_1", "err_2"])
+
+    def test_resume_auto_fix_prompt_prefers_removal_and_uses_ckb_only(self):
+        errors = [{"id": "err_1", "claim": "Advanced Excel", "issue": "Not in CKB", "fix_type": "remove"}]
+        with patch.object(ai, "_openai_draft", return_value="## Professional Summary\nSupported reporting.") as provider:
+            fixed = ai.auto_fix_tailored_resume("## Key Skills\n- Advanced Excel", errors, '[{"source_text":"Supported reporting."}]')
+
+        prompt = provider.call_args.args[0]
+        self.assertIn('For fix_type "remove", delete', prompt)
+        self.assertIn("only ground truth", prompt)
+        self.assertNotIn("Advanced Excel", fixed)
+
+    def test_resume_repair_stops_after_two_corrections_and_final_validation(self):
+        failed = {"status": "fail", "results": [{"issues": [{
+            "type": "unsupported_claim", "severity": "critical", "description": "Excel is not mentioned.", "location": "Excel"
+        }]}]}
+        with patch.object(ai, "review_tailored_resume", side_effect=[failed, failed, failed]) as reviewer, patch.object(
+            ai, "auto_fix_tailored_resume", side_effect=["fixed once", "fixed twice"]
+        ) as fixer:
+            content, review = ai.repair_tailored_resume("draft", "[]", "{}", "{}")
+
+        self.assertEqual(content, "fixed twice")
+        self.assertEqual(reviewer.call_count, 3)
+        self.assertEqual(fixer.call_count, 2)
+        self.assertEqual(review["generation_status"], "needs_ckb_update")
+
+    def test_resume_repair_returns_early_when_clean(self):
+        clean = {"status": "pass", "results": [{"issues": []}]}
+        with patch.object(ai, "review_tailored_resume", return_value=clean) as reviewer, patch.object(
+            ai, "auto_fix_tailored_resume"
+        ) as fixer:
+            content, review = ai.repair_tailored_resume("draft", "[]", "{}", "{}")
+
+        self.assertEqual(content, "draft")
+        self.assertEqual(reviewer.call_count, 1)
+        fixer.assert_not_called()
+        self.assertEqual(review["generation_status"], "clean")
+
     def test_resume_reviewer_checks_factual_curation_and_relevance(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
@@ -20,6 +68,15 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("Do not penalise factual compression or reordering", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
+
+    def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
+        plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'
+        with patch.object(ai, "_openai_draft", return_value='CV\n<!-- GENERATION_META {"used_experiences":["EV001"],"closing_styles":[]} -->') as provider:
+            ai.generate_draft("Resume", "JD", "tailored_resume", resume_plan_json=plan)
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("CRITICAL CONSTRAINT", prompt)
+        self.assertIn("never name tools that do not literally appear", prompt)
 
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
