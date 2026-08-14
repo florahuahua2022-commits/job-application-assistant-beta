@@ -27,13 +27,18 @@ class BatchReviewerTests(unittest.TestCase):
         result = normalise_review_result(raw, ["C1", "C2"])
 
         self.assertEqual(result["status"], "fail")
-        self.assertEqual(result["results"][0]["issues"], [{
+        self.assertEqual(result["results"][0]["issues"][0], {
             "type": "fabricated_figure", "severity": "critical",
             "description": "The percentage is absent from source evidence.",
             "evidence": "", "location": "",
             "recommended_action": "Review or regenerate the affected content.",
             "blocks_release": True,
-        }])
+        })
+        unknown = result["results"][0]["issues"][1]
+        self.assertEqual(unknown["type"], "unknown_reviewer_issue")
+        self.assertEqual(unknown["severity"], "major")
+        self.assertIn("style_preference", unknown["description"])
+        self.assertTrue(unknown["blocks_release"])
         self.assertEqual(validate_review_result(result, ["C1", "C2"]), [])
 
     def test_missing_reviewer_decision_fails_closed(self):

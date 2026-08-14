@@ -25,9 +25,6 @@ def normalise_review_result(raw: dict[str, Any], criteria_ids: list[str]) -> dic
         for issue in item.get("issues") or []:
             if not isinstance(issue, dict):
                 continue
-            issue_type = str(issue.get("type") or "")
-            if issue_type not in SELECTION_REVIEW_ISSUE_TYPES:
-                continue
             finding = normalise_finding(issue)
             if finding:
                 issues.append(finding)

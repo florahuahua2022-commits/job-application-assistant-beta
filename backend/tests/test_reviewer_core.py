@@ -24,8 +24,13 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertFalse(finding["blocks_release"])
         self.assertFalse(findings_block_release([finding]))
 
-    def test_unknown_issue_type_is_rejected(self):
-        self.assertIsNone(normalise_finding({"type": "personal_preference"}))
+    def test_unknown_issue_type_fails_closed_as_major(self):
+        finding = normalise_finding({"type": "personal_preference", "description": "Use a different style."})
+
+        self.assertEqual(finding["type"], "unknown_reviewer_issue")
+        self.assertEqual(finding["severity"], "major")
+        self.assertTrue(finding["blocks_release"])
+        self.assertIn("personal_preference", finding["description"])
 
     def test_document_review_does_not_fail_for_style_only_feedback(self):
         result = normalise_document_review({"status": "fail", "issues": [

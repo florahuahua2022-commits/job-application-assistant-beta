@@ -17,20 +17,23 @@ ISSUE_SEVERITY = {
     "jd_wording_repeated": "major",
     "ai_tone": "major",
     "declared_evidence_unused": "major",
+    "unknown_reviewer_issue": "major",
     "style_only": "advisory",
 }
 SHARED_REVIEW_ISSUE_TYPES = set(ISSUE_SEVERITY)
 
 
 def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
-    issue_type = str(issue.get("type") or "")
-    if issue_type not in SHARED_REVIEW_ISSUE_TYPES:
-        return None
+    reported_type = str(issue.get("type") or "missing_type")
+    issue_type = reported_type if reported_type in SHARED_REVIEW_ISSUE_TYPES else "unknown_reviewer_issue"
     severity = ISSUE_SEVERITY[issue_type]
+    description = str(issue.get("description") or "Review required.").strip()
+    if issue_type == "unknown_reviewer_issue":
+        description = f"Reviewer returned unsupported issue type '{reported_type}': {description}"
     return {
         "type": issue_type,
         "severity": severity,
-        "description": str(issue.get("description") or "Review required.").strip(),
+        "description": description,
         "evidence": str(issue.get("evidence") or "").strip(),
         "location": str(issue.get("location") or "").strip(),
         "recommended_action": str(issue.get("recommended_action") or "Review or regenerate the affected content.").strip(),
