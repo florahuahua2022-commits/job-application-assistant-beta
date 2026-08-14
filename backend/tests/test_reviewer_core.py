@@ -35,6 +35,16 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["results"][0]["criteria_id"], "cover_letter")
 
+    def test_critical_issue_overrides_llm_pass_status(self):
+        result = normalise_document_review({"status": "pass", "issues": [{
+            "type": "fabricated_entity",
+            "description": "The named program is absent from its permitted source.",
+        }]}, "cover_letter")
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["results"][0]["status"], "fail")
+        self.assertTrue(result["results"][0]["issues"][0]["blocks_release"])
+
 
 if __name__ == "__main__":
     unittest.main()

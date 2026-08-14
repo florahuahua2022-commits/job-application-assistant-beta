@@ -442,6 +442,7 @@ Check only these issue types:
 - unsupported_claim
 - unsupported_inference
 - fabricated_figure
+- fabricated_entity
 - evidence_mismatch
 - internal_inconsistency
 - contradiction

@@ -4,7 +4,7 @@ from .reviewer_core import SHARED_REVIEW_ISSUE_TYPES, findings_block_release, no
 
 REVIEW_SCHEMA_VERSION = "1.0"
 SELECTION_REVIEW_ISSUE_TYPES = {
-    "unsupported_claim", "unsupported_inference", "fabricated_figure", "evidence_mismatch",
+    "unsupported_claim", "unsupported_inference", "fabricated_figure", "fabricated_entity", "evidence_mismatch",
     "internal_inconsistency", "jd_wording_repeated", "ai_tone", "declared_evidence_unused",
     "unmatched_evidence_used",
 }
