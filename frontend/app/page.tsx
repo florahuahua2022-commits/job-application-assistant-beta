@@ -464,19 +464,20 @@ export default function Home() {
         if (accessResponse.ok) setSelectionAccess(await accessResponse.json());
       }
       setActiveType("tailored_resume");
+      if (selectionCriteriaSkipped) {
+        setQualityResult(null);
+        setNotice("CV and Cover Letter created. Selection Criteria was skipped because no credits remain. Add a credit before generating and checking the complete pack.");
+        return;
+      }
       const checkResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
       if (checkResponse.ok) {
         const check = await checkResponse.json() as QualityResult;
         setQualityResult(check);
-        setNotice(selectionCriteriaSkipped
-          ? "CV and Cover Letter created. Selection Criteria was skipped because no credits remain. Share your referral code or add a credit before generating it."
-          : check.ready
-            ? "Application pack created and automatically checked. Confirm your personal facts, then continue."
-            : "Application pack created. The automatic check found items that still need attention.");
+        setNotice(check.ready
+          ? "Application pack created and automatically checked. Confirm your personal facts, then continue."
+          : "Application pack created. The automatic check found items that still need attention.");
       } else {
-        setNotice(selectionCriteriaSkipped
-          ? "CV and Cover Letter created. Selection Criteria was skipped because no credits remain."
-          : "Application pack created. Run Final Check before continuing.");
+        setNotice("Application pack created. Run Final Check before continuing.");
       }
     } catch (error) {
       if (created.length) setDocuments([...created].reverse());
