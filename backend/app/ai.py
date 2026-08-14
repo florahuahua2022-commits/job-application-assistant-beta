@@ -298,6 +298,7 @@ For every criterion, check only these issue types:
 - unsupported_claim
 - unsupported_inference
 - fabricated_figure
+- fabricated_entity
 - evidence_mismatch
 - internal_inconsistency
 - jd_wording_repeated
@@ -454,6 +455,8 @@ Check only these issue types:
 
 The Applicant Profile intent may support motivation or values alignment, but it is not employment evidence. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
 
+Classify a named organisation, program, project, framework, policy, system or initiative as fabricated_entity when it does not appear in the source assigned to that kind of fact. Applicant experience entities must appear in CKB source_text; advertised-role or organisation entities must appear in the Shared Job Model. Do not require an advertised-role entity to appear in the CKB, and do not treat the Job Description as evidence that the applicant worked with that entity.
+
 SHARED JOB MODEL:
 {json.dumps(job_model, ensure_ascii=False)}
 
@@ -523,6 +526,7 @@ COVER LETTER PLAN:
 
 Repair every validator error using these rules:
 - Delete a claim that has no support. Do not replace it with another unverified claim.
+- Delete any fabricated_entity (organisation, program, project, framework, policy, system or initiative) that is absent from its permitted source. Do not replace it with a guessed generic or another entity.
 - Soften an overstated claim to the CKB source_text's own wording and responsibility level (for example, "assisted in prioritising" must not become "managed").
 - Do not calculate or infer tenure. Remove "over a decade", "10+ years" and similar duration claims unless that exact duration appears in source_text.
 - Job or organisation facts may come from the Shared Job Model, but describe them as advertised role facts, never as the applicant's experience.
@@ -753,7 +757,7 @@ def generate_draft(
     evidence_pack = evidence_pack or matched_evidence_pack(user_experiences_json, evidence_matches_json) or build_evidence_pack(
         master_resume, user_experiences_json, job_description, selection_criteria
     )
-    prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, follow the COVER LETTER PLAN as authoritative for priorities, evidence selection and narrative balance. Begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nRESUME CURATION PLAN (deterministic selection, order and compression):\n{resume_plan_json}\n\nCOVER LETTER PLAN (deterministic priorities, selected evidence and structure):\n{cover_letter_plan_json}\n\nDETERMINISTIC SELECTION PLAN (word budgets and evidence statuses are authoritative):\n{selection_plan_json}\n\nBATCH EVIDENCE MATCHES:\n{evidence_matches_json}\n\nMATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n{json.dumps(evidence_pack, ensure_ascii=False)}\n\nEVIDENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME (context only; do not introduce claims outside the matched evidence for Cover Letter or Selection Criteria):\n{master_resume}\n\nSHARED JOB MODEL (parsed employer requirements and limits; never applicant evidence):\n{structured_job_model}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES (requirements only, never applicant evidence):\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
+    prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, follow the COVER LETTER PLAN as authoritative for priorities, evidence selection and narrative balance. Begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement. Never invent or import a named organisation, program, project, framework, policy, system or initiative. Applicant-experience entities must appear in MATCHED RESUME EVIDENCE; advertised-role or organisation entities must appear in the SHARED JOB MODEL or supplied Job Description, and must never be presented as applicant experience.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nRESUME CURATION PLAN (deterministic selection, order and compression):\n{resume_plan_json}\n\nCOVER LETTER PLAN (deterministic priorities, selected evidence and structure):\n{cover_letter_plan_json}\n\nDETERMINISTIC SELECTION PLAN (word budgets and evidence statuses are authoritative):\n{selection_plan_json}\n\nBATCH EVIDENCE MATCHES:\n{evidence_matches_json}\n\nMATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n{json.dumps(evidence_pack, ensure_ascii=False)}\n\nEVIDENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME (context only; do not introduce claims outside the matched evidence for Cover Letter or Selection Criteria):\n{master_resume}\n\nSHARED JOB MODEL (parsed employer requirements and limits; never applicant evidence):\n{structured_job_model}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES (requirements only, never applicant evidence):\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
 
     if provider == "deepseek":
         try:

@@ -4,6 +4,17 @@ from app.reviewer import normalise_review_result, validate_review_result
 
 
 class BatchReviewerTests(unittest.TestCase):
+    def test_fabricated_entity_is_a_critical_release_blocker(self):
+        result = normalise_review_result({"results": [{
+            "criteria_id": "C1", "status": "fail", "issues": [{
+                "type": "fabricated_entity", "description": "MARS Program is absent from the permitted source."
+            }]
+        }]}, ["C1"])
+        issue = result["results"][0]["issues"][0]
+        self.assertEqual(issue["type"], "fabricated_entity")
+        self.assertEqual(issue["severity"], "critical")
+        self.assertTrue(issue["blocks_release"])
+
     def test_normalises_supported_findings_and_marks_batch_failed(self):
         raw = {"results": [
             {"criteria_id": "C1", "status": "fail", "issues": [

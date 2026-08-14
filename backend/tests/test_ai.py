@@ -89,6 +89,7 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = provider.call_args.args[0]
         self.assertIn("intent may support motivation", prompt)
         self.assertIn("requirement_omission", prompt)
+        self.assertIn("fabricated_entity", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 
@@ -102,6 +103,7 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(content, "I have administrative experience.")
         self.assertEqual(review["generation_status"], "clean")
         self.assertIn("must not become more specific", provider.call_args.args[0])
+        self.assertIn("fabricated_entity", provider.call_args.args[0])
 
     def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'

@@ -6,6 +6,7 @@ ISSUE_SEVERITY = {
     "unsupported_claim": "critical",
     "unsupported_inference": "major",
     "fabricated_figure": "critical",
+    "fabricated_entity": "critical",
     "evidence_mismatch": "critical",
     "internal_inconsistency": "critical",
     "contradiction": "critical",
