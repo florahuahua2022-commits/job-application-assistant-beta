@@ -424,16 +424,18 @@ export default function Home() {
     if (!selectedApplication || !resumes.length) return;
     const application = applications.find((item) => item.id === selectedApplication);
     const includesSelectionCriteria = Boolean(application?.selection_criteria?.trim());
-    const documentTypes = includesSelectionCriteria
-      ? (["tailored_resume", "selection_criteria", "cover_letter"] as const)
-      : packTypes.slice(0, 2);
+    let documentTypes: readonly (typeof packTypes[number])[] = includesSelectionCriteria
+      ? ["tailored_resume", "cover_letter", "selection_criteria"]
+      : ["tailored_resume", "cover_letter"];
+    let selectionCriteriaSkipped = false;
     if (includesSelectionCriteria) {
       const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
       if (!accessResponse.ok) return setNotice("Could not verify Selection Criteria access. Please try again.");
       const currentAccess = await accessResponse.json() as SelectionCriteriaAccess;
       setSelectionAccess(currentAccess);
       if (!currentAccess.unlimited && !currentAccess.remaining_credits) {
-        return setNotice("No Selection Criteria credits remain. Share your referral code to earn one more use.");
+        documentTypes = ["tailored_resume", "cover_letter"];
+        selectionCriteriaSkipped = true;
       }
     }
     const packId = crypto.randomUUID();
@@ -466,11 +468,15 @@ export default function Home() {
       if (checkResponse.ok) {
         const check = await checkResponse.json() as QualityResult;
         setQualityResult(check);
-        setNotice(check.ready
-          ? "Application pack created and automatically checked. Confirm your personal facts, then continue."
-          : "Application pack created. The automatic check found items that still need attention.");
+        setNotice(selectionCriteriaSkipped
+          ? "CV and Cover Letter created. Selection Criteria was skipped because no credits remain. Share your referral code or add a credit before generating it."
+          : check.ready
+            ? "Application pack created and automatically checked. Confirm your personal facts, then continue."
+            : "Application pack created. The automatic check found items that still need attention.");
       } else {
-        setNotice("Application pack created. Run Final Check before continuing.");
+        setNotice(selectionCriteriaSkipped
+          ? "CV and Cover Letter created. Selection Criteria was skipped because no credits remain."
+          : "Application pack created. Run Final Check before continuing.");
       }
     } catch (error) {
       if (created.length) setDocuments([...created].reverse());
