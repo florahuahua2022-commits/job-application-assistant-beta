@@ -51,6 +51,16 @@ Applicants must demonstrate knowledge of government policy.
         self.assertIsNone(limits["total_word_limit"])
         self.assertEqual(limits["limit_instruction"], "")
 
+    def test_organisation_context_preserves_full_name_when_header_is_abbreviated(self):
+        model = build_job_model(
+            "The Zoological Parks Authority at Perth Zoo is seeking a project coordinator.",
+            None,
+            "Project Coordinator",
+            "ZOO",
+        )
+
+        self.assertIn("Zoological Parks Authority at Perth Zoo", model["organisation_context"])
+
 
 if __name__ == "__main__":
     unittest.main()

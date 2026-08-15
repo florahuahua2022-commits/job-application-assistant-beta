@@ -1188,12 +1188,14 @@ def generate(
         master_resume.ckb_json = ckb_source_json
         session.add(master_resume)
         session.commit()
-    job_model_json = application.job_model_json or "{}"
-    if job_model_json.strip() in {"", "{}"}:
-        job_model_json = serialise_job_model(
-            application.job_description, application.selection_criteria, application.position_title, application.company
-        )
+    job_model_json = serialise_job_model(
+        application.job_description, application.selection_criteria, application.position_title, application.company
+    )
+    if job_model_json != (application.job_model_json or "{}"):
         application.job_model_json = job_model_json
+        application.evidence_matches_json = "{}"
+        application.selection_plan_json = "{}"
+        application.selection_confirmations_json = "[]"
         session.add(application)
         session.commit()
     evidence_matches_json = application.evidence_matches_json or "{}"

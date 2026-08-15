@@ -43,6 +43,16 @@ class CoverLetterPlanTests(unittest.TestCase):
         self.assertEqual(plan["selected_evidence"][0]["evidence_id"], "EV2")
         self.assertFalse(plan["selected_evidence"][0]["previously_detailed"])
 
+    def test_plan_forbids_invented_values_when_motivation_is_missing(self):
+        profile = SimpleNamespace(
+            target_direction="", motivation="", writing_tone="natural_professional", preferences_notes="",
+        )
+
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, profile)
+
+        alignment = next(item for item in plan["narrative_plan"] if item["section"] == "role_and_organisation_alignment")
+        self.assertIn("do not invent applicant motivation", alignment["purpose"])
+
 
 if __name__ == "__main__":
     unittest.main()

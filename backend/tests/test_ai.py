@@ -90,6 +90,10 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("intent may support motivation", prompt)
         self.assertIn("requirement_omission", prompt)
         self.assertIn("fabricated_entity", prompt)
+        self.assertIn("only against COVER LETTER PLAN priorities", prompt)
+        self.assertIn("not a second Selection Criteria response", prompt)
+        self.assertIn("short organisation field is not an exclusive canonical name", prompt)
+        self.assertIn("used only to identify or honestly acknowledge an evidence gap", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 
@@ -104,6 +108,8 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(review["generation_status"], "clean")
         self.assertIn("must not become more specific", provider.call_args.args[0])
         self.assertIn("fabricated_entity", provider.call_args.args[0])
+        self.assertIn("motivation is absent or \"Not provided\"", provider.call_args.args[0])
+        self.assertIn("Do not expand the letter to answer non-priority criteria", provider.call_args.args[0])
 
     def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
@@ -266,6 +272,8 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("COVER LETTER PLAN", prompt)
         self.assertIn("role_and_organisation_alignment", prompt)
         self.assertIn("follow the COVER LETTER PLAN as authoritative", prompt)
+        self.assertIn("do not turn the letter into a response to every Selection Criteria item", prompt)
+        self.assertIn("If motivation is absent or 'Not provided'", prompt)
 
     def test_resume_prompt_requires_standard_sections_and_two_page_limit(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(

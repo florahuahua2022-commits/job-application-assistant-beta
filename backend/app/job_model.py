@@ -73,6 +73,24 @@ def _competencies(text: str) -> list[str]:
     return list(dict.fromkeys(found))[:5]
 
 
+def _organisation_context(job_description: str, company: str) -> str:
+    company_tokens = {
+        word.lower() for word in re.findall(r"[A-Za-z0-9]+", company)
+        if len(word) >= 3 and word.lower() not in {"the", "and", "pty", "ltd", "limited"}
+    }
+    fragments = [
+        _clean(fragment)
+        for fragment in re.split(r"(?:\r?\n+|(?<=[.!?])\s+)", job_description)
+        if _clean(fragment)
+    ]
+    matching = [
+        fragment for fragment in fragments
+        if company_tokens and any(re.search(rf"(?i)\b{re.escape(token)}\b", fragment) for token in company_tokens)
+    ]
+    context = " | ".join(dict.fromkeys([company.strip(), *matching]))
+    return context[:1600]
+
+
 def parse_word_limits(text: str) -> dict[str, Any]:
     per_patterns = (
         r"(?i)(?:maximum|limit|no more than|up to)?\s*([\d,]{2,6})\s*words?\s*(?:per|for each)\s*(?:criterion|criteria|response)",
@@ -131,7 +149,7 @@ def build_job_model(
         "position_title": position_title.strip(),
         "organisation": company.strip(),
         "role_summary": _clean(job_description)[:800],
-        "organisation_context": company.strip(),
+        "organisation_context": _organisation_context(job_description, company),
         "requirement_mode": requirement_mode,
         "brief_guidance": selection_text if brief_guidance else "",
         "criteria": criteria,

@@ -64,6 +64,7 @@ def build_cover_letter_plan(
         "writing_tone": getattr(applicant_profile, "writing_tone", "natural_professional") or "natural_professional",
         "preferences_notes": getattr(applicant_profile, "preferences_notes", None) or "",
     }
+    has_declared_motivation = bool(intent["motivation"].strip() and intent["motivation"].strip().lower() != "not provided")
     return {
         "schema_version": COVER_LETTER_PLAN_SCHEMA_VERSION,
         "priorities": priorities,
@@ -72,7 +73,11 @@ def build_cover_letter_plan(
         "declared_intent": intent,
         "narrative_plan": [
             {"section": "opening", "purpose": "Name the role and organisation without generic enthusiasm claims.", "target_share": 0.15},
-            {"section": "role_and_organisation_alignment", "purpose": "Use declared motivation and JD context; do not present intent as employment fact.", "target_share": 0.45},
+            {"section": "role_and_organisation_alignment", "purpose": (
+                "Use declared motivation and JD context; do not present intent as employment fact."
+                if has_declared_motivation else
+                "Use neutral advertised-role and organisation facts only; do not invent applicant motivation, values or purpose."
+            ), "target_share": 0.45},
             {"section": "evidence", "purpose": "Use at most two selected evidence items and avoid retelling the resume.", "target_share": 0.30},
             {"section": "close", "purpose": "Close naturally and confirm only supported requirements.", "target_share": 0.10},
         ],

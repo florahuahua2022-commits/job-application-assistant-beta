@@ -459,7 +459,7 @@ export default function Home() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ application_id: selectedApplication, document_type: documentType, pack_id: packId }),
-          signal: AbortSignal.timeout(180_000),
+          signal: AbortSignal.timeout(360_000),
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || `${labels[documentType]} could not be generated.`);
