@@ -253,6 +253,23 @@ class IngestTests(unittest.TestCase):
         self.assertIn("document control", result["selection_criteria"])
         self.assertNotIn("Submit your resume", result["selection_criteria"])
 
+    def test_expands_short_zoo_heading_to_readable_advertised_name(self):
+        raw_text = """
+        Project Coordinator
+        ZOO
+        Region
+        Perth
+        The role supports minor works delivered for visitors at Perth Zoo.
+        Key responsibilities
+        Coordinate project records, contractors and scheduled activities across the site.
+        Selection criteria
+        Demonstrated project coordination and written communication skills.
+        """
+
+        result = parse_job_ad_text(raw_text)
+
+        self.assertEqual(result["company"], "Perth Zoo")
+
 
 if __name__ == "__main__":
     unittest.main()

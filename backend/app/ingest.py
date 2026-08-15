@@ -309,6 +309,20 @@ def _plain_ad_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def expand_abbreviated_company(company: str, text: str) -> str:
+    """Prefer a readable advertised name when extraction returns a short all-caps fragment."""
+    if not re.fullmatch(r"[A-Z]{2,5}", company.strip()):
+        return company
+    suffix = company.strip().title()
+    matches = re.findall(rf"\b(?:[A-Z][a-z]+\s+){{1,3}}{re.escape(suffix)}\b", text)
+    excluded_prefixes = {"region", "location", "organisation", "organization", "employer"}
+    candidates = [
+        _plain_ad_line(match) for match in matches
+        if _plain_ad_line(match).split()[0].lower() not in excluded_prefixes
+    ]
+    return min(candidates, key=lambda value: (len(value.split()), len(value)), default=company)
+
+
 def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None) -> dict:
     text = raw_text.strip()
     if len(text) < 120:
@@ -360,6 +374,8 @@ def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None
         if len(line) <= 140 and not is_location and not is_category:
             company = line
             break
+
+    company = expand_abbreviated_company(company, text)
 
     criteria = ""
     criteria_match = re.search(

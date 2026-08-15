@@ -21,7 +21,7 @@ from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_ev
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
+from .ingest import expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
@@ -1162,6 +1162,7 @@ def generate(
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
+    application.company = expand_abbreviated_company(application.company, application.job_description)
     new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
     selection_credit_key = (
         check_selection_criteria_credit(session, user_id, payload.pack_id)
@@ -1302,6 +1303,7 @@ def generate(
             content, resume_review = repair_tailored_resume(
                 content, ckb_source_json, job_model_json,
                 json.dumps(resume_plan or {}, ensure_ascii=False),
+                profile_text,
             )
             repaired_validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
             if not repaired_validation["valid"]:

@@ -8,6 +8,9 @@ def government_writing_rules(english_variant: str = "Australian English") -> str
 - Prefer active voice, specific evidence and plain language.
 - Avoid exaggerated adjectives, cliches and generic AI-sounding phrases.
 - Every factual claim must be traceable to supplied CKB source_text; never invent or alter employers, roles, dates, actions, achievements, motivations or figures.
+- Personal declarations must preserve the Applicant Profile's exact level of specificity. If it says "permanent resident" without a country, never add a country name.
+- Never describe a role as current, present or ongoing unless CKB source_text explicitly says current/present/ongoing or supplies an open-ended date range.
+- Never add policies, procedures, frameworks, government requirements or recordkeeping requirements unless those terms are explicitly supported by CKB source_text.
 - Treat every duty, system and requirement in the Job Description as an employer requirement, not as evidence that the applicant has performed the work.
 - Never imply direct experience when the evidence is only transferable; state material evidence gaps plainly.
 - Do not copy Job Description or criterion wording verbatim; paraphrase while preserving meaning.

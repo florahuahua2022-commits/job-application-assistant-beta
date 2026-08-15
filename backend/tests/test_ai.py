@@ -22,11 +22,16 @@ class GenerateDraftTests(unittest.TestCase):
     def test_resume_auto_fix_prompt_prefers_removal_and_uses_ckb_only(self):
         errors = [{"id": "err_1", "claim": "Advanced Excel", "issue": "Not in CKB", "fix_type": "remove"}]
         with patch.object(ai, "_openai_draft", return_value="## Professional Summary\nSupported reporting.") as provider:
-            fixed = ai.auto_fix_tailored_resume("## Key Skills\n- Advanced Excel", errors, '[{"source_text":"Supported reporting."}]')
+            fixed = ai.auto_fix_tailored_resume(
+                "## Key Skills\n- Advanced Excel", errors,
+                '[{"source_text":"Supported reporting."}]', "Work rights: permanent resident",
+            )
 
         prompt = provider.call_args.args[0]
         self.assertIn('For fix_type "remove", delete', prompt)
         self.assertIn("only ground truth", prompt)
+        self.assertIn("government employer alone is not evidence", prompt)
+        self.assertIn("Work rights: permanent resident", prompt)
         self.assertNotIn("Advanced Excel", fixed)
 
     def test_resume_repair_stops_after_two_corrections_and_final_validation(self):
@@ -61,11 +66,16 @@ class GenerateDraftTests(unittest.TestCase):
         plan = '{"selected_evidence":[{"evidence_id":"EV001"}],"required_sections":["Professional Summary","Key Skills","Work Experience"]}'
         reviewer_output = '{"status":"fail","issues":[{"type":"fabricated_figure","description":"The 40% result is not in the CKB."}]}'
         with patch.object(ai, "_openai_draft", return_value=reviewer_output) as provider:
-            result = ai.review_tailored_resume(ckb, job_model, plan, "## Professional Summary\nText")
+            result = ai.review_tailored_resume(
+                ckb, job_model, plan, "## Professional Summary\nText", "Work rights: permanent resident"
+            )
 
         prompt = provider.call_args.args[0]
         self.assertIn("factual and relevance Reviewer", prompt)
         self.assertIn("Do not penalise factual compression or reordering", prompt)
+        self.assertIn("does not prove current employment", prompt)
+        self.assertIn("government employer", prompt)
+        self.assertIn("Work rights: permanent resident", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
@@ -77,6 +87,8 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = provider.call_args.args[0]
         self.assertIn("CRITICAL CONSTRAINT", prompt)
         self.assertIn("never name tools that do not literally appear", prompt)
+        self.assertIn("never infer policies, procedures, government requirements", prompt)
+        self.assertIn("if it says 'permanent resident' without a country", prompt)
 
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
@@ -249,6 +261,9 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("employer requirement, not as evidence", instruction)
         self.assertIn("Never compare the value, scale, complexity", instruction)
         self.assertIn("state the gap plainly", instruction)
+        self.assertIn("permanent resident", instruction)
+        self.assertIn("Never describe a role as current", instruction)
+        self.assertIn("recordkeeping requirements", instruction)
 
     def test_cover_letter_prompt_requires_evidence_for_recruiter_relationship_and_matching_signoff(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
