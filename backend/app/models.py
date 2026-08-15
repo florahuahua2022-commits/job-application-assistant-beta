@@ -104,6 +104,7 @@ class GenerationUsage(SQLModel, table=True):
     application_id: int | None = None
     pack_id: UUID
     generated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    completed_at: datetime | None = Field(default=None, index=True)
 
 
 class CreditLedger(SQLModel, table=True):

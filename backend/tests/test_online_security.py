@@ -60,6 +60,7 @@ class OnlineSecurityTests(unittest.TestCase):
                 user_id=user_id,
                 pack_id=uuid4(),
                 generated_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
             ))
             session.commit()
             with patch.object(settings, "deployment_mode", "online"), patch.object(
@@ -67,6 +68,20 @@ class OnlineSecurityTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(Exception, "Today's beta limit"):
                     check_generation_quota(session, user_id, uuid4())
+
+    def test_incomplete_pack_does_not_consume_daily_quota(self):
+        user_id = uuid4()
+        with Session(self.engine) as session:
+            session.add(GenerationUsage(
+                user_id=user_id,
+                pack_id=uuid4(),
+                generated_at=datetime.utcnow(),
+            ))
+            session.commit()
+            with patch.object(settings, "deployment_mode", "online"), patch.object(
+                settings, "daily_pack_limit_per_user", 1
+            ):
+                self.assertTrue(check_generation_quota(session, user_id, uuid4()))
 
     def test_new_user_receives_two_selection_criteria_credits(self):
         user_id = uuid4()

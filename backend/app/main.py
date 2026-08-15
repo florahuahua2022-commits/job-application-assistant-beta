@@ -190,12 +190,12 @@ def check_generation_quota(session: Session, user_id: UUID | None, pack_id: UUID
     daily_count = session.exec(
         select(func.count(GenerationUsage.id)).where(
             GenerationUsage.user_id == user_id,
-            GenerationUsage.generated_at >= start_of_day,
+            GenerationUsage.completed_at >= start_of_day,
         )
     ).one()
     global_monthly_count = session.exec(
         select(func.count(GenerationUsage.id)).where(
-            GenerationUsage.generated_at >= start_of_month,
+            GenerationUsage.completed_at >= start_of_month,
         )
     ).one()
     if daily_count >= settings.daily_pack_limit_per_user:
@@ -1360,12 +1360,27 @@ def generate(
             reference_id=str(application.id),
             idempotency_key=selection_credit_key,
         ))
+    pack_is_complete = payload.document_type == (
+        "selection_criteria" if (application.selection_criteria or "").strip() else "cover_letter"
+    )
+    usage = None
+    if user_id is not None and payload.pack_id is not None:
+        usage = session.exec(
+            select(GenerationUsage).where(
+                GenerationUsage.user_id == user_id,
+                GenerationUsage.pack_id == payload.pack_id,
+            )
+        ).first()
     if new_pack_usage and user_id is not None and payload.pack_id is not None:
-        session.add(GenerationUsage(
+        usage = GenerationUsage(
             user_id=user_id,
             application_id=application.id,
             pack_id=payload.pack_id,
-        ))
+        )
+        session.add(usage)
+    if usage is not None and pack_is_complete and usage.completed_at is None:
+        usage.completed_at = datetime.utcnow()
+        session.add(usage)
     session.commit(); session.refresh(document)
     return document
 

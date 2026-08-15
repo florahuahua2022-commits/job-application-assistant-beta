@@ -62,6 +62,10 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR NOT NULL DEFAULT 'natural_professional'"))
                 if "preferences_notes" not in profile_columns:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
+            if "generationusage" in table_names:
+                usage_columns = {column["name"] for column in inspector.get_columns("generationusage")}
+                if "completed_at" not in usage_columns:
+                    connection.execute(text("ALTER TABLE generationusage ADD COLUMN completed_at TIMESTAMP"))
     if engine.dialect.name == "sqlite":
         existing = {column["name"] for column in inspector.get_columns("jobapplication")}
         with engine.begin() as connection:
@@ -113,6 +117,10 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR DEFAULT 'natural_professional'"))
                 if "preferences_notes" not in profile_columns:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
+            if "generationusage" in inspector.get_table_names():
+                usage_columns = {column["name"] for column in inspector.get_columns("generationusage")}
+                if "completed_at" not in usage_columns:
+                    connection.execute(text("ALTER TABLE generationusage ADD COLUMN completed_at DATETIME"))
 
 
 def get_session():
