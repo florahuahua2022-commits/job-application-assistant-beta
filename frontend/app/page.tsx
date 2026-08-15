@@ -42,6 +42,7 @@ export default function Home() {
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
   const [notice, setNotice] = useState("Connecting to your local workspace…");
+  const [packNotice, setPackNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [selectedApplication, setSelectedApplication] = useState<number | null>(null);
   const [documents, setDocuments] = useState<GeneratedDocument[]>([]);
@@ -411,6 +412,7 @@ export default function Home() {
 
   async function openApplication(id: number) {
     setSelectedApplication(id);
+    setPackNotice("");
     setConfirmedApplication(null);
     setQualityResult(null);
     const response = await authenticatedFetch(`${api}/applications/${id}/documents`);
@@ -422,6 +424,10 @@ export default function Home() {
 
   async function generatePack() {
     if (!selectedApplication || !resumes.length) return;
+    const showPackNotice = (message: string) => {
+      setNotice(message);
+      setPackNotice(message);
+    };
     const application = applications.find((item) => item.id === selectedApplication);
     const includesSelectionCriteria = Boolean(application?.selection_criteria?.trim());
     let documentTypes: readonly (typeof packTypes[number])[] = includesSelectionCriteria
@@ -430,7 +436,7 @@ export default function Home() {
     let selectionCriteriaSkipped = false;
     if (includesSelectionCriteria) {
       const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
-      if (!accessResponse.ok) return setNotice("Could not verify Selection Criteria access. Please try again.");
+      if (!accessResponse.ok) return showPackNotice("Could not verify Selection Criteria access. Please try again.");
       const currentAccess = await accessResponse.json() as SelectionCriteriaAccess;
       setSelectionAccess(currentAccess);
       if (!currentAccess.unlimited && !currentAccess.remaining_credits) {
@@ -440,6 +446,7 @@ export default function Home() {
     }
     const packId = crypto.randomUUID();
     setBusy(true);
+    showPackNotice("Preparing your complete application pack…");
     setDocuments([]);
     setQualityResult(null);
     setActiveType("tailored_resume");
@@ -447,7 +454,7 @@ export default function Home() {
     try {
       for (let index = 0; index < documentTypes.length; index += 1) {
         const documentType = documentTypes[index];
-        setNotice(`Creating application pack: ${index + 1} of ${documentTypes.length} — ${labels[documentType]}…`);
+        showPackNotice(`Creating application pack: ${index + 1} of ${documentTypes.length} — ${labels[documentType]}…`);
         const response = await authenticatedFetch(`${api}/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -466,23 +473,23 @@ export default function Home() {
       setActiveType("tailored_resume");
       if (selectionCriteriaSkipped) {
         setQualityResult(null);
-        setNotice("CV and Cover Letter created. Selection Criteria was skipped because no credits remain. Add a credit before generating and checking the complete pack.");
+        showPackNotice("CV and Cover Letter created. Selection Criteria was skipped because no credits remain. Add a credit before generating and checking the complete pack.");
         return;
       }
       const checkResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
       if (checkResponse.ok) {
         const check = await checkResponse.json() as QualityResult;
         setQualityResult(check);
-        setNotice(check.ready
+        showPackNotice(check.ready
           ? "Application pack created and automatically checked. Confirm your personal facts, then continue."
           : "Application pack created. The automatic check found items that still need attention.");
       } else {
-        setNotice("Application pack created. Run Final Check before continuing.");
+        showPackNotice("Application pack created. Run Final Check before continuing.");
       }
     } catch (error) {
       if (created.length) setDocuments([...created].reverse());
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
-      setNotice(`${detail} This new pack is incomplete, so Final Check is unavailable. Click Generate Application Pack to retry the whole pack.`);
+      showPackNotice(`${detail} This new pack is incomplete, so Final Check is unavailable. Click Generate Application Pack to retry the whole pack.`);
     } finally {
       setBusy(false);
     }
@@ -930,6 +937,7 @@ export default function Home() {
           <div className="reviewArea">
             {selected ? <>
               <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || confirmedApplication !== selected.id} onClick={generatePack}>{busy ? "Creating pack…" : "Generate Application Pack"}</button></div></div>
+              {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
                 <div><strong>Confirm before generating</strong><p>Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}</p></div>
                 <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={() => setConfirmedApplication(selected.id)}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
