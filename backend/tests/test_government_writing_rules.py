@@ -15,6 +15,8 @@ class GovernmentWritingRulesTests(unittest.TestCase):
         self.assertIn("not as evidence", rules)
         self.assertIn("only when the supporting source_text contains the number", rules)
         self.assertIn("never use RE: or Subject:", rules)
+        self.assertIn("must not become managed, led, owned", rules)
+        self.assertIn("does not by itself support claims of discretion", rules)
 
     def test_variant_is_configurable_without_forking_rules(self):
         self.assertIn("professional British English", government_writing_rules("British English"))

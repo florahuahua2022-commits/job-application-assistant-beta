@@ -11,6 +11,8 @@ def government_writing_rules(english_variant: str = "Australian English") -> str
 - Personal declarations must preserve the Applicant Profile's exact level of specificity. If it says "permanent resident" without a country, never add a country name.
 - Never describe a role as current, present or ongoing unless CKB source_text explicitly says current/present/ongoing or supplies an open-ended date range.
 - Never add policies, procedures, frameworks, government requirements or recordkeeping requirements unless those terms are explicitly supported by CKB source_text.
+- Preserve responsibility level exactly. Evidence that says assisted, supported, contributed or liaised must not become managed, led, owned, directed, coordinated or delivered unless CKB source_text independently supports the stronger verb.
+- Maintaining confidential documents supports only that stated action; it does not by itself support claims of discretion, judgement, trustworthiness or handling sensitive matters.
 - Treat every duty, system and requirement in the Job Description as an employer requirement, not as evidence that the applicant has performed the work.
 - Never imply direct experience when the evidence is only transferable; state material evidence gaps plainly.
 - Do not copy Job Description or criterion wording verbatim; paraphrase while preserving meaning.

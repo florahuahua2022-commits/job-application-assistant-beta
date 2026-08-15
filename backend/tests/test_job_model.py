@@ -61,6 +61,21 @@ Applicants must demonstrate knowledge of government policy.
 
         self.assertIn("Zoological Parks Authority at Perth Zoo", model["organisation_context"])
 
+    def test_selection_instructions_are_not_treated_as_criteria(self):
+        criteria = """Applicants should address the following four (4) criteria.
+These should be addressed in no more than two (2) pages in total.
+1. Demonstrated project delivery experience.
+2. Strong written communication skills.
+3. Ability to coordinate contractors and consultants.
+4. Effective planning and prioritisation skills.
+"""
+
+        model = build_job_model("Project role.", criteria, "Project Coordinator", "Perth Zoo")
+
+        self.assertEqual(len(model["criteria"]), 4)
+        self.assertTrue(all("Applicants should address" not in item["criteria_text"] for item in model["criteria"]))
+        self.assertTrue(all("pages in total" not in item["criteria_text"] for item in model["criteria"]))
+
 
 if __name__ == "__main__":
     unittest.main()

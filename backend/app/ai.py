@@ -355,6 +355,8 @@ def auto_fix_selection_criteria_bundle(ckb_json: str, selection_plan_json: str, 
         matched = [evidence_by_id[value] for value in allowed_ids if value in evidence_by_id]
         prompt = f"""You are repairing one Selection Criterion response after factual validation.
 
+{government_writing_rules(target_english_variant())}
+
 PREVIOUS RESPONSE:
 {json.dumps(response, ensure_ascii=False)}
 
@@ -370,6 +372,8 @@ MATCHED CKB SOURCE TEXT (the only factual ground truth):
 Return the full corrected response as JSON only, using the same schema as PREVIOUS RESPONSE.
 - Delete unsupported outcomes, suitability claims, confidence claims, trust/reputation claims and other subjective conclusions. Do not replace them with a new outcome.
 - If a phrase combines separate source facts into a stronger claim, separate or soften it using the source_text's own wording.
+- Preserve responsibility verbs exactly: assisted/supported/contributed/liaised must not become managed/led/owned/directed/coordinated/delivered.
+- Maintaining confidential documentation does not support "discretion", "judgement", "trustworthiness" or "handling sensitive matters"; remove those additions unless source_text explicitly contains them.
 - Never treat the criterion or Job Description as evidence of an applicant achievement.
 - Do not invent a result merely to complete STAR. If no result is evidenced, set star.result to an empty string and end final_response with the last supported action or responsibility.
 - Use only evidence IDs listed in CRITERION PLAN matched_evidence, and include only IDs actually used.

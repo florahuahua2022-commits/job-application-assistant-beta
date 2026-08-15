@@ -148,11 +148,14 @@ class GenerateDraftTests(unittest.TestCase):
         fixed = '{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"S","task":"T","action":"Prepared monthly reports","result":""},"final_response":"I prepared monthly reports."}'
         with patch.object(ai, "review_selection_criteria_batch", side_effect=[failed, passed]), patch.object(
             ai, "_selection_provider_response", return_value=fixed
-        ):
+        ) as provider:
             repaired, review = ai.repair_selection_criteria_bundle(ckb, plan, bundle)
         self.assertEqual(review["generation_status"], "clean")
         self.assertEqual(review["telemetry"]["repair_rounds"], 1)
         self.assertNotIn("trust", repaired["content"].lower())
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", provider.call_args.args[0])
+        self.assertIn("assisted/supported/contributed/liaised", provider.call_args.args[0])
+        self.assertIn("does not support \"discretion\"", provider.call_args.args[0])
 
     def test_generates_and_validates_each_selection_criterion_separately(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'

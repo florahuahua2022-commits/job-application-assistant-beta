@@ -15,11 +15,24 @@ def _criterion_id(text: str) -> str:
     return f"C{hashlib.sha1(text.lower().encode('utf-8')).hexdigest()[:10].upper()}"
 
 
+def is_selection_instruction(text: str) -> bool:
+    cleaned = _clean(text)
+    return bool(
+        re.search(
+            r"(?i)\b(?:applicants?|candidates?)\s+(?:must|should|are required to)\s+"
+            r"(?:address|respond to|provide|submit).{0,80}\b(?:criteria|criterion|requirements?|responses?)\b",
+            cleaned,
+        )
+        or re.search(r"(?i)\b(?:maximum|limit|no more than|not exceed|up to)\b.*\b(?:words?|pages?)\b", cleaned)
+        or re.search(r"(?i)^(?:these|the following)\s+(?:criteria|responses?).*\b(?:addressed|answered|pages?|words?)\b", cleaned)
+    )
+
+
 def _meaningful_lines(value: str) -> list[str]:
     lines: list[str] = []
     for raw in value.splitlines():
         cleaned = _clean(re.sub(r"^\s*(?:\d+[.)]|[a-z][.)])\s*", "", raw, flags=re.IGNORECASE))
-        if re.search(r"(?i)\b(?:maximum|limit|no more than|not exceed|up to|total|overall|combined)\b.*\b[\d,]+\s*words?\b", cleaned):
+        if is_selection_instruction(cleaned):
             continue
         if len(cleaned) >= 12 and not re.fullmatch(r"(?i)(?:essential|desirable|selection criteria|requirements|responsibilities):?", cleaned):
             lines.append(cleaned)
