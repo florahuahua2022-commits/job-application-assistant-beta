@@ -489,7 +489,7 @@ export default function Home() {
     } catch (error) {
       if (created.length) setDocuments([...created].reverse());
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
-      showPackNotice(`${detail} This new pack is incomplete, so Final Check is unavailable. Click Generate Application Pack to retry the whole pack.`);
+      showPackNotice(`${detail} This pack is incomplete, so Final Check is unavailable. The failed attempt has not used today's completed-pack allowance. Click Generate Application Pack to retry.`);
     } finally {
       setBusy(false);
     }
