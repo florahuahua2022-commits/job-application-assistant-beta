@@ -263,7 +263,8 @@ class GenerateDraftTests(unittest.TestCase):
 
         self.assertIn("employer requirement, not as evidence", instruction)
         self.assertIn("Never compare the value, scale, complexity", instruction)
-        self.assertIn("state the gap plainly", instruction)
+        self.assertIn("without implying direct experience", instruction)
+        self.assertIn("answer neutrally, briefly and factually", instruction)
         self.assertIn("permanent resident", instruction)
         self.assertIn("Never describe a role as current", instruction)
         self.assertIn("recordkeeping requirements", instruction)

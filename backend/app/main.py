@@ -365,6 +365,47 @@ def organisation_is_named(company: str, content: str) -> bool:
     )
 
 
+def _identity_tokens(value: str) -> list[str]:
+    replacements = {"wa": ("western", "australia"), "dept": ("department",)}
+    stop_words = {"pty", "ltd", "limited", "inc", "incorporated", "the", "of", "and", "at"}
+    tokens: list[str] = []
+    for word in re.findall(r"[A-Za-z0-9]+", value.lower()):
+        if word in stop_words:
+            continue
+        tokens.extend(replacements.get(word, (word,)))
+    return tokens
+
+
+def organisations_are_equivalent(left: str, right: str) -> bool:
+    left_tokens, right_tokens = set(_identity_tokens(left)), set(_identity_tokens(right))
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens == right_tokens:
+        return True
+    smaller, larger = sorted((left_tokens, right_tokens), key=len)
+    return len(smaller) >= 2 and smaller <= larger
+
+
+def _strong_organisation_identity(company: str) -> bool:
+    tokens = _identity_tokens(company)
+    generic_single_names = {
+        "agency", "department", "government", "health", "planning", "services", "transport",
+    }
+    return len(tokens) >= 2 or (
+        len(tokens) == 1 and len(tokens[0]) >= 6 and tokens[0] not in generic_single_names
+    )
+
+
+def _identity_phrase_is_named(value: str, content: str) -> bool:
+    phrase = " ".join(_identity_tokens(value))
+    normalised_content = " ".join(_identity_tokens(content))
+    return bool(phrase and f" {phrase} " in f" {normalised_content} ")
+
+
+def _organisation_identity_is_named(company: str, content: str) -> bool:
+    return organisation_is_named(company, content) or _identity_phrase_is_named(company, content)
+
+
 def enforce_profile_contact(content: str, profile: ApplicantProfile, document_type: str) -> str:
     mobile_pattern = re.compile(r"(?<!\d)(?:\+?61[ \t().-]*4|04)(?:[ \t().-]*\d){8}(?!\d)")
     email_pattern = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -861,12 +902,69 @@ def quality_check(
             document_type="cover_letter",
         ))
 
+    current_job_context = "\n".join((application.job_description, application.job_model_json or "{}"))
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    applicant_evidence_context = (
+        "\n".join((master_resume.source_text, master_resume.ckb_json or "[]"))
+        if master_resume else ""
+    )
+    other_applications = session.exec(
+        select_for_user(JobApplication, user_id).where(JobApplication.id != application_id)
+    ).all()
+    for document_type in ("cover_letter", "selection_criteria"):
+        content = content_to_check.get(document_type, "")
+        if not content:
+            continue
+        for other_application in other_applications:
+            other_company = (other_application.company or "").strip()
+            other_title = (other_application.position_title or "").split(" - ", 1)[0].strip()
+            if (
+                not other_company
+                or not other_title
+                or not _strong_organisation_identity(other_company)
+                or organisations_are_equivalent(other_company, advertised_company)
+            ):
+                continue
+            pair_is_named = (
+                _organisation_identity_is_named(other_company, content)
+                and _identity_phrase_is_named(other_title, content)
+            )
+            if not pair_is_named:
+                continue
+            pair_is_current_job_context = (
+                _organisation_identity_is_named(other_company, current_job_context)
+                and _identity_phrase_is_named(other_title, current_job_context)
+            )
+            pair_is_applicant_evidence = (
+                _organisation_identity_is_named(other_company, applicant_evidence_context)
+                and _identity_phrase_is_named(other_title, applicant_evidence_context)
+            )
+            if pair_is_current_job_context or pair_is_applicant_evidence:
+                continue
+            issues.append(QualityCheckIssue(
+                severity="error",
+                code="cross_application_content_leak",
+                message=(
+                    f"This {document_type.replace('_', ' ')} contains the organisation and position identity "
+                    f"from another saved application ({other_company} — {other_title}). Check that content was "
+                    "not carried over from that application."
+                ),
+                document_type=document_type,
+            ))
+            break
+
     placeholders = ("[your name]", "[current date]", "[date]", "[company name]", "[hiring manager]")
     cliches = (
         "i am confident", "i am excited", "i am writing to express my interest", "i am writing to apply",
         "i am comfortable learning", "adapt quickly", "learn quickly",
         "proven track record", "dynamic professional", "passionate about",
         "leverage my skills", "well placed",
+    )
+    self_deprecating_phrases = (
+        "although i have not", "while i have not", "even though i have not",
+        "despite not having", "despite lacking", "i lack", "i currently lack",
+        "i do not have direct experience", "i do not have experience in",
+        "i have limited experience in", "i have no direct experience",
     )
     american_spellings = ("organized", "organization", "prioritize", "behavior", "labor")
     unsupported_comparisons = (
@@ -888,6 +986,21 @@ def quality_check(
                 severity="warning",
                 code="generic_ai_wording",
                 message=f"Generic wording detected ({', '.join(found_cliches[:3])}). Replace it with direct evidence where practical.",
+                document_type=document_type,
+            ))
+        found_self_deprecating = (
+            [phrase for phrase in self_deprecating_phrases if phrase in lowered]
+            if document_type in {"cover_letter", "selection_criteria"} else []
+        )
+        if found_self_deprecating:
+            issues.append(QualityCheckIssue(
+                severity="warning",
+                code="self_deprecating_wording",
+                message=(
+                    "The document foregrounds an evidence gap in the applicant's own voice "
+                    f"({', '.join(found_self_deprecating[:2])}). State the supported transferable evidence "
+                    "positively without implying direct experience."
+                ),
                 document_type=document_type,
             ))
         found_us_spellings = [word for word in american_spellings if re.search(rf"\b{word}\b", lowered)]

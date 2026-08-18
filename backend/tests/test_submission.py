@@ -586,6 +586,175 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertIn("advertised_company_missing", [issue["code"] for issue in issues])
         self.assertEqual(next(issue["severity"] for issue in issues if issue["code"] == "advertised_company_missing"), "warning")
 
+    def test_selection_criteria_does_not_require_current_job_identity(self):
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.selection_criteria = "Demonstrated stakeholder communication."
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer with Example Agency"),
+                GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content="I prepared reports and liaised with stakeholders."),
+            ])
+            session.commit()
+
+        issues = self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]
+        selection_identity_issues = [
+            issue for issue in issues
+            if issue.get("document_type") == "selection_criteria"
+            and issue["code"] in {"position_title_mismatch", "advertised_company_missing"}
+        ]
+        self.assertEqual(selection_identity_issues, [])
+
+    def test_cross_application_identity_pair_blocks_cover_letter_and_selection_criteria(self):
+        for document_type in ("cover_letter", "selection_criteria"):
+            with self.subTest(document_type=document_type), Session(self.engine) as session:
+                application = session.get(JobApplication, self.application_id)
+                application.selection_criteria = "Criteria required."
+                other = JobApplication(
+                    company="Transwa Rail Services",
+                    position_title="Transport Planning Officer",
+                    job_description="Plan regional rail services.",
+                )
+                session.add(other)
+                session.add_all([
+                    GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                    GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content=(
+                        "Application for Project Officer with Example Agency."
+                        if document_type != "cover_letter" else
+                        "Application for Project Officer with Example Agency. Transwa Rail Services Transport Planning Officer."
+                    )),
+                    GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content=(
+                        "Transwa Rail Services Transport Planning Officer experience."
+                        if document_type == "selection_criteria" else "Evidence-based response."
+                    )),
+                ])
+                session.commit()
+
+            issues = self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]
+            leak_issues = [issue for issue in issues if issue["code"] == "cross_application_content_leak"]
+            self.assertTrue(any(issue["document_type"] == document_type and issue["severity"] == "error" for issue in leak_issues))
+
+    def test_cross_application_guard_ignores_single_organisation_mentions(self):
+        with Session(self.engine) as session:
+            session.add(JobApplication(
+                company="Former Community Services",
+                position_title="Program Coordinator",
+                job_description="Coordinate programs.",
+            ))
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer with Example Agency. Previously employed by Former Community Services."),
+            ])
+            session.commit()
+
+        codes = [issue["code"] for issue in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
+        self.assertNotIn("cross_application_content_leak", codes)
+
+    def test_cross_application_guard_allows_pair_supported_by_master_resume(self):
+        with Session(self.engine) as session:
+            session.add(Resume(
+                source_text="Program Coordinator, Former Community Services. Coordinated community programs.",
+                ckb_json="[]",
+            ))
+            session.add(JobApplication(
+                company="Former Community Services",
+                position_title="Program Coordinator",
+                job_description="Coordinate programs.",
+            ))
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer with Example Agency. As Program Coordinator at Former Community Services, I prepared reports."),
+            ])
+            session.commit()
+
+        codes = [issue["code"] for issue in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
+        self.assertNotIn("cross_application_content_leak", codes)
+
+    def test_cross_application_guard_allows_pair_named_in_current_jd(self):
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.job_description = "Work with Transwa Rail Services and its Transport Planning Officer."
+            session.add(application)
+            session.add(JobApplication(
+                company="Transwa Rail Services",
+                position_title="Transport Planning Officer",
+                job_description="Plan regional rail services.",
+            ))
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer with Example Agency. Liaise with Transwa Rail Services and the Transport Planning Officer."),
+            ])
+            session.commit()
+
+        codes = [issue["code"] for issue in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
+        self.assertNotIn("cross_application_content_leak", codes)
+
+    def test_cross_application_guard_ignores_equivalent_or_weak_organisation_names(self):
+        cases = (
+            ("The Example Agency Pty Ltd", "Senior Project Officer"),
+            ("Health", "Project Officer"),
+        )
+        for company, title in cases:
+            with self.subTest(company=company), Session(self.engine) as session:
+                session.add(JobApplication(company=company, position_title=title, job_description="Other job."))
+                session.add_all([
+                    GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                    GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content=f"Application for Project Officer with Example Agency. {company} {title}."),
+                ])
+                session.commit()
+
+            codes = [issue["code"] for issue in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
+            self.assertNotIn("cross_application_content_leak", codes)
+
+    def test_cross_application_guard_does_not_run_on_tailored_resume(self):
+        with Session(self.engine) as session:
+            session.add(JobApplication(
+                company="Former Community Services",
+                position_title="Program Coordinator",
+                job_description="Coordinate programs.",
+            ))
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Program Coordinator at Former Community Services."),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer with Example Agency."),
+            ])
+            session.commit()
+
+        codes = [issue["code"] for issue in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
+        self.assertNotIn("cross_application_content_leak", codes)
+
+    def test_quality_check_warns_about_self_deprecating_wording_in_generated_prose(self):
+        for document_type in ("cover_letter", "selection_criteria"):
+            with self.subTest(document_type=document_type), Session(self.engine) as session:
+                application = session.get(JobApplication, self.application_id)
+                application.selection_criteria = "Criteria required."
+                session.add_all([
+                    GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                    GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content=(
+                        "Application for Project Officer with Example Agency. Although I have not held the identical role, I prepared reports."
+                        if document_type == "cover_letter" else "Application for Project Officer with Example Agency."
+                    )),
+                    GeneratedDocument(application_id=self.application_id, document_type="selection_criteria", content=(
+                        "While I have not worked in that system, I prepared reports."
+                        if document_type == "selection_criteria" else "Evidence-based response."
+                    )),
+                ])
+                session.commit()
+
+            issues = self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]
+            warnings = [issue for issue in issues if issue["code"] == "self_deprecating_wording"]
+            self.assertTrue(any(issue["document_type"] == document_type and issue["severity"] == "warning" for issue in warnings))
+
+    def test_positive_transferable_wording_is_not_self_deprecating(self):
+        with Session(self.engine) as session:
+            session.add_all([
+                GeneratedDocument(application_id=self.application_id, document_type="tailored_resume", content="Resume"),
+                GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Application for Project Officer with Example Agency. My reporting experience provides transferable evidence for this requirement."),
+            ])
+            session.commit()
+
+        codes = [issue["code"] for issue in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
+        self.assertNotIn("self_deprecating_wording", codes)
+
     def test_quality_check_warns_about_speculative_employer_relationship(self):
         with Session(self.engine) as session:
             session.add_all([

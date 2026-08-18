@@ -14,7 +14,8 @@ def government_writing_rules(english_variant: str = "Australian English") -> str
 - Preserve responsibility level exactly. Evidence that says assisted, supported, contributed or liaised must not become managed, led, owned, directed, coordinated or delivered unless CKB source_text independently supports the stronger verb.
 - Maintaining confidential documents supports only that stated action; it does not by itself support claims of discretion, judgement, trustworthiness or handling sensitive matters.
 - Treat every duty, system and requirement in the Job Description as an employer requirement, not as evidence that the applicant has performed the work.
-- Never imply direct experience when the evidence is only transferable; state material evidence gaps plainly.
+- Never imply direct experience when the evidence is only transferable. Describe the supported transferable evidence accurately and positively without opening with a first-person deficit such as "although I have not", "while I have not", "despite not having", "I lack" or "I do not have direct experience".
+- Do not hide or fabricate an evidence gap to avoid negative wording. If the employer explicitly requires disclosure of a qualification, experience or limitation, answer neutrally, briefly and factually at the exact level supported by the evidence.
 - Do not copy Job Description or criterion wording verbatim; paraphrase while preserving meaning.
 - Prefer quantified outcomes only when the supporting source_text contains the number.
 - Never open like an email reply and never use RE: or Subject: as a heading.

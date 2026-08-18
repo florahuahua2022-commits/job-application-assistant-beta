@@ -45,6 +45,24 @@ class GovernmentWritingRulesTests(unittest.TestCase):
         self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", instruction)
         self.assertIn("traceable to supplied CKB source_text", instruction)
 
+    def test_transferable_evidence_rules_avoid_self_deprecation_without_hiding_gaps(self):
+        rules = government_writing_rules()
+
+        self.assertIn("without opening with a first-person deficit", rules)
+        self.assertIn("Never imply direct experience", rules)
+        self.assertIn("Do not hide or fabricate an evidence gap", rules)
+        self.assertIn("answer neutrally, briefly and factually", rules)
+        self.assertNotIn("state material evidence gaps plainly", rules)
+        self.assertNotIn("omit the gap entirely", rules)
+
+    def test_safety_instruction_matches_the_shared_gap_policy(self):
+        instruction = ai.safety_instruction()
+
+        self.assertIn("without implying direct experience", instruction)
+        self.assertIn("answer neutrally, briefly and factually", instruction)
+        self.assertNotIn("state the gap plainly", instruction)
+        self.assertNotIn("omit the gap entirely", instruction)
+
 
 if __name__ == "__main__":
     unittest.main()
