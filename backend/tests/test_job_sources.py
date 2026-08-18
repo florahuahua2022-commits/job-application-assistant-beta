@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -177,6 +178,7 @@ class JobSourceTests(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: other_id
 
         self.assertEqual(self.client.get(f"/applications/{application_id}/sources").status_code, 404)
+        self.assertEqual(self.client.post(f"/applications/{application_id}/sources/acquire").status_code, 404)
 
     def test_unrelated_application_update_preserves_sources(self):
         application = self.create_application("Submit a CV and see the attached position description.").json()
@@ -190,6 +192,28 @@ class JobSourceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([(item["source_id"], item["extracted_text"], item["acquisition_status"]) for item in after],
                          [(item["source_id"], item["extracted_text"], item["acquisition_status"]) for item in before])
+
+    def test_acquisition_endpoint_persists_validated_source_state(self):
+        application = self.create_application("Refer to the attached JDF.", discovered_sources=[{
+            "url": "https://files.example/jdf.pdf", "label": "JDF", "filename": "jdf.pdf",
+        }]).json()
+
+        def fake_acquire(sources):
+            attachment = next(source for source in sources if source.source_type == "job_description_attachment")
+            attachment.acquisition_status = "fetched"
+            attachment.extraction_status = "extracted"
+            attachment.content_type = "application/pdf"
+            attachment.content_sha256 = "a" * 64
+            attachment.extracted_text = "Extracted position description text."
+
+        with patch("app.main.acquire_sources", side_effect=fake_acquire):
+            response = self.client.post(f"/applications/{application['id']}/sources/acquire")
+        reloaded = self.client.get(f"/applications/{application['id']}/sources").json()
+
+        self.assertEqual(response.status_code, 200)
+        attachment = next(source for source in reloaded if source["source_type"] == "job_description_attachment")
+        self.assertEqual((attachment["acquisition_status"], attachment["extraction_status"]), ("fetched", "extracted"))
+        self.assertEqual(attachment["content_sha256"], "a" * 64)
 
     def test_sqlite_and_supabase_jobsource_columns_match(self):
         sqlite_columns = {column["name"] for column in inspect(self.engine).get_columns("jobsource")}

@@ -29,6 +29,7 @@ from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileR
 from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
+from .source_acquisition import acquire_sources
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -742,6 +743,26 @@ def list_application_sources(
     return session.exec(
         select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
     ).all()
+
+
+@app.post("/applications/{application_id}/sources/acquire", response_model=list[JobSource])
+def acquire_application_sources(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    if not get_for_user(session, JobApplication, application_id, user_id):
+        raise HTTPException(404, "Application not found.")
+    sources = list(session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
+    ).all())
+    acquire_sources(sources)
+    for source in sources:
+        session.add(source)
+    session.commit()
+    return list(session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
+    ).all())
 
 
 @app.get("/applications/{application_id}/application-requirements", response_model=ApplicationRequirementsResponse)

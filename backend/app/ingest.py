@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from io import BytesIO
 from urllib.parse import unquote, urldefrag, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from zipfile import BadZipFile, ZipFile
 
 from docx import Document
 from pypdf import PdfReader
@@ -16,6 +17,9 @@ from .ckb import stable_evidence_id
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_PAGE_BYTES = 3 * 1024 * 1024
 MAX_OCR_PAGES = 6
+MAX_ATTACHMENT_PDF_PAGES = 50
+MAX_DOCX_ENTRIES = 1000
+MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 
 def _extract_scanned_pdf_text(payload: bytes, document_factory=None, ocr_engine=None, image_adapter=None) -> str:
@@ -160,25 +164,64 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
     return experiences[:20]
 
 
-def extract_resume_text(filename: str, payload: bytes) -> str:
+def extract_document_text(filename: str, payload: bytes, kind: str | None = None) -> tuple[str, str, list[str]]:
+    """Extract a bounded PDF, DOCX or text document and report complete/partial status."""
     if not payload:
-        raise ValueError("The selected resume file is empty.")
+        raise ValueError("The selected file is empty.")
     if len(payload) > MAX_UPLOAD_BYTES:
-        raise ValueError("The resume file is larger than 10 MB.")
-    suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+        raise ValueError("The file is larger than 10 MB.")
+    suffix = kind or (filename.lower().rsplit(".", 1)[-1] if "." in filename else "")
+    warnings: list[str] = []
+    status = "extracted"
     if suffix == "docx":
+        try:
+            with ZipFile(BytesIO(payload)) as archive:
+                entries = archive.infolist()
+                total_size = sum(item.file_size for item in entries)
+                if len(entries) > MAX_DOCX_ENTRIES or total_size > MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ValueError("The DOCX archive expands beyond the safe processing limit.")
+                if any(item.file_size > max(1, item.compress_size) * 200 for item in entries):
+                    raise ValueError("The DOCX archive has an unsafe compression ratio.")
+                if "word/document.xml" not in archive.namelist() or archive.testzip() is not None:
+                    raise ValueError("The DOCX file is corrupt or incomplete.")
+        except BadZipFile as error:
+            raise ValueError("The DOCX file is corrupt or incomplete.") from error
         document = Document(BytesIO(payload))
-        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        text = "\n".join([
+            *(paragraph.text for paragraph in document.paragraphs),
+            *(cell.text for table in document.tables for row in table.rows for cell in row.cells),
+        ])
     elif suffix == "pdf":
-        reader = PdfReader(BytesIO(payload))
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        reader = PdfReader(BytesIO(payload), strict=False)
+        page_count = len(reader.pages)
+        text = "\n".join(reader.pages[index].extract_text() or "" for index in range(min(page_count, MAX_ATTACHMENT_PDF_PAGES)))
+        if page_count > MAX_ATTACHMENT_PDF_PAGES:
+            status = "partial"
+            warnings.append(f"Only the first {MAX_ATTACHMENT_PDF_PAGES} PDF pages were processed.")
         if len(re.sub(r"\s+", "", text)) < 40:
             text = _extract_scanned_pdf_text(payload)
+            if page_count > MAX_OCR_PAGES:
+                status = "partial"
+                warnings.append(f"OCR was limited to the first {MAX_OCR_PAGES} PDF pages.")
     elif suffix in {"txt", "md"}:
         text = payload.decode("utf-8-sig", errors="replace")
     else:
-        raise ValueError("Upload a DOCX, PDF or TXT resume file.")
+        raise ValueError("Only DOCX, PDF and plain-text files are supported.")
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, status, list(dict.fromkeys(warnings))
+
+
+def extract_resume_text(filename: str, payload: bytes) -> str:
+    try:
+        text, _, _ = extract_document_text(filename, payload)
+    except ValueError as error:
+        if str(error) == "The selected file is empty.":
+            raise ValueError("The selected resume file is empty.") from error
+        if str(error) == "The file is larger than 10 MB.":
+            raise ValueError("The resume file is larger than 10 MB.") from error
+        if "Only DOCX" in str(error):
+            raise ValueError("Upload a DOCX, PDF or TXT resume file.") from error
+        raise
     if len(text) < 40:
         raise ValueError("Very little text could be read from this file. Try a DOCX or text-based PDF.")
     return text
@@ -469,6 +512,8 @@ def _validate_public_url(url: str) -> str:
 
 
 class _SafeRedirectHandler(HTTPRedirectHandler):
+    max_redirections = 5
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _validate_public_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
