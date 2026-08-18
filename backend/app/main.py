@@ -1051,7 +1051,15 @@ def update_generated_document(
     # Reviewer findings describe the generated content. Once the applicant edits
     # that content, those findings are stale and must not block Final Check.
     document.reviewer_json = "{}"
-    session.add(document); session.commit(); session.refresh(document)
+    session.add(document)
+    if document.document_type == "selection_criteria":
+        application = get_for_user(session, JobApplication, document.application_id, user_id)
+        if not application:
+            raise HTTPException(404, "Application not found.")
+        application.selection_confirmations_json = "[]"
+        application.updated_at = datetime.utcnow()
+        session.add(application)
+    session.commit(); session.refresh(document)
     return document
 
 

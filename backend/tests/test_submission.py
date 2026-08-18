@@ -388,6 +388,64 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["reviewer_json"], "{}")
 
+    def test_editing_selection_criteria_clears_saved_confirmations_and_blocks_submission(self):
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.job_url = "https://example.com/apply"
+            application.selection_plan_json = '{"items":[{"criteria_id":"C1","evidence_status":"weak"}]}'
+            application.selection_confirmations_json = '["C1"]'
+            document = GeneratedDocument(
+                application_id=self.application_id,
+                document_type="selection_criteria",
+                content="Original response.",
+            )
+            session.add(application)
+            session.add(document)
+            session.commit()
+            session.refresh(document)
+            document_id = document.id
+
+        before_edit = self.client.post(f"/applications/{self.application_id}/prepare-submission")
+        edited = self.client.patch(
+            f"/documents/{document_id}",
+            json={"content": "Manually edited response."},
+        )
+        after_edit = self.client.post(f"/applications/{self.application_id}/prepare-submission")
+
+        self.assertEqual(before_edit.status_code, 200)
+        self.assertEqual(edited.status_code, 200)
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            self.assertEqual(application.selection_confirmations_json, "[]")
+        self.assertEqual(after_edit.status_code, 400)
+        self.assertIn("Review and confirm", after_edit.json()["detail"])
+
+    def test_editing_non_selection_document_preserves_saved_confirmations(self):
+        for document_type in ("tailored_resume", "cover_letter"):
+            with self.subTest(document_type=document_type), Session(self.engine) as session:
+                application = session.get(JobApplication, self.application_id)
+                application.selection_confirmations_json = '["C1"]'
+                document = GeneratedDocument(
+                    application_id=self.application_id,
+                    document_type=document_type,
+                    content="Original content.",
+                )
+                session.add(application)
+                session.add(document)
+                session.commit()
+                session.refresh(document)
+                document_id = document.id
+
+            response = self.client.patch(
+                f"/documents/{document_id}",
+                json={"content": "Manually edited content."},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            with Session(self.engine) as session:
+                application = session.get(JobApplication, self.application_id)
+                self.assertEqual(application.selection_confirmations_json, '["C1"]')
+
     def test_private_job_does_not_require_selection_criteria(self):
         with Session(self.engine) as session:
             session.add(ApplicantProfile(
