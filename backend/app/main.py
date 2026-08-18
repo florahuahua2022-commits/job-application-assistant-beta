@@ -22,14 +22,14 @@ from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_ev
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
+from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
-from .source_acquisition import acquire_sources
+from .source_acquisition import acquire_sources, process_uploaded_document
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -760,6 +760,68 @@ def acquire_application_sources(
     for source in sources:
         session.add(source)
     session.commit()
+    return list(session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
+    ).all())
+
+
+@app.post("/applications/{application_id}/sources/upload", response_model=list[JobSource])
+async def upload_application_source(
+    application_id: int,
+    file: UploadFile = File(...),
+    expected_source_type: str = Form(...),
+    target_source_id: str | None = Form(None),
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    allowed_types = {"job_description_attachment", "application_instruction_attachment"}
+    if expected_source_type not in allowed_types:
+        raise HTTPException(400, "Manual upload is supported only for job descriptions and application instruction packs.")
+    sources = list(session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
+    ).all())
+    target = next((source for source in sources if source.source_id == target_source_id), None) if target_source_id else None
+    if target_source_id and not target:
+        raise HTTPException(404, "Source not found.")
+    if target and (target.source_type != expected_source_type or (target.acquisition_status not in {"discovered", "unavailable", "requires_auth", "failed"} and target.extraction_status != "failed")):
+        raise HTTPException(400, "The selected source cannot be fulfilled by this upload.")
+    payload = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(payload) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "The source file is larger than 10 MB.")
+    filename = (file.filename or "uploaded-source").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    try:
+        extracted = process_uploaded_document(filename, file.content_type or "", payload)
+    except Exception as error:
+        raise HTTPException(400, str(error)) from error
+    duplicate = next((source for source in sources if source.content_sha256 == extracted["content_sha256"] and source.extracted_text), None)
+    primary = next((source for source in sources if source.source_type == "primary_advertisement"), None)
+    if not target:
+        target = JobSource(
+            application_id=application_id,
+            user_id=user_id,
+            source_id=str(uuid4()),
+            source_type=expected_source_type,
+            title="Job description" if expected_source_type == "job_description_attachment" else "Application information pack",
+            label=filename,
+            discovered_from_source_id=primary.source_id if primary else None,
+            discovered_from_url=application.job_url,
+            acquisition_status="uploaded",
+            extraction_status="not_attempted",
+            classification_confidence="high",
+            classification_reasons_json=json.dumps(["manual upload"]),
+        )
+    target.acquisition_status = "uploaded"
+    target.filename = extracted["filename"]
+    target.content_type = extracted["content_type"]
+    target.content_sha256 = extracted["content_sha256"]
+    target.extraction_status = "not_applicable" if duplicate else extracted["extraction_status"]
+    target.extracted_text = "" if duplicate else extracted["extracted_text"]
+    target.warnings_json = json.dumps([f"Duplicate content of source {duplicate.source_id}; extraction was not duplicated."]) if duplicate else extracted["warnings_json"]
+    target.updated_at = datetime.utcnow()
+    session.add(target); session.commit()
     return list(session.exec(
         select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
     ).all())

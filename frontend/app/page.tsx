@@ -30,6 +30,7 @@ type Profile = { id: number; title?: string; first_name: string; last_name: stri
 type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string; discovered_sources: Record<string, unknown>[] };
 type ContactGuess = { full_name: string; phone: string; email: string };
 type SelectionCriteriaAccess = { unlimited: boolean; included_credits: number; referral_credits: number; used_credits: number; remaining_credits: number | null; referral_code: string | null; referral_claimed: boolean };
+type JobSource = { source_id: string; source_type: string; title: string; label: string; source_url?: string; acquisition_status: string; extraction_status: string; warnings_json: string };
 
 const packTypes = ["tailored_resume", "cover_letter", "selection_criteria"] as const;
 const labels: Record<string, string> = {
@@ -45,6 +46,22 @@ const selectionFormatOptions: DocumentFormat[] = ["standalone", "embedded_in_cov
 const limitUnits: LimitUnit[] = ["words", "characters", "pages"];
 const limitScopes: LimitScope[] = ["document", "per_criterion", "combined_documents"];
 const limitConstraints: LimitConstraint[] = ["maximum", "minimum", "exact", "recommended"];
+const sourceTypeLabels: Record<string, string> = { primary_advertisement: "Job advertisement", job_description_attachment: "JDF / Position Description", application_instruction_attachment: "Application Information Pack", mandatory_form: "Mandatory form", other_supporting_attachment: "Supporting attachment", unknown_attachment: "Other attachment" };
+
+function sourceStateLabel(source: JobSource) {
+  if (source.acquisition_status === "uploaded") return source.extraction_status === "partial" ? "Manually uploaded · partial extraction" : "Manually uploaded";
+  if (source.acquisition_status === "requires_auth") return "Requires authentication";
+  if (source.acquisition_status === "unavailable") return "Unavailable";
+  if (source.acquisition_status === "failed" || source.extraction_status === "failed") return "Failed";
+  if (source.extraction_status === "partial") return "Downloaded · partial extraction";
+  if (source.acquisition_status === "fetched" && source.extraction_status === "extracted") return "Available and extracted";
+  if (source.acquisition_status === "discovered") return source.source_url ? "Discovered · not acquired" : "Referenced but not acquired";
+  return `${source.acquisition_status.replaceAll("_", " ")} · ${source.extraction_status.replaceAll("_", " ")}`;
+}
+
+function sourceWarnings(source: JobSource) {
+  try { return JSON.parse(source.warnings_json || "[]") as string[]; } catch { return []; }
+}
 
 function RequirementLimitEditor({ limit, onToggle, onChange }: {
   limit: SubmissionLimit | null;
@@ -103,6 +120,11 @@ export default function Home() {
   const [requirementsError, setRequirementsError] = useState("");
   const [isEditingRequirements, setIsEditingRequirements] = useState(false);
   const requirementsRequestId = useRef(0);
+  const [sources, setSources] = useState<JobSource[]>([]);
+  const [sourcesLoadState, setSourcesLoadState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [sourceUploadId, setSourceUploadId] = useState<string | null>(null);
+  const [sourcesError, setSourcesError] = useState("");
+  const sourcesRequestId = useRef(0);
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -174,6 +196,11 @@ export default function Home() {
     setDocuments([]);
     setApplicationRequirements(null);
     setRequirementsEditDraft(null);
+    setSources([]);
+    setSourcesLoadState("idle");
+    setSourcesError("");
+    setSourceUploadId(null);
+    sourcesRequestId.current += 1;
   }
 
   const latestDocuments = useMemo(() => {
@@ -476,6 +503,53 @@ export default function Home() {
     }
   }
 
+  async function loadSources(applicationId: number) {
+    const requestId = ++sourcesRequestId.current;
+    setSources([]);
+    setSourcesError("");
+    setSourceUploadId(null);
+    setSourcesLoadState("loading");
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${applicationId}/sources`);
+      const result = await response.json().catch(() => null) as JobSource[] | { detail?: string } | null;
+      if (requestId !== sourcesRequestId.current) return;
+      if (!response.ok || !Array.isArray(result)) {
+        setSourcesLoadState("error");
+        return setSourcesError(result && !Array.isArray(result) && result.detail ? result.detail : "Could not load application sources.");
+      }
+      setSources(result);
+      setSourcesLoadState("success");
+    } catch {
+      if (requestId !== sourcesRequestId.current) return;
+      setSourcesLoadState("error");
+      setSourcesError("Could not load application sources. Check the connection and try again.");
+    }
+  }
+
+  async function uploadMissingSource(source: JobSource, file: File | undefined) {
+    if (!selectedApplication || !file || sourceUploadId) return;
+    const applicationId = selectedApplication;
+    const requestId = sourcesRequestId.current;
+    setSourceUploadId(source.source_id);
+    setSourcesError("");
+    const body = new FormData();
+    body.append("file", file);
+    body.append("expected_source_type", source.source_type);
+    body.append("target_source_id", source.source_id);
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${applicationId}/sources/upload`, { method: "POST", body });
+      const result = await response.json().catch(() => null) as JobSource[] | { detail?: string } | null;
+      if (requestId !== sourcesRequestId.current) return;
+      if (!response.ok || !Array.isArray(result)) return setSourcesError(result && !Array.isArray(result) && result.detail ? result.detail : "The document could not be uploaded.");
+      setSources(result);
+      setSourcesLoadState("success");
+    } catch {
+      if (requestId === sourcesRequestId.current) setSourcesError("The document could not be uploaded. Check the connection and try again.");
+    } finally {
+      if (requestId === sourcesRequestId.current) setSourceUploadId(null);
+    }
+  }
+
   async function confirmApplicationRequirements() {
     if (!selectedApplication || !applicationRequirements || requirementsSaveState === "saving") return;
     if (requirementsHasUnknown(applicationRequirements) && !window.confirm("Some requirements are still unknown. Edit them if the advertisement provides more detail. Confirm these requirements without changing the unknown values?")) return;
@@ -570,6 +644,7 @@ export default function Home() {
     const [response] = await Promise.all([
       authenticatedFetch(`${api}/applications/${id}/documents`),
       loadApplicationRequirements(id),
+      loadSources(id),
     ]);
     const loaded = response.ok ? await response.json() : [];
     setDocuments(loaded);
@@ -1132,6 +1207,20 @@ export default function Home() {
                     <div className="requirementsActions"><button type="button" onClick={saveApplicationRequirementsCorrections} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Save corrections"}</button><button type="button" className="secondary" onClick={cancelRequirementsEdit} disabled={requirementsSaveState === "saving"}>Cancel</button></div>
                   </div>}
                 </>}
+              </section>
+              <section className="sourcesCard" aria-live="polite">
+                <div className="requirementsHeading"><div><strong>Application Sources</strong><small>Documents found or referenced for this application.</small></div></div>
+                {sourcesLoadState === "loading" && <p className="helper">Loading application sources…</p>}
+                {sourcesLoadState === "error" && <div className="requirementsError" role="alert"><strong>Sources could not be loaded</strong><p>{sourcesError}</p><button type="button" className="secondary" onClick={() => loadSources(selected.id)}>Retry</button></div>}
+                {sourcesLoadState === "success" && <div className="sourceList">{sources.map((source) => {
+                  const warnings = sourceWarnings(source);
+                  const canUpload = ["job_description_attachment", "application_instruction_attachment"].includes(source.source_type) && (["discovered", "unavailable", "requires_auth", "failed"].includes(source.acquisition_status) || source.extraction_status === "failed");
+                  return <article className={`sourceRow ${source.acquisition_status} ${source.extraction_status}`} key={source.source_id}>
+                    <div><strong>{source.title || sourceTypeLabels[source.source_type] || source.label}</strong><small>{sourceTypeLabels[source.source_type] || source.source_type.replaceAll("_", " ")} · {sourceStateLabel(source)}</small>{warnings.map((warning) => <p className="sourceWarning" key={warning}>{warning}</p>)}{source.source_url && <a href={source.source_url} target="_blank" rel="noreferrer">View source link</a>}</div>
+                    {canUpload && <label className="sourceUploadButton">{sourceUploadId === source.source_id ? "Uploading…" : "Upload missing document"}<input type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" disabled={Boolean(sourceUploadId)} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; uploadMissingSource(source, file); }} /></label>}
+                  </article>;
+                })}</div>}
+                {sourcesLoadState === "success" && sourcesError && <p className="requirementsError" role="alert">{sourcesError}</p>}
               </section>
               <details className="jobEditPanel" key={`edit-${selected.id}`}>
                 <summary>Edit saved job details</summary>

@@ -51,6 +51,15 @@
 .requirementsSource details { margin-top: 10px; }
 .requirementsSource pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border-radius: 8px; background: #f7f8f6; color: var(--muted); font: .78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .requirementsActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.sourcesCard { margin: 0 0 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #f8faf8; }
+.sourceList { display: grid; gap: 8px; margin-top: 12px; }
+.sourceRow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.sourceRow > div { display: grid; gap: 3px; min-width: 0; }
+.sourceRow small { overflow-wrap: anywhere; }
+.sourceRow a { color: var(--accent-dark); font-size: .8rem; font-weight: 700; }
+.sourceWarning { margin: 4px 0 0; color: #9f5a00; font-size: .8rem; line-height: 1.4; }
+.sourceUploadButton { flex: none; width: min(100%, 220px); margin: 0; color: var(--accent-dark); font-size: .8rem; }
+.sourceUploadButton input { margin-top: 5px; padding: 7px; font-size: .76rem; }
 .requirementsError { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: #fff0ef; color: #9f241d; font-size: .85rem; }
 .requirementsError p { margin: 5px 0 10px; }
 .requirementsEditor { display: grid; gap: 12px; margin-top: 14px; }
@@ -107,6 +116,8 @@
   .requirementsStatus { align-self: flex-start; }
   .requirementsGrid, .requirementEditGrid, .requirementLimitFields { grid-template-columns: 1fr; }
   .requirementsActions { align-items: stretch; flex-direction: column; }
+  .sourceRow { align-items: stretch; flex-direction: column; }
+  .sourceUploadButton { text-align: center; }
   .selectedActions { width: 100%; }
   .selectedActions button { flex: 1; }
   .templatePicker { align-items: stretch; flex-direction: column; }

@@ -42,7 +42,7 @@ def _fetch(url: str, limit: int, opener_factory=build_opener):
         return bytes(payload), response.headers, response.geturl()
 
 
-def _document_kind(payload: bytes, declared_type: str, filename: str) -> str:
+def validate_document_kind(payload: bytes, declared_type: str, filename: str) -> str:
     declared = declared_type.split(";", 1)[0].strip().lower()
     suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     if payload.startswith(b"%PDF-"):
@@ -65,6 +65,21 @@ def _document_kind(payload: bytes, declared_type: str, filename: str) -> str:
     return actual
 
 
+def process_uploaded_document(filename: str, declared_type: str, payload: bytes) -> dict:
+    kind = validate_document_kind(payload, declared_type, filename)
+    text, status, warnings = extract_document_text(filename, payload, kind)
+    if not text:
+        raise ValueError("No readable text could be extracted from the uploaded document.")
+    return {
+        "filename": filename,
+        "content_type": {"pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "txt": "text/plain"}[kind],
+        "content_sha256": hashlib.sha256(payload).hexdigest(),
+        "extracted_text": text,
+        "extraction_status": status,
+        "warnings_json": json.dumps(warnings),
+    }
+
+
 def acquire_sources(sources: list, opener_factory=build_opener) -> None:
     eligible = [source for source in sources if source.source_url and source.acquisition_status == "discovered"
                 and source.classification_confidence == "high" and source.source_type in ELIGIBLE_TYPES][:MAX_DOWNLOADS]
@@ -81,7 +96,7 @@ def acquire_sources(sources: list, opener_factory=build_opener) -> None:
                 if re.search(r"\b(?:sign in|log in|login|authentication|required account)\b", text):
                     raise ValueError("requires_auth: The attachment URL returned a login page.")
                 raise ValueError("unsupported: The attachment URL returned HTML instead of a document.")
-            kind = _document_kind(payload, declared_type, filename)
+            kind = validate_document_kind(payload, declared_type, filename)
             content_type = {"pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "txt": "text/plain"}[kind]
             digest = hashlib.sha256(payload).hexdigest()
             source.acquisition_status = "fetched"
