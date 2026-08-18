@@ -86,6 +86,32 @@ class JobApplication(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class JobSource(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    schema_version: str = "1.0"
+    source_id: str = Field(index=True, unique=True)
+    application_id: int = Field(foreign_key="jobapplication.id", index=True)
+    user_id: UUID | None = Field(default=None, index=True)
+    source_type: str
+    title: str
+    label: str
+    source_url: str | None = None
+    discovered_from_source_id: str | None = None
+    discovered_from_url: str | None = None
+    content_type: str | None = None
+    filename: str | None = None
+    acquisition_status: str
+    extraction_status: str
+    extracted_text: str = ""
+    content_sha256: str | None = None
+    canonical_url_hash: str | None = None
+    classification_confidence: str
+    classification_reasons_json: str = "[]"
+    warnings_json: str = "[]"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class GeneratedDocument(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: UUID | None = Field(default=None, index=True)

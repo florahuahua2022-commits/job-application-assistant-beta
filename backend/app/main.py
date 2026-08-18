@@ -24,7 +24,8 @@ from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .job_sources import build_job_sources
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
@@ -684,6 +685,9 @@ def create_application(
     application = JobApplication.model_validate(values)
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
+    source_text = "\n".join(filter(None, (application.job_description, application.selection_criteria)))
+    session.add_all([JobSource(application_id=application.id, user_id=user_id, **source) for source in build_job_sources(source_text, application.job_url)])
+    session.commit(); session.refresh(application)
     return application
 
 
@@ -724,6 +728,19 @@ def list_applications(
     user_id: UUID | None = Depends(get_current_user),
 ):
     return session.exec(select_for_user(JobApplication, user_id).order_by(JobApplication.updated_at.desc())).all()
+
+
+@app.get("/applications/{application_id}/sources", response_model=list[JobSource])
+def list_application_sources(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    if not get_for_user(session, JobApplication, application_id, user_id):
+        raise HTTPException(404, "Application not found.")
+    return session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
+    ).all()
 
 
 @app.get("/applications/{application_id}/application-requirements", response_model=ApplicationRequirementsResponse)

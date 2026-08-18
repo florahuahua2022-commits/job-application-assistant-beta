@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sqlmodel import Session, delete, select
 
-from .models import ApplicantProfile, GeneratedDocument, JobApplication, Referee, Resume
+from .models import ApplicantProfile, GeneratedDocument, JobApplication, JobSource, Referee, Resume
 
 
 BACKUP_DIR = Path("data/backups")
@@ -13,6 +13,7 @@ BACKUP_MODELS = {
     "referees": Referee,
     "resumes": Resume,
     "applications": JobApplication,
+    "sources": JobSource,
     "documents": GeneratedDocument,
 }
 
@@ -69,10 +70,10 @@ def read_backup(filename: str) -> tuple[Path, dict]:
 def restore_backup(session: Session, filename: str) -> dict:
     _, payload = read_backup(filename)
     data = payload["data"]
-    for model in (GeneratedDocument, Referee, JobApplication, Resume, ApplicantProfile):
+    for model in (GeneratedDocument, JobSource, Referee, JobApplication, Resume, ApplicantProfile):
         session.exec(delete(model))
     session.commit()
-    for name in ("profiles", "resumes", "applications", "referees", "documents"):
+    for name in ("profiles", "resumes", "applications", "sources", "referees", "documents"):
         model = BACKUP_MODELS[name]
         for record in data.get(name, []):
             session.add(model.model_validate(record))
