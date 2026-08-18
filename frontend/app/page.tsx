@@ -27,7 +27,7 @@ type ResumeContentCheckResult = { ready: boolean; matched_count: number; review_
 type Backup = { filename: string; size: number; created_at: string };
 type Referee = { organisation: string; name: string; position_title: string; phone: string; relationship: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string };
 type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; target_direction?: string; motivation?: string; writing_tone: string; preferences_notes?: string; referees: Referee[]; updated_at: string };
-type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string };
+type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string; discovered_sources: Record<string, unknown>[] };
 type ContactGuess = { full_name: string; phone: string; email: string };
 type SelectionCriteriaAccess = { unlimited: boolean; included_credits: number; referral_credits: number; used_credits: number; remaining_credits: number | null; referral_code: string | null; referral_claimed: boolean };
 
@@ -84,7 +84,7 @@ export default function Home() {
   const [backups, setBackups] = useState<Backup[]>([]);
   const [resumeUploadState, setResumeUploadState] = useState("idle");
   const [jobImportState, setJobImportState] = useState("idle");
-  const [jobFields, setJobFields] = useState<JobFields>({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "" });
+  const [jobFields, setJobFields] = useState<JobFields>({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "", discovered_sources: [] });
   const [draftSaveState, setDraftSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
   const [rawJobAd, setRawJobAd] = useState("");
   const [adParseState, setAdParseState] = useState("idle");
@@ -357,6 +357,7 @@ export default function Home() {
         position_title: result.position_title || current.position_title,
         job_description: result.job_description || current.job_description,
         job_url: result.job_url || current.job_url,
+        discovered_sources: result.discovered_sources || [],
       }));
       setJobImportState("done");
       setNotice(result.source === "structured_job_posting" || result.source === "page_body"
@@ -388,6 +389,7 @@ export default function Home() {
         position_title: result.position_title || current.position_title,
         job_description: result.job_description,
         selection_criteria: result.selection_criteria || current.selection_criteria,
+        discovered_sources: [],
       }));
       setAdWarnings(result.warnings || []);
       setAdParseState("done");
@@ -412,7 +414,7 @@ export default function Home() {
     if (!response.ok) return setNotice("Could not save this job. Check the required fields and try again.");
     const application = await response.json();
     formElement.reset();
-    setJobFields({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "" });
+    setJobFields({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "", discovered_sources: [] });
     setJobImportState("idle");
     setRawJobAd("");
     setAdWarnings([]);
@@ -1058,7 +1060,7 @@ export default function Home() {
           </div>
           <label>Organisation<input name="company" value={jobFields.company} onChange={(event) => setJobFields({ ...jobFields, company: event.target.value })} required /></label>
           <label>Position title<input name="position_title" value={jobFields.position_title} onChange={(event) => setJobFields({ ...jobFields, position_title: event.target.value })} required /></label>
-          <label className="full">Application link<div className="linkImportRow"><input name="job_url" type="url" placeholder="https://example.com/job" value={jobFields.job_url} onChange={(event) => setJobFields({ ...jobFields, job_url: event.target.value })} /><button type="button" onClick={importJobLink} disabled={jobImportState === "importing"}>{jobImportState === "importing" ? "Reading…" : jobImportState === "done" ? "Imported ✓" : "Import Details"}</button></div></label>
+          <label className="full">Application link<div className="linkImportRow"><input name="job_url" type="url" placeholder="https://example.com/job" value={jobFields.job_url} onChange={(event) => setJobFields({ ...jobFields, job_url: event.target.value, discovered_sources: [] })} /><button type="button" onClick={importJobLink} disabled={jobImportState === "importing"}>{jobImportState === "importing" ? "Reading…" : jobImportState === "done" ? "Imported ✓" : "Import Details"}</button></div></label>
           <label className="full">Job description<textarea name="job_description" rows={8} value={jobFields.job_description} onChange={(event) => setJobFields({ ...jobFields, job_description: event.target.value })} required /></label>
           <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" rows={4} value={jobFields.selection_criteria} onChange={(event) => setJobFields({ ...jobFields, selection_criteria: event.target.value })} placeholder="Paste the full criteria, or add a short instruction such as: Focus on stakeholder engagement and government reporting." /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
           <button className="full">Save Job</button>

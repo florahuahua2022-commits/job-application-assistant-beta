@@ -10,6 +10,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.auth import get_current_user
 from app.database import get_session
+from app.ingest import parse_job_page
 from app.job_sources import build_job_sources, validate_job_source
 from app.main import app
 from app.models import JobApplication, JobSource
@@ -80,6 +81,81 @@ class JobSourceTests(unittest.TestCase):
         self.assertEqual(sources[1]["source_type"], "application_instruction_attachment")
         self.assertEqual(sources[1]["acquisition_status"], "discovered")
 
+    def test_html_discovers_direct_relative_and_extensionless_job_descriptions(self):
+        html = """
+        <p>Role documents: <a href="https://jobs.example/JDF.pdf">JDF</a></p>
+        <p><a href="../files/position.pdf" title="Position Description Form">Download</a></p>
+        <p><a href="/document/42">Job Description Form</a></p>
+        """
+        discoveries = parse_job_page(html, "https://jobs.example/vacancies/123")["discovered_sources"]
+        sources = build_job_sources("See the attached JDF.", "https://jobs.example/vacancies/123", discoveries)
+
+        attachments = [source for source in sources if source["source_type"] == "job_description_attachment"]
+        self.assertEqual(len(attachments), 3)
+        self.assertEqual({source["source_url"] for source in attachments}, {
+            "https://jobs.example/JDF.pdf",
+            "https://jobs.example/files/position.pdf",
+            "https://jobs.example/document/42",
+        })
+        self.assertTrue(all(source["acquisition_status"] == "discovered" for source in attachments))
+        self.assertTrue(all(source["extraction_status"] == "not_attempted" for source in attachments))
+        self.assertTrue(all(source["extracted_text"] == "" for source in attachments))
+
+    def test_html_classifies_information_packs_and_mandatory_forms(self):
+        html = """
+        <ul>
+          <li><a href="candidate-pack.pdf">Candidate Information Pack</a></li>
+          <li><a href="forms/integrity.pdf">Integrity and Qualification Declaration</a></li>
+          <li><a href="forms/consent.docx">Consent Form</a></li>
+        </ul>
+        """
+        discoveries = parse_job_page(html, "https://jobs.example/job/1")["discovered_sources"]
+        sources = build_job_sources("Apply online.", "https://jobs.example/job/1", discoveries)
+
+        self.assertEqual([source["source_type"] for source in sources[1:]], [
+            "application_instruction_attachment", "mandatory_form", "mandatory_form",
+        ])
+
+    def test_unrelated_pdf_is_not_classified_as_job_description(self):
+        html = """
+        <p><a href="annual-report.pdf">Annual Report</a></p>
+        <p><a href="benefits.pdf">Employee benefits</a></p>
+        """
+        discoveries = parse_job_page(html, "https://jobs.example/job/1")["discovered_sources"]
+        sources = build_job_sources("Apply online.", "https://jobs.example/job/1", discoveries)
+
+        self.assertFalse(any(source["source_type"] == "job_description_attachment" for source in sources))
+        self.assertFalse(any(source["filename"] == "annual-report.pdf" for source in sources))
+        self.assertEqual(sources[-1]["source_type"], "unknown_attachment")
+
+    def test_duplicate_fragments_are_deduplicated_and_unresolved_jdf_is_reconciled(self):
+        html = """
+        <p>Refer to the attached JDF:
+          <a href="files/JDF.pdf#page=1">JDF</a>
+          <a href="files/JDF.pdf#page=2">Job Description Form</a>
+        </p>
+        """
+        discoveries = parse_job_page(html, "https://jobs.example/job/1")["discovered_sources"]
+        application = self.create_application(
+            "Refer to the attached JDF.",
+            job_url="https://jobs.example/job/1",
+            discovered_sources=discoveries,
+        ).json()
+        sources = self.client.get(f"/applications/{application['id']}/sources").json()
+
+        jdfs = [source for source in sources if source["source_type"] == "job_description_attachment"]
+        self.assertEqual(len(jdfs), 1)
+        self.assertEqual(jdfs[0]["source_url"], "https://jobs.example/job/files/JDF.pdf")
+        self.assertEqual(json.loads(jdfs[0]["warnings_json"]), [])
+
+    def test_attachment_discovery_is_capped_at_ten(self):
+        html = "".join(f'<a href="file-{index}.pdf">Attachment {index}</a>' for index in range(12))
+        discoveries = parse_job_page(html, "https://jobs.example/job/1")["discovered_sources"]
+        sources = build_job_sources("Apply online.", "https://jobs.example/job/1", discoveries)
+
+        self.assertEqual(len(sources), 11)
+        self.assertEqual(len({source["canonical_url_hash"] for source in sources[1:]}), 10)
+
     def test_validator_rejects_invalid_statuses(self):
         source = build_job_sources("Coordinate projects.")[0]
         source["acquisition_status"] = "complete"
@@ -117,7 +193,11 @@ class JobSourceTests(unittest.TestCase):
 
     def test_sqlite_and_supabase_jobsource_columns_match(self):
         sqlite_columns = {column["name"] for column in inspect(self.engine).get_columns("jobsource")}
-        migration = (Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20260818_job_sources.sql").read_text(encoding="utf-8")
+        migrations = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
+        migration = "\n".join(path.read_text(encoding="utf-8") for path in (
+            migrations / "20260818_job_sources.sql",
+            migrations / "20260818_job_source_discovery.sql",
+        ))
 
         self.assertEqual(sqlite_columns, {column.name for column in JobSource.__table__.columns})
         for column in sqlite_columns:

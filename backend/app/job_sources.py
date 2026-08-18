@@ -52,6 +52,68 @@ def _canonical_url_hash(url: str | None) -> str | None:
     return _hash(urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, "")))
 
 
+def _normalise_signal(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _classify_discovery(discovery: dict[str, Any], primary_source_id: str) -> dict[str, Any] | None:
+    url = str(discovery.get("url") or "").strip()
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    label = str(discovery.get("label") or "").strip()
+    title_attr = str(discovery.get("title") or "").strip()
+    filename = str(discovery.get("filename") or parsed.path.rsplit("/", 1)[-1]).strip()
+    context = str(discovery.get("context") or "").strip()[:1000]
+    fields = {
+        "label/title": _normalise_signal(f"{label} {title_attr}"),
+        "URL/filename": _normalise_signal(f"{parsed.path} {filename}"),
+        "context": _normalise_signal(context),
+    }
+    if re.search(r"\b(?:privacy|accessibility|annual report|corporate plan|logo|terms of use|cookie policy)\b", f'{fields["label/title"]} {fields["URL/filename"]}'):
+        return None
+    classifications = (
+        ("job_description_attachment", "Job Description Form (JDF)", r"\b(?:jdf|job description form)\b"),
+        ("job_description_attachment", "Position description", r"\b(?:position description(?: form)?|role description)\b"),
+        ("application_instruction_attachment", "Application information pack", r"\b(?:(?:application|applicant|candidate)(?: information)? pack|application information|applicant information)\b"),
+        ("mandatory_form", "Mandatory application form", r"\b(?:consent form|integrity and qualification|declaration|referee form|eligibility form)\b"),
+        ("other_supporting_attachment", "Supporting attachment", r"\b(?:organisational chart|organizational chart|information sheet|brochure)\b"),
+    )
+    source_type = source_title = matched_field = matched_text = None
+    for candidate_type, candidate_title, pattern in classifications:
+        for field, value in fields.items():
+            match = re.search(pattern, value)
+            if match:
+                source_type, source_title, matched_field, matched_text = candidate_type, candidate_title, field, match.group(0)
+                break
+        if source_type:
+            break
+    extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if not source_type:
+        if extension not in {"pdf", "doc", "docx", "txt"} and not re.search(r"\b(?:attachment|download)\b", fields["context"]):
+            return None
+        source_type, source_title, matched_field, matched_text = "unknown_attachment", label or title_attr or filename or "Attachment", "file/context", extension or "attachment"
+    confidence = "high" if matched_field == "label/title" else "medium" if source_type != "unknown_attachment" else "low"
+    content_type = {"pdf": "application/pdf", "doc": "application/msword", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "txt": "text/plain"}.get(extension)
+    return _source(
+        source_type=source_type,
+        title=source_title,
+        label=label or title_attr or filename,
+        source_url=url,
+        discovered_from_source_id=primary_source_id,
+        discovered_from_url=str(discovery.get("discovered_from_url") or "") or None,
+        content_type=content_type,
+        filename=filename or None,
+        acquisition_status="discovered",
+        extraction_status="not_attempted",
+        extracted_text="",
+        canonical_url_hash=_canonical_url_hash(url),
+        classification_confidence=confidence,
+        classification_reasons_json=json.dumps([f"{matched_field}: {matched_text}"]),
+        discovery_context=context,
+    )
+
+
 def _source(**values: Any) -> dict[str, Any]:
     source = {
         "schema_version": JOB_SOURCE_SCHEMA_VERSION,
@@ -68,6 +130,7 @@ def _source(**values: Any) -> dict[str, Any]:
         "canonical_url_hash": None,
         "classification_reasons_json": "[]",
         "warnings_json": "[]",
+        "discovery_context": "",
         **values,
     }
     errors = validate_job_source(source)
@@ -76,7 +139,7 @@ def _source(**values: Any) -> dict[str, Any]:
     return source
 
 
-def build_job_sources(advertisement_text: str, source_url: str | None = None) -> list[dict[str, Any]]:
+def build_job_sources(advertisement_text: str, source_url: str | None = None, discoveries: list[dict] | None = None) -> list[dict[str, Any]]:
     text = (advertisement_text or "").strip()
     primary = _source(
         source_type="primary_advertisement",
@@ -115,4 +178,17 @@ def build_job_sources(advertisement_text: str, source_url: str | None = None) ->
             classification_reasons_json=json.dumps([f"explicit reference: {match.group(0)}"]),
             warnings_json=json.dumps([f"Referenced {title} has not been acquired. Source text: {excerpt}"]),
         ))
-    return sources
+    discovered: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for discovery in discoveries or []:
+        item = _classify_discovery(discovery, primary["source_id"])
+        if not item or not item["canonical_url_hash"] or item["canonical_url_hash"] in seen_urls:
+            continue
+        seen_urls.add(item["canonical_url_hash"])
+        discovered.append(item)
+    discovered.sort(key=lambda item: item["source_type"] == "unknown_attachment")
+    discovered = discovered[:10]
+    if discovered:
+        keys = {(item["source_type"], item["title"]) for item in discovered}
+        sources = [item for item in sources if item is primary or (item["source_type"], item["title"]) not in keys]
+    return sources + discovered

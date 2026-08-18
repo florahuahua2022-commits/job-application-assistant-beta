@@ -676,6 +676,7 @@ def create_application(
     user_id: UUID | None = Depends(get_current_user),
 ):
     values = payload.model_dump()
+    discoveries = values.pop("discovered_sources")
     values["job_model_json"] = serialise_job_model(
         values["job_description"], values.get("selection_criteria"), values["position_title"], values["company"]
     )
@@ -686,7 +687,7 @@ def create_application(
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
     source_text = "\n".join(filter(None, (application.job_description, application.selection_criteria)))
-    session.add_all([JobSource(application_id=application.id, user_id=user_id, **source) for source in build_job_sources(source_text, application.job_url)])
+    session.add_all([JobSource(application_id=application.id, user_id=user_id, **source) for source in build_job_sources(source_text, application.job_url, discoveries)])
     session.commit(); session.refresh(application)
     return application
 

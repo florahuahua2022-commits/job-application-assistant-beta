@@ -108,6 +108,7 @@ class JobSource(SQLModel, table=True):
     classification_confidence: str
     classification_reasons_json: str = "[]"
     warnings_json: str = "[]"
+    discovery_context: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -215,6 +216,7 @@ class JobApplicationCreate(SQLModel):
     job_description: str
     selection_criteria: str | None = None
     deadline: date | None = None
+    discovered_sources: list[dict] = Field(default_factory=list, max_length=50)
 
 
 class JobApplicationUpdate(SQLModel):
@@ -237,6 +239,7 @@ class JobUrlImportResponse(SQLModel):
     job_description: str = ""
     job_url: str
     source: str
+    discovered_sources: list[dict] = Field(default_factory=list)
 
 
 class JobAdParseRequest(SQLModel):

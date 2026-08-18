@@ -54,6 +54,10 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_plan_json TEXT NOT NULL DEFAULT '{}'"))
                 if "selection_confirmations_json" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_confirmations_json TEXT NOT NULL DEFAULT '[]'"))
+            if "jobsource" in table_names:
+                source_columns = {column["name"] for column in inspector.get_columns("jobsource")}
+                if "discovery_context" not in source_columns:
+                    connection.execute(text("ALTER TABLE jobsource ADD COLUMN discovery_context TEXT NOT NULL DEFAULT ''"))
             if "applicantprofile" in table_names:
                 profile_columns = {column["name"] for column in inspector.get_columns("applicantprofile")}
                 if "target_direction" not in profile_columns:
@@ -125,6 +129,10 @@ def create_db_and_tables() -> None:
                 usage_columns = {column["name"] for column in inspector.get_columns("generationusage")}
                 if "completed_at" not in usage_columns:
                     connection.execute(text("ALTER TABLE generationusage ADD COLUMN completed_at DATETIME"))
+            if "jobsource" in inspector.get_table_names():
+                source_columns = {column["name"] for column in inspector.get_columns("jobsource")}
+                if "discovery_context" not in source_columns:
+                    connection.execute(text("ALTER TABLE jobsource ADD COLUMN discovery_context TEXT DEFAULT ''"))
 
 
 def get_session():

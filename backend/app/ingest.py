@@ -5,7 +5,7 @@ import socket
 from html import unescape
 from html.parser import HTMLParser
 from io import BytesIO
-from urllib.parse import urlparse
+from urllib.parse import unquote, urldefrag, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from docx import Document
@@ -195,42 +195,80 @@ class _JobPageParser(HTMLParser):
         self._in_title = False
         self.title_parts: list[str] = []
         self.body_parts: list[str] = []
+        self.links: list[dict] = []
+        self._active_link: dict | None = None
+        self._contexts: list[tuple[str, list[str]]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
         values = {key.lower(): value or "" for key, value in attrs}
-        if tag.lower() == "meta":
+        if tag == "meta":
             key = (values.get("property") or values.get("name")).lower()
             if key and values.get("content"):
                 self.meta[key] = values["content"]
-        if tag.lower() == "script" and "ld+json" in values.get("type", "").lower():
+        if tag == "script" and "ld+json" in values.get("type", "").lower():
             self._in_json_ld = True
             self._json_parts = []
-        elif tag.lower() in {"script", "style", "noscript", "svg"}:
+        elif tag in {"script", "style", "noscript", "svg"}:
             self._hidden_depth += 1
-        if tag.lower() == "title":
+        if tag == "title":
             self._in_title = True
-        if tag.lower() in {"p", "li", "div", "section", "article", "h1", "h2", "h3", "br"}:
+        if not self._hidden_depth and tag in {"p", "li"}:
+            self._contexts.append((tag, []))
+        if not self._hidden_depth and tag == "a" and values.get("href"):
+            self._active_link = {"href": values["href"], "title": values.get("title", ""), "label_parts": [], "context_parts": self._contexts[-1][1] if self._contexts else []}
+        if tag in {"p", "li", "div", "section", "article", "h1", "h2", "h3", "br"}:
             self.body_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._in_json_ld:
             self._json_parts.append(data)
         elif not self._hidden_depth:
+            if self._contexts:
+                self._contexts[-1][1].append(data)
+            if self._active_link is not None:
+                self._active_link["label_parts"].append(data)
             if self._in_title:
                 self.title_parts.append(data)
             else:
                 self.body_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "script" and self._in_json_ld:
+        tag = tag.lower()
+        if tag == "script" and self._in_json_ld:
             self.json_ld.append("".join(self._json_parts))
             self._in_json_ld = False
-        elif tag.lower() in {"script", "style", "noscript", "svg"} and self._hidden_depth:
+        elif tag in {"script", "style", "noscript", "svg"} and self._hidden_depth:
             self._hidden_depth -= 1
-        if tag.lower() == "title":
+        if tag == "a" and self._active_link is not None:
+            self.links.append(self._active_link)
+            self._active_link = None
+        if tag == "title":
             self._in_title = False
-        if tag.lower() in {"p", "li", "div", "section", "article", "h1", "h2", "h3"}:
+        if tag in {"p", "li"} and self._contexts and self._contexts[-1][0] == tag:
+            self._contexts.pop()
+        if tag in {"p", "li", "div", "section", "article", "h1", "h2", "h3"}:
             self.body_parts.append("\n")
+
+    def discovered_links(self, page_url: str) -> list[dict]:
+        result: list[dict] = []
+        seen: set[str] = set()
+        for link in self.links:
+            resolved, _ = urldefrag(urljoin(page_url, link["href"]))
+            parsed = urlparse(resolved)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc or resolved in seen:
+                continue
+            seen.add(resolved)
+            result.append({
+                "url": resolved,
+                "href": link["href"],
+                "label": re.sub(r"\s+", " ", "".join(link["label_parts"])).strip(),
+                "title": re.sub(r"\s+", " ", link["title"]).strip(),
+                "context": re.sub(r"\s+", " ", "".join(link["context_parts"])).strip()[:1000],
+                "filename": unquote(parsed.path.rsplit("/", 1)[-1]),
+                "discovered_from_url": page_url,
+            })
+        return result
 
 
 def _clean_html(value: str) -> str:
@@ -256,9 +294,10 @@ def _job_postings(value):
                 yield from _job_postings(child)
 
 
-def parse_job_page(html: str, url: str) -> dict[str, str]:
+def parse_job_page(html: str, url: str) -> dict:
     parser = _JobPageParser()
     parser.feed(html)
+    discovered_sources = parser.discovered_links(url)
     for raw in parser.json_ld:
         try:
             candidates = list(_job_postings(json.loads(raw)))
@@ -274,6 +313,7 @@ def parse_job_page(html: str, url: str) -> dict[str, str]:
                 "job_description": _clean_html(str(job.get("description", ""))),
                 "job_url": url,
                 "source": "structured_job_posting",
+                "discovered_sources": discovered_sources,
             }
 
     page_body = _clean_html("".join(parser.body_parts))
@@ -292,6 +332,7 @@ def parse_job_page(html: str, url: str) -> dict[str, str]:
                 "job_description": parsed_body.get("job_description") or _clean_html(description),
                 "job_url": url,
                 "source": "page_body",
+                "discovered_sources": discovered_sources,
             }
     return {
         "company": "",
@@ -299,6 +340,7 @@ def parse_job_page(html: str, url: str) -> dict[str, str]:
         "job_description": _clean_html(description),
         "job_url": url,
         "source": "page_summary",
+        "discovered_sources": discovered_sources,
     }
 
 
@@ -432,7 +474,7 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def import_job_url(url: str) -> dict[str, str]:
+def import_job_url(url: str) -> dict:
     safe_url = _validate_public_url(url)
     request = Request(safe_url, headers={"User-Agent": "Mozilla/5.0 JobApplicationAssistant/1.0"})
     try:
