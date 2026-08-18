@@ -49,7 +49,7 @@ def _number(value: str) -> int:
 
 
 def _sentences(text: str) -> list[str]:
-    return [re.sub(r"\s+", " ", part).strip() for part in re.split(r"(?:\r?\n+|(?<=[.!?])\s+)", text) if part.strip()]
+    return [re.sub(r"\s+", " ", part).strip() for part in re.split(r"(?:\r?\n+|(?<!\d\.)(?<=[.!?])\s+)", text) if part.strip()]
 
 
 def _matches(text: str, pattern: str) -> bool:
@@ -59,17 +59,16 @@ def _matches(text: str, pattern: str) -> bool:
 def _parse_limit(sentence: str) -> dict[str, Any] | None:
     match = re.search(
         r"(?i)\b(max(?:imum)?|no more than|not exceed|up to|min(?:imum)?|at least|exactly|recommended)?\s*"
-        r"(?:of\s+)?(\d[\d,]*)\s*(words?|characters?|chars?|pages?)\b",
+        r"(?:of\s+)?(\d[\d,]*)[-\s]*(words?|characters?|chars?|pages?)\b",
         sentence,
     )
     if match:
         qualifier, value, unit, source = match.group(1) or "exactly", match.group(2), match.group(3), match.group(0)
     else:
-        match = re.search(r"(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*\(\d+\))?\s+(pages?)\b", sentence)
+        match = re.search(r"(?i)\b(max(?:imum)?|no more than|not exceed|up to|min(?:imum)?|at least|exactly|recommended)?\s*(one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*\(\d+\))?[-\s]+(pages?)\b", sentence)
         if not match:
             return None
-        qualifier = "maximum" if _matches(sentence, r"maximum|no more than|not exceed|up to") else "exactly"
-        value, unit, source = match.group(1), match.group(2), match.group(0)
+        qualifier, value, unit, source = match.group(1) or "exactly", match.group(2), match.group(3), match.group(0)
     qualifier = qualifier.lower()
     constraint = "maximum" if qualifier in {"max", "maximum", "no more than", "not exceed", "up to"} else "minimum" if qualifier in {"min", "minimum", "at least"} else "recommended" if qualifier == "recommended" else "exact"
     unit = unit.lower()
@@ -83,6 +82,22 @@ def _parse_limit(sentence: str) -> dict[str, Any] | None:
     }
 
 
+def parse_criteria_references(text: str) -> list[str]:
+    result: list[str] = []
+    pattern = r"(?i)\b(?:selection\s+)?criter(?:ion|ia)\s+((?:\d+\s*(?:(?:,|&|and|to|[-–—])\s*)?)+)"
+    for match in re.finditer(pattern, text):
+        value = match.group(1)
+        for start, end in re.findall(r"(\d+)\s*(?:-|–|—|to)\s*(\d+)", value, re.IGNORECASE):
+            for number in range(int(start), int(end) + 1):
+                if str(number) not in result:
+                    result.append(str(number))
+        ranged = re.sub(r"\d+\s*(?:-|–|—|to)\s*\d+", "", value, flags=re.IGNORECASE)
+        for number in re.findall(r"\d+", ranged):
+            if number not in result:
+                result.append(number)
+    return result
+
+
 def parse_application_requirements(source_text: str) -> dict[str, Any]:
     text = (source_text or "").strip()
     result = empty_application_requirements(text)
@@ -91,12 +106,18 @@ def parse_application_requirements(source_text: str) -> dict[str, Any]:
         return result
     documents = result["documents"]
     relevant: list[str] = []
+    provide_list = False
     for sentence in _sentences(text):
+        if re.fullmatch(r"(?i)(?:please\s+)?provide(?:\s+the\s+following)?\s*:", sentence):
+            provide_list = True
+            continue
+        numbered_material = bool(re.match(r"^\d+[.)]\s+", sentence))
+        effective_sentence = f"Provide {sentence}" if provide_list and numbered_material else sentence
         lowered = sentence.lower()
         resume = bool(re.search(r"\b(?:cv|curriculum vitae|résumé|resume)\b", lowered))
         cover = "cover letter" in lowered or "covering letter" in lowered
         criteria = bool(re.search(r"\b(?:selection criteria|criterion|criteria|requirements?)\b", lowered))
-        submit = bool(re.search(r"\b(?:submit|provide|include|attach|upload|address|respond)\b", lowered))
+        submit = bool(re.search(r"\b(?:submit|provide|include|attach|upload|address|respond)\b", effective_sentence, re.IGNORECASE))
         negative = bool(re.search(r"\b(?:not required|do not (?:submit|provide|include|attach)|no .{0,60}(?:needed|required))\b", lowered))
         optional = "optional" in lowered
         if resume:
@@ -122,25 +143,32 @@ def parse_application_requirements(source_text: str) -> dict[str, Any]:
             documents["selection_criteria"].update(requirement="not_required", format="embedded_in_cover_letter")
             relevant.append(sentence)
         elif criteria and negative:
-            documents["selection_criteria"].update(requirement="not_required", format="not_applicable")
+            if documents["selection_criteria"]["format"] == "embedded_in_cover_letter" and "separate" in lowered:
+                documents["selection_criteria"]["requirement"] = "not_required"
+            else:
+                documents["selection_criteria"].update(requirement="not_required", format="not_applicable")
             relevant.append(sentence)
         elif standalone:
             documents["selection_criteria"].update(requirement="required", format="standalone")
             relevant.append(sentence)
         limit = _parse_limit(sentence)
         if limit:
-            target = "cover_letter" if cover else "selection_criteria" if criteria or limit["scope"] == "per_criterion" else None
+            target = "cover_letter" if cover else "selection_criteria" if criteria or limit["scope"] == "per_criterion" or ("response" in lowered and documents["selection_criteria"]["requirement"] == "required") else None
             if target:
                 documents[target]["limit"] = limit
                 relevant.append(sentence)
                 if limit["unit"] == "characters" and not _matches(sentence, r"(?:including|excluding|with|without)\s+spaces"):
                     result["warnings"].append(f"The {target.replace('_', ' ')} character limit does not specify whether spaces are included.")
+    references = parse_criteria_references(text)
+    documents["selection_criteria"]["criteria_references"] = references
     count = re.search(r"(?i)\b(?:address(?:ing)?|respond(?:ing)? to|response to)\s+(?:the\s+)?(?:following\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*\(\d+\))?\s+(?:selection\s+)?criteria\b", text)
-    if count:
+    if references:
+        documents["selection_criteria"]["criteria_count"] = len(references)
+    elif count:
         documents["selection_criteria"]["criteria_count"] = _number(count.group(1))
     else:
         numbered = re.findall(r"(?m)^\s*(\d+)[.)]\s+.+$", text)
-        if numbered and _matches(text, r"selection criteria|address the following criteria"):
+        if numbered and _matches(text, r"(?im)^\s*selection criteria\s*:?\s*$"):
             documents["selection_criteria"]["criteria_count"] = len(numbered)
     extras = re.findall(r"(?i)(?:submit|attach|provide|include)\s+(?:an?\s+|your\s+)?(portfolio|academic transcript|qualification certificate|referee report|writing sample)", text)
     result["additional_documents"] = list(dict.fromkeys(item.lower() for item in extras))

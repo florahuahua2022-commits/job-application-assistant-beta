@@ -83,7 +83,8 @@ export function formatSubmissionLimit(limit: SubmissionLimit | null): string {
   if (!limit) return "No limit specified";
   const constraint = limit.constraint === "maximum" ? "Maximum" : limit.constraint === "minimum" ? "Minimum" : limit.constraint === "recommended" ? "Recommended" : "Exactly";
   const scope = limit.scope === "per_criterion" ? " per criterion" : limit.scope === "combined_documents" ? " across combined documents" : "";
-  return `${constraint} ${limit.value.toLocaleString()} ${limit.unit}${scope}`;
+  const unit = limit.value === 1 ? { pages: "page", words: "word", characters: "character" }[limit.unit] : limit.unit;
+  return `${constraint} ${limit.value.toLocaleString()} ${unit}${scope}`;
 }
 
 export function requirementsHasUnknown(requirements: ApplicationRequirements): boolean {

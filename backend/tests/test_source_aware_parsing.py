@@ -56,6 +56,22 @@ class SourceAwareParsingTests(unittest.TestCase):
         self.assertEqual([item["source_reference"] for item in model["criteria"]], ["1", "2", "3"])
         self.assertTrue(all(item["source_id"] == "jdf" for item in model["criteria"]))
 
+    def test_transwa_numbered_materials_and_missing_jdf_are_truthful(self):
+        ad = (
+            "Please provide:\n1. A comprehensive CV with two work related referees.\n"
+            "2. A Cover Letter addressing selection criteria 1, 2 and 3 as highlighted in the attached JDF."
+        )
+        requirements, model = build_source_aware_models(application(ad), [
+            source("ad", "primary_advertisement", ad),
+            source("jdf", "job_description_attachment", "", "not_attempted"),
+        ])
+        documents = requirements["documents"]
+        self.assertEqual((documents["resume"]["requirement"], documents["cover_letter"]["requirement"]), ("required", "required"))
+        self.assertEqual(documents["selection_criteria"]["criteria_references"], ["1", "2", "3"])
+        self.assertEqual(requirements["completeness"], "incomplete")
+        self.assertTrue(requirements["warnings"])
+        self.assertFalse(any(item.get("source_id") == "jdf" for item in model["criteria"]))
+
     def test_nonconsecutive_and_range_references_are_exact(self):
         for wording, expected in (("criteria 1, 3 and 5", ["1", "3", "5"]), ("criteria 2-4", ["2", "3", "4"])):
             requirements, model = build_source_aware_models(application(wording), [
@@ -97,6 +113,15 @@ class SourceAwareParsingTests(unittest.TestCase):
         self.assertEqual(requirements["documents"]["cover_letter"]["limit"]["value"], 2)
         self.assertEqual([item["source_reference"] for item in model["criteria"]], ["1", "2", "3"])
         self.assertFalse(any("maximum two page" in item["criteria_text"].lower() for item in model["criteria"]))
+
+    def test_separate_attachment_notice_does_not_override_embedded_format_across_sources(self):
+        ad = "Submit your CV and a maximum two-page cover letter addressing the following three criteria."
+        requirements, _ = build_source_aware_models(application(ad), [
+            source("ad", "primary_advertisement", ad),
+            source("pack", "application_instruction_attachment", "No separate Selection Criteria attachment is required."),
+        ])
+        selection = requirements["documents"]["selection_criteria"]
+        self.assertEqual((selection["requirement"], selection["format"], selection["criteria_count"]), ("not_required", "embedded_in_cover_letter", 3))
 
     def test_mandatory_forms_are_not_semantic_inputs(self):
         ad = "Coordinate projects and prepare reports."
@@ -160,6 +185,14 @@ class SourceAwareIntegrationTests(unittest.TestCase):
         self.assertEqual(requirements["documents"]["selection_criteria"]["criteria_references"], ["1", "2"])
         self.assertEqual([item["source_reference"] for item in model["criteria"]], ["1", "2"])
         self.assertEqual((updated["evidence_matches_json"], updated["selection_plan_json"], updated["selection_confirmations_json"]), ("{}", "{}", "[]"))
+
+    def test_creation_persists_unresolved_attached_jdf_warning(self):
+        created = self.create_application("Address criteria 1, 2 and 3 in the attached JDF.")
+        requirements = self.client.get(f"/applications/{created['id']}/application-requirements").json()["requirements"]
+        self.assertEqual(requirements["review_status"], "needs_confirmation")
+        self.assertEqual(requirements["completeness"], "incomplete")
+        self.assertEqual(requirements["documents"]["selection_criteria"]["criteria_references"], ["1", "2", "3"])
+        self.assertTrue(any("not completely extracted" in warning for warning in requirements["warnings"]))
 
     def test_replacing_source_with_changed_text_rebuilds_and_preserves_source_id(self):
         ad = "Address criterion 1 in the attached JDF."

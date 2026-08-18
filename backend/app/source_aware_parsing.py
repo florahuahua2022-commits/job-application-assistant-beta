@@ -1,6 +1,6 @@
 import re
 
-from .application_requirements import parse_application_requirements
+from .application_requirements import parse_application_requirements, parse_criteria_references
 from .job_model import build_job_model
 
 
@@ -9,22 +9,6 @@ SEMANTIC_TYPES = {"primary_advertisement", "job_description_attachment", "applic
 
 def _value(source, field: str, default=""):
     return getattr(source, field, default) if not isinstance(source, dict) else source.get(field, default)
-
-
-def _references(text: str) -> list[str]:
-    result: list[str] = []
-    pattern = r"(?i)\b(?:selection\s+)?criter(?:ion|ia)\s+((?:\d+\s*(?:(?:,|&|and|to|[-–—])\s*)?)+)"
-    for match in re.finditer(pattern, text):
-        value = match.group(1)
-        for start, end in re.findall(r"(\d+)\s*(?:-|–|—|to)\s*(\d+)", value, re.IGNORECASE):
-            for number in range(int(start), int(end) + 1):
-                if str(number) not in result:
-                    result.append(str(number))
-        ranged = re.sub(r"\d+\s*(?:-|–|—|to)\s*\d+", "", value, flags=re.IGNORECASE)
-        for number in re.findall(r"\d+", ranged):
-            if number not in result:
-                result.append(number)
-    return result
 
 
 def _numbered_criteria(text: str) -> dict[str, str]:
@@ -48,7 +32,8 @@ def _merge_requirements(base: dict, extra: dict) -> None:
         target = base["documents"][name]
         if document["requirement"] != "unknown":
             target["requirement"] = document["requirement"]
-        if document["format"] != "unknown":
+        preserve_embedded = target["format"].startswith("embedded_in_") and document["format"] == "not_applicable" and document["requirement"] == "not_required"
+        if document["format"] != "unknown" and not preserve_embedded:
             target["format"] = document["format"]
         if document.get("limit"):
             target["limit"] = document["limit"]
@@ -74,7 +59,7 @@ def build_source_aware_models(application, sources: list) -> tuple[dict, dict]:
         requirements["source_ids"].append(_value(source, "source_id"))
 
     reference_text = "\n".join([primary_text, *[_value(source, "extracted_text") for source in instruction_sources]])
-    references = _references(reference_text)
+    references = parse_criteria_references(reference_text)
     requirements["documents"]["selection_criteria"]["criteria_references"] = references
     if references:
         requirements["documents"]["selection_criteria"]["criteria_count"] = len(references)

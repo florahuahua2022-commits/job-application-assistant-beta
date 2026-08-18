@@ -712,7 +712,10 @@ def create_application(
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
     source_text = "\n".join(filter(None, (application.job_description, application.selection_criteria)))
-    session.add_all([JobSource(application_id=application.id, user_id=user_id, **source) for source in build_job_sources(source_text, application.job_url, discoveries)])
+    sources = [JobSource(application_id=application.id, user_id=user_id, **source) for source in build_job_sources(source_text, application.job_url, discoveries)]
+    if any(source.source_type in {"job_description_attachment", "application_instruction_attachment"} and source.extraction_status != "extracted" for source in sources):
+        rebuild_source_aware_models(application, sources)
+    session.add_all(sources)
     session.commit(); session.refresh(application)
     return application
 

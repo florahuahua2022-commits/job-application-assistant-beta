@@ -58,6 +58,56 @@ class ApplicationRequirementsParserTests(unittest.TestCase):
         limit = result["documents"]["cover_letter"]["limit"]
         self.assertEqual(limit, {"value": 2, "unit": "pages", "scope": "document", "constraint": "maximum", "source_text": "maximum 2 pages"})
 
+    def test_lgirs_embedded_criteria_and_hyphenated_limit(self):
+        result = parse_application_requirements(
+            "Submit your CV and a maximum two-page cover letter addressing the following three criteria.\n"
+            "No separate Selection Criteria attachment is required."
+        )
+        documents = result["documents"]
+        self.assertEqual(documents["resume"]["requirement"], "required")
+        self.assertEqual((documents["cover_letter"]["requirement"], documents["cover_letter"]["limit"]["value"]), ("required", 2))
+        self.assertEqual((documents["selection_criteria"]["requirement"], documents["selection_criteria"]["format"], documents["selection_criteria"]["criteria_count"]), ("not_required", "embedded_in_cover_letter", 3))
+
+    def test_hyphenated_numeric_and_word_page_limits(self):
+        for wording, value in (("maximum one-page cover letter", 1), ("maximum two-page cover letter", 2), ("maximum 1-page cover letter", 1), ("maximum 2-page cover letter", 2)):
+            with self.subTest(wording=wording):
+                limit = parse_application_requirements(f"Submit a {wording}.")["documents"]["cover_letter"]["limit"]
+                self.assertEqual((limit["value"], limit["unit"], limit["scope"], limit["constraint"]), (value, "pages", "document", "maximum"))
+                self.assertEqual(limit["source_text"], wording.removesuffix(" cover letter"))
+
+    def test_wa_police_standalone_criteria_and_one_page_response(self):
+        result = parse_application_requirements(
+            "Submit a separate Selection Criteria document addressing the following two criteria. Maximum one-page response."
+        )
+        selection = result["documents"]["selection_criteria"]
+        self.assertEqual((selection["requirement"], selection["format"], selection["criteria_count"]), ("required", "standalone", 2))
+        self.assertEqual((selection["limit"]["value"], selection["limit"]["unit"]), (1, "pages"))
+
+    def test_numbered_materials_are_required_but_not_criteria_count(self):
+        result = parse_application_requirements(
+            "Please provide:\n"
+            "1. A comprehensive CV with two work related referees.\n"
+            "2. A Cover Letter addressing selection criteria 1, 2 and 3 as highlighted in the attached JDF."
+        )
+        documents = result["documents"]
+        self.assertEqual((documents["resume"]["requirement"], documents["cover_letter"]["requirement"]), ("required", "required"))
+        self.assertEqual(documents["selection_criteria"]["criteria_references"], ["1", "2", "3"])
+        self.assertEqual(documents["selection_criteria"]["criteria_count"], 3)
+
+    def test_reference_count_uses_exact_nonconsecutive_and_range_values(self):
+        for wording, expected in (("criteria 1, 3 and 5", ["1", "3", "5"]), ("criteria 2-4", ["2", "3", "4"]), ("criterion 4", ["4"])):
+            with self.subTest(wording=wording):
+                selection = parse_application_requirements(f"Address {wording} in the attached JDF.")["documents"]["selection_criteria"]
+                self.assertEqual(selection["criteria_references"], expected)
+                self.assertEqual(selection["criteria_count"], len(expected))
+
+    def test_private_requirements_and_ambiguous_instructions_remain_safe(self):
+        private = parse_application_requirements("The role requires project delivery experience, communication skills and commercial judgement.")
+        ambiguous = parse_application_requirements("Application instructions will be provided later.")
+        self.assertEqual(private["documents"]["selection_criteria"]["requirement"], "unknown")
+        self.assertEqual(ambiguous["review_status"], "needs_confirmation")
+        self.assertTrue(ambiguous["warnings"])
+
 
 class ApplicationRequirementsValidationTests(unittest.TestCase):
     def test_unknown_values_are_valid_and_not_guessed(self):
