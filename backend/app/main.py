@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume
-from .application_requirements import parse_application_requirements
+from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, parse_application_requirements, requirements_source_changed
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -24,7 +24,7 @@ from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
@@ -726,6 +726,58 @@ def list_applications(
     return session.exec(select_for_user(JobApplication, user_id).order_by(JobApplication.updated_at.desc())).all()
 
 
+@app.get("/applications/{application_id}/application-requirements", response_model=ApplicationRequirementsResponse)
+def get_application_requirements(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    return ApplicationRequirementsResponse(
+        application_id=application.id,
+        requirements=load_application_requirements(
+            application.application_requirements_json, application.selection_criteria
+        ),
+    )
+
+
+@app.patch("/applications/{application_id}/application-requirements", response_model=ApplicationRequirementsResponse)
+def update_application_requirements(
+    application_id: int,
+    payload: ApplicationRequirementsUpdate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    current = load_application_requirements(
+        application.application_requirements_json, application.selection_criteria
+    )
+    try:
+        if payload.action == "confirm":
+            if payload.documents is not None or payload.additional_documents is not None:
+                raise ValueError("Confirm does not accept requirement corrections.")
+            updated = confirm_application_requirements(current)
+        else:
+            if payload.documents is None:
+                raise ValueError("Correct requires a complete documents object.")
+            updated = correct_application_requirements(
+                current,
+                payload.documents,
+                payload.additional_documents if payload.additional_documents is not None else current["additional_documents"],
+            )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    application.application_requirements_json = json.dumps(updated, ensure_ascii=False)
+    application.updated_at = datetime.utcnow()
+    session.add(application)
+    session.commit()
+    return ApplicationRequirementsResponse(application_id=application.id, requirements=updated)
+
+
 @app.patch("/applications/{application_id}", response_model=JobApplication)
 def update_application(
     application_id: int,
@@ -737,6 +789,8 @@ def update_application(
     if not application:
         raise HTTPException(404, "Application not found.")
     values = payload.model_dump(exclude_unset=True)
+    old_job_description = application.job_description
+    old_selection_criteria = application.selection_criteria
     for required_field in ("company", "position_title", "job_description"):
         if required_field in values and not str(values[required_field] or "").strip():
             raise HTTPException(400, f"{required_field.replace('_', ' ').title()} cannot be blank.")
@@ -751,6 +805,12 @@ def update_application(
         application.evidence_matches_json = "{}"
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
+    if requirements_source_changed(
+        old_job_description,
+        old_selection_criteria,
+        application.job_description,
+        application.selection_criteria,
+    ):
         application.application_requirements_json = json.dumps(parse_application_requirements(
             "\n".join(filter(None, (application.job_description, application.selection_criteria)))
         ), ensure_ascii=False)

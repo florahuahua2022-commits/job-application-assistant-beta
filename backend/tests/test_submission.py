@@ -11,6 +11,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.database import get_session
 from app.auth import get_current_user
+from app.application_requirements import empty_application_requirements, parse_application_requirements
 from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, enforce_profile_contact, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
 from app import backup
@@ -275,6 +276,192 @@ This role coordinates projects, prepares reports and supports public-sector stak
         self.assertEqual(requirements["documents"]["cover_letter"]["limit"]["unit"], "pages")
         self.assertEqual(requirements["documents"]["selection_criteria"]["criteria_count"], 3)
         self.assertEqual(requirements["review_status"], "needs_confirmation")
+
+    def test_application_requirements_confirm_preserves_parsed_content(self):
+        parsed = parse_application_requirements("Submit your CV and a cover letter with a maximum 2 pages.")
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.application_requirements_json = json.dumps(parsed)
+            session.commit()
+
+        response = self.client.patch(
+            f"/applications/{self.application_id}/application-requirements",
+            json={"action": "confirm"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        confirmed = response.json()["requirements"]
+        self.assertEqual(confirmed["review_status"], "confirmed")
+        for field in ("documents", "additional_documents", "source", "source_text", "source_excerpt", "warnings"):
+            self.assertEqual(confirmed[field], parsed[field])
+
+    def test_application_requirements_correction_is_user_overridden_and_preserves_provenance(self):
+        parsed = parse_application_requirements("Submit your CV. A cover letter is optional.")
+        corrected_documents = json.loads(json.dumps(parsed["documents"]))
+        corrected_documents["cover_letter"].update(requirement="required", format="standalone")
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.application_requirements_json = json.dumps(parsed)
+            session.commit()
+
+        response = self.client.patch(
+            f"/applications/{self.application_id}/application-requirements",
+            json={"action": "correct", "documents": corrected_documents, "additional_documents": ["portfolio"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        corrected = response.json()["requirements"]
+        self.assertEqual(corrected["review_status"], "user_overridden")
+        self.assertEqual(corrected["source"], parsed["source"])
+        self.assertEqual(corrected["source_text"], parsed["source_text"])
+        self.assertEqual(corrected["source_excerpt"], parsed["source_excerpt"])
+        self.assertEqual(corrected["warnings"], parsed["warnings"])
+        self.assertEqual(corrected["additional_documents"], ["portfolio"])
+
+    def test_invalid_application_requirements_correction_is_rejected_without_database_change(self):
+        parsed = parse_application_requirements("Submit your CV and cover letter.")
+        invalid_documents = json.loads(json.dumps(parsed["documents"]))
+        invalid_documents["selection_criteria"].update(requirement="not_required", format="standalone")
+        original = json.dumps(parsed)
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.application_requirements_json = original
+            session.commit()
+
+        response = self.client.patch(
+            f"/applications/{self.application_id}/application-requirements",
+            json={"action": "correct", "documents": invalid_documents},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(JobApplication, self.application_id).application_requirements_json, original)
+
+    def test_frontend_cannot_overwrite_application_requirements_provenance(self):
+        response = self.client.patch(
+            f"/applications/{self.application_id}/application-requirements",
+            json={"action": "confirm", "source": "user_supplied"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_confirmed_requirements_survive_unrelated_and_full_form_unchanged_updates(self):
+        parsed = parse_application_requirements("Coordinate projects.")
+        parsed["review_status"] = "confirmed"
+        stored = json.dumps(parsed)
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.application_requirements_json = stored
+            session.commit()
+
+        unrelated = self.client.patch(
+            f"/applications/{self.application_id}",
+            json={"company": "Renamed Example Agency", "job_url": "https://example.com/new"},
+        )
+        unchanged = self.client.patch(
+            f"/applications/{self.application_id}",
+            json={"job_description": "  Coordinate   projects. \r\n", "selection_criteria": ""},
+        )
+
+        self.assertEqual(unrelated.status_code, 200)
+        self.assertEqual(unchanged.status_code, 200)
+        self.assertEqual(json.loads(unchanged.json()["application_requirements_json"])["review_status"], "confirmed")
+
+    def test_user_overridden_requirements_survive_unrelated_update(self):
+        model = empty_application_requirements("Coordinate projects.")
+        model["review_status"] = "user_overridden"
+        model["documents"]["resume"].update(requirement="optional", format="standalone")
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.application_requirements_json = json.dumps(model)
+            session.commit()
+
+        response = self.client.patch(
+            f"/applications/{self.application_id}",
+            json={"position_title": "Senior Project Officer", "deadline": "2026-12-01"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        retained = json.loads(response.json()["application_requirements_json"])
+        self.assertEqual(retained["review_status"], "user_overridden")
+        self.assertEqual(retained["documents"]["resume"]["requirement"], "optional")
+
+    def test_material_job_description_or_selection_criteria_change_requires_confirmation(self):
+        for changed_payload in (
+            {"job_description": "Coordinate projects and prepare cabinet submissions."},
+            {"selection_criteria": "Submit a separate response to the selection criteria."},
+        ):
+            with self.subTest(changed_payload=changed_payload), Session(self.engine) as session:
+                application = session.get(JobApplication, self.application_id)
+                model = empty_application_requirements("Original source")
+                model["review_status"] = "user_overridden"
+                application.application_requirements_json = json.dumps(model)
+                session.commit()
+
+            response = self.client.patch(f"/applications/{self.application_id}", json=changed_payload)
+
+            self.assertEqual(response.status_code, 200)
+            reparsed = json.loads(response.json()["application_requirements_json"])
+            self.assertEqual(reparsed["review_status"], "needs_confirmation")
+            self.assertEqual(reparsed["source"], "deterministic_parser")
+
+    def test_legacy_requirements_get_and_confirm_preserve_legacy_source(self):
+        response = self.client.get(f"/applications/{self.application_id}/application-requirements")
+        legacy = response.json()["requirements"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(legacy["source"], "legacy_inference")
+        self.assertEqual(legacy["review_status"], "needs_confirmation")
+
+        confirmed_response = self.client.patch(
+            f"/applications/{self.application_id}/application-requirements", json={"action": "confirm"}
+        )
+        confirmed = confirmed_response.json()["requirements"]
+        self.assertEqual(confirmed["source"], "legacy_inference")
+        self.assertEqual(confirmed["review_status"], "confirmed")
+
+    def test_unknown_and_all_limit_units_survive_correction_round_trip(self):
+        for unit, value in (("pages", 2), ("words", 500), ("characters", 3000)):
+            with self.subTest(unit=unit):
+                current = empty_application_requirements("Application instructions unavailable.")
+                documents = json.loads(json.dumps(current["documents"]))
+                documents["cover_letter"]["limit"] = {
+                    "value": value, "unit": unit, "scope": "document",
+                    "constraint": "maximum", "source_text": f"maximum {value} {unit}",
+                }
+                with Session(self.engine) as session:
+                    application = session.get(JobApplication, self.application_id)
+                    application.application_requirements_json = json.dumps(current)
+                    session.commit()
+
+                saved = self.client.patch(
+                    f"/applications/{self.application_id}/application-requirements",
+                    json={"action": "correct", "documents": documents},
+                ).json()["requirements"]
+
+                self.assertEqual(saved["documents"]["resume"]["requirement"], "unknown")
+                self.assertEqual(saved["documents"]["cover_letter"]["limit"]["unit"], unit)
+                loaded = self.client.get(f"/applications/{self.application_id}/application-requirements").json()["requirements"]
+                self.assertEqual(loaded["documents"]["cover_letter"]["limit"], documents["cover_letter"]["limit"])
+
+    def test_application_requirements_endpoints_enforce_ownership(self):
+        owner_id = uuid4()
+        other_user_id = uuid4()
+        with Session(self.engine) as session:
+            owned = JobApplication(
+                user_id=owner_id, company="Private", position_title="Private Role",
+                job_description="Private instructions",
+            )
+            session.add(owned)
+            session.commit()
+            session.refresh(owned)
+            owned_id = owned.id
+        app.dependency_overrides[get_current_user] = lambda: other_user_id
+
+        self.assertEqual(self.client.get(f"/applications/{owned_id}/application-requirements").status_code, 404)
+        self.assertEqual(self.client.patch(
+            f"/applications/{owned_id}/application-requirements", json={"action": "confirm"}
+        ).status_code, 404)
 
     def test_rejects_blank_required_job_details(self):
         response = self.client.patch(

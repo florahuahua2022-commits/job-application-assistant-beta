@@ -1,5 +1,6 @@
 import json
 import re
+from copy import deepcopy
 from typing import Any
 
 
@@ -11,6 +12,11 @@ LIMIT_UNITS = {"words", "characters", "pages"}
 LIMIT_SCOPES = {"document", "per_criterion", "combined_documents"}
 LIMIT_CONSTRAINTS = {"maximum", "minimum", "exact", "recommended"}
 DOCUMENT_TYPES = ("resume", "cover_letter", "selection_criteria")
+DOCUMENT_FORMATS = {
+    "resume": {"standalone", "portal_fields", "not_applicable", "unknown"},
+    "cover_letter": {"standalone", "portal_fields", "not_applicable", "unknown"},
+    "selection_criteria": FORMATS,
+}
 
 
 def _document(requirement: str = "unknown", format: str = "unknown", **extra: Any) -> dict[str, Any]:
@@ -150,18 +156,35 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
         errors.append("Unsupported Application Requirements schema version.")
     if model.get("review_status") not in REVIEW_STATUSES:
         errors.append("Invalid review_status.")
+    for field in ("source", "source_text", "source_excerpt"):
+        if not isinstance(model.get(field), str):
+            errors.append(f"{field} must be a string.")
+    warnings = model.get("warnings")
+    if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
+        errors.append("warnings must be a list of strings.")
+    additional_documents = model.get("additional_documents")
+    if not isinstance(additional_documents, list) or any(not isinstance(item, str) for item in additional_documents):
+        errors.append("additional_documents must be a list of strings.")
     documents = model.get("documents")
     if not isinstance(documents, dict):
         return errors + ["documents must be an object."]
+    unknown_documents = set(documents) - set(DOCUMENT_TYPES)
+    if unknown_documents:
+        errors.append("documents contains unsupported document types.")
     for name in DOCUMENT_TYPES:
         document = documents.get(name)
         if not isinstance(document, dict):
             errors.append(f"Missing {name} requirement.")
             continue
+        allowed_document_fields = {"requirement", "format", "limit"}
+        if name == "selection_criteria":
+            allowed_document_fields.add("criteria_count")
+        if set(document) - allowed_document_fields:
+            errors.append(f"{name} contains unsupported fields.")
         requirement, format_value = document.get("requirement"), document.get("format")
         if requirement not in REQUIREMENTS:
             errors.append(f"Invalid {name} requirement.")
-        if format_value not in FORMATS:
+        if format_value not in DOCUMENT_FORMATS[name]:
             errors.append(f"Invalid {name} format.")
         if requirement == "not_required" and format_value == "standalone":
             errors.append(f"{name} cannot be not_required and standalone.")
@@ -172,6 +195,8 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
             if not isinstance(limit, dict):
                 errors.append(f"Invalid {name} limit.")
             else:
+                if set(limit) - {"value", "unit", "scope", "constraint", "source_text"}:
+                    errors.append(f"{name} limit contains unsupported fields.")
                 value = limit.get("value")
                 if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                     errors.append(f"Invalid {name} limit value.")
@@ -181,6 +206,8 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
                     errors.append(f"Invalid {name} limit scope.")
                 if limit.get("constraint") not in LIMIT_CONSTRAINTS:
                     errors.append(f"Invalid {name} limit constraint.")
+                if not isinstance(limit.get("source_text"), str):
+                    errors.append(f"Invalid {name} limit source_text.")
     selection = documents.get("selection_criteria") or {}
     count = selection.get("criteria_count")
     if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
@@ -189,7 +216,51 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
         cover = documents.get("cover_letter") or {}
         if cover.get("requirement") == "not_required" or cover.get("format") == "not_applicable":
             errors.append("Selection criteria cannot be embedded in a cover letter that is not required.")
+    if selection.get("format") == "embedded_in_resume":
+        resume = documents.get("resume") or {}
+        if resume.get("requirement") == "not_required" or resume.get("format") == "not_applicable":
+            errors.append("Selection criteria cannot be embedded in a resume that is not required.")
     return errors
+
+
+def confirm_application_requirements(model: dict[str, Any]) -> dict[str, Any]:
+    confirmed = deepcopy(model)
+    confirmed["review_status"] = "confirmed"
+    errors = validate_application_requirements(confirmed)
+    if errors:
+        raise ValueError(errors[0])
+    return confirmed
+
+
+def correct_application_requirements(
+    model: dict[str, Any],
+    documents: dict[str, Any],
+    additional_documents: list[str],
+) -> dict[str, Any]:
+    corrected = deepcopy(model)
+    corrected["documents"] = deepcopy(documents)
+    corrected["additional_documents"] = list(additional_documents)
+    corrected["review_status"] = "user_overridden"
+    errors = validate_application_requirements(corrected)
+    if errors:
+        raise ValueError(errors[0])
+    return corrected
+
+
+def normalise_requirements_source(value: str | None) -> str:
+    return re.sub(r"\s+", " ", (value or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
+
+
+def requirements_source_changed(
+    old_job_description: str | None,
+    old_selection_criteria: str | None,
+    new_job_description: str | None,
+    new_selection_criteria: str | None,
+) -> bool:
+    return (
+        normalise_requirements_source(old_job_description) != normalise_requirements_source(new_job_description)
+        or normalise_requirements_source(old_selection_criteria) != normalise_requirements_source(new_selection_criteria)
+    )
 
 
 def legacy_application_requirements(selection_criteria: str | None = None) -> dict[str, Any]:

@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from enum import Enum
+from typing import Literal
 from uuid import UUID, uuid4
+from pydantic import ConfigDict
 from sqlmodel import Field, SQLModel
 
 
@@ -222,6 +224,19 @@ class JobAdParseResponse(SQLModel):
     selection_criteria: str = ""
     application_requirements: dict = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+class ApplicationRequirementsResponse(SQLModel):
+    application_id: int
+    requirements: dict
+
+
+class ApplicationRequirementsUpdate(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["confirm", "correct"]
+    documents: dict | None = None
+    additional_documents: list[str] | None = None
 
 
 class JobApplicationSubmissionUpdate(SQLModel):

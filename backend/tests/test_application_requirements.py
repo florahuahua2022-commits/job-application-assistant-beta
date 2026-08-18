@@ -7,7 +7,9 @@ from app.application_requirements import (
     empty_application_requirements,
     legacy_application_requirements,
     load_application_requirements,
+    normalise_requirements_source,
     parse_application_requirements,
+    requirements_source_changed,
     validate_application_requirements,
 )
 
@@ -87,6 +89,43 @@ class ApplicationRequirementsValidationTests(unittest.TestCase):
         model = empty_application_requirements()
         model["schema_version"] = "99.0"
         self.assertIn("Unsupported Application Requirements schema version.", validate_application_requirements(model))
+
+    def test_rejects_invalid_metadata_lists_sources_and_document_specific_formats(self):
+        cases = []
+        invalid_metadata = empty_application_requirements()
+        invalid_metadata.update(source=None, source_text=[], source_excerpt=1, warnings="warning", additional_documents=[1])
+        cases.append(invalid_metadata)
+        invalid_resume_format = empty_application_requirements()
+        invalid_resume_format["documents"]["resume"]["format"] = "embedded_in_cover_letter"
+        cases.append(invalid_resume_format)
+        invalid_cover_format = empty_application_requirements()
+        invalid_cover_format["documents"]["cover_letter"]["format"] = "embedded_in_resume"
+        cases.append(invalid_cover_format)
+        embedded_without_resume = empty_application_requirements()
+        embedded_without_resume["documents"]["resume"].update(requirement="not_required", format="not_applicable")
+        embedded_without_resume["documents"]["selection_criteria"].update(requirement="not_required", format="embedded_in_resume")
+        cases.append(embedded_without_resume)
+        missing_limit_source = empty_application_requirements()
+        missing_limit_source["documents"]["cover_letter"]["limit"] = {
+            "value": 2, "unit": "pages", "scope": "document", "constraint": "maximum"
+        }
+        cases.append(missing_limit_source)
+        unsupported_nested_fields = empty_application_requirements()
+        unsupported_nested_fields["documents"]["resume"]["source"] = "client supplied"
+        unsupported_nested_fields["documents"]["cover_letter"]["limit"] = {
+            "value": 2, "unit": "pages", "scope": "document", "constraint": "maximum",
+            "source_text": "two pages", "derived_words": 900,
+        }
+        unsupported_nested_fields["documents"]["unknown_document"] = {}
+        cases.append(unsupported_nested_fields)
+        for model in cases:
+            with self.subTest(model=model):
+                self.assertTrue(validate_application_requirements(model))
+
+    def test_material_comparison_ignores_only_whitespace_and_line_endings(self):
+        self.assertEqual(normalise_requirements_source(" A\r\n  B "), "A B")
+        self.assertFalse(requirements_source_changed("A\nB", " Criterion ", " A  B ", "Criterion"))
+        self.assertTrue(requirements_source_changed("A B", None, "A changed B", None))
 
 
 class LegacyApplicationRequirementsTests(unittest.TestCase):
