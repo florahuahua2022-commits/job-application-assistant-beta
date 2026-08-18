@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume
-from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, parse_application_requirements, requirements_source_changed
+from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -30,6 +30,7 @@ from .quality import find_writing_quality_issues
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
 from .selection_logic import build_selection_plan, criteria_requiring_confirmation
 from .source_acquisition import acquire_sources, process_uploaded_document
+from .source_aware_parsing import build_source_aware_models
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -83,6 +84,29 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(model, ensure_ascii=False)
+
+
+def rebuild_source_aware_models(application: JobApplication, sources: list[JobSource]) -> None:
+    requirements, model = build_source_aware_models(application, sources)
+    errors = validate_application_requirements(requirements) + validate_job_model(model)
+    if errors:
+        raise HTTPException(400, errors[0])
+    previous_model = json.loads(application.job_model_json or "{}")
+    application.application_requirements_json = json.dumps(requirements, ensure_ascii=False)
+    application.job_model_json = json.dumps(model, ensure_ascii=False)
+    if previous_model != model:
+        application.evidence_matches_json = "{}"
+        application.selection_plan_json = "{}"
+        application.selection_confirmations_json = "[]"
+    application.updated_at = datetime.utcnow()
+
+
+def semantic_source_state(sources: list[JobSource]) -> tuple:
+    return tuple(sorted(
+        (source.source_id, source.acquisition_status, source.extraction_status, source.content_sha256, source.extracted_text)
+        for source in sources
+        if source.source_type in {"primary_advertisement", "job_description_attachment", "application_instruction_attachment"}
+    ))
 
 
 def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
@@ -751,14 +775,19 @@ def acquire_application_sources(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    if not get_for_user(session, JobApplication, application_id, user_id):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
         raise HTTPException(404, "Application not found.")
     sources = list(session.exec(
         select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
     ).all())
+    previous_source_state = semantic_source_state(sources)
     acquire_sources(sources)
+    if previous_source_state != semantic_source_state(sources):
+        rebuild_source_aware_models(application, sources)
     for source in sources:
         session.add(source)
+    session.add(application)
     session.commit()
     return list(session.exec(
         select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
@@ -783,10 +812,11 @@ async def upload_application_source(
     sources = list(session.exec(
         select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
     ).all())
+    previous_source_state = semantic_source_state(sources)
     target = next((source for source in sources if source.source_id == target_source_id), None) if target_source_id else None
     if target_source_id and not target:
         raise HTTPException(404, "Source not found.")
-    if target and (target.source_type != expected_source_type or (target.acquisition_status not in {"discovered", "unavailable", "requires_auth", "failed"} and target.extraction_status != "failed")):
+    if target and target.source_type != expected_source_type:
         raise HTTPException(400, "The selected source cannot be fulfilled by this upload.")
     payload = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(payload) > MAX_UPLOAD_BYTES:
@@ -796,7 +826,7 @@ async def upload_application_source(
         extracted = process_uploaded_document(filename, file.content_type or "", payload)
     except Exception as error:
         raise HTTPException(400, str(error)) from error
-    duplicate = next((source for source in sources if source.content_sha256 == extracted["content_sha256"] and source.extracted_text), None)
+    duplicate = next((source for source in sources if source is not target and source.content_sha256 == extracted["content_sha256"] and source.extracted_text), None)
     primary = next((source for source in sources if source.source_type == "primary_advertisement"), None)
     if not target:
         target = JobSource(
@@ -821,7 +851,11 @@ async def upload_application_source(
     target.extracted_text = "" if duplicate else extracted["extracted_text"]
     target.warnings_json = json.dumps([f"Duplicate content of source {duplicate.source_id}; extraction was not duplicated."]) if duplicate else extracted["warnings_json"]
     target.updated_at = datetime.utcnow()
-    session.add(target); session.commit()
+    if target not in sources:
+        sources.append(target)
+    if previous_source_state != semantic_source_state(sources):
+        rebuild_source_aware_models(application, sources)
+    session.add(target); session.add(application); session.commit()
     return list(session.exec(
         select_for_user(JobSource, user_id).where(JobSource.application_id == application_id).order_by(JobSource.id)
     ).all())
@@ -1480,8 +1514,15 @@ def generate(
         master_resume.ckb_json = ckb_source_json
         session.add(master_resume)
         session.commit()
-    job_model_json = serialise_job_model(
-        application.job_description, application.selection_criteria, application.position_title, application.company
+    stored_requirements = load_application_requirements(
+        application.application_requirements_json, application.selection_criteria
+    )
+    job_model_json = (
+        application.job_model_json or "{}"
+        if stored_requirements.get("source") == "source_aware_parser"
+        else serialise_job_model(
+            application.job_description, application.selection_criteria, application.position_title, application.company
+        )
     )
     if job_model_json != (application.job_model_json or "{}"):
         application.job_model_json = job_model_json

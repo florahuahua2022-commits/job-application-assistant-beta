@@ -31,11 +31,13 @@ def empty_application_requirements(source_text: str = "", source: str = "determi
         "documents": {
             "resume": _document(),
             "cover_letter": _document(),
-            "selection_criteria": _document(criteria_count=None),
+            "selection_criteria": _document(criteria_count=None, criteria_references=[]),
         },
         "additional_documents": [],
         "source_text": source_text,
         "source_excerpt": "",
+        "source_ids": [],
+        "completeness": "complete",
         "warnings": [],
     }
 
@@ -159,6 +161,11 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
     for field in ("source", "source_text", "source_excerpt"):
         if not isinstance(model.get(field), str):
             errors.append(f"{field} must be a string.")
+    source_ids = model.get("source_ids", [])
+    if not isinstance(source_ids, list) or any(not isinstance(item, str) for item in source_ids):
+        errors.append("source_ids must be a list of strings.")
+    if model.get("completeness", "complete") not in {"complete", "incomplete"}:
+        errors.append("Invalid completeness.")
     warnings = model.get("warnings")
     if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
         errors.append("warnings must be a list of strings.")
@@ -178,7 +185,7 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
             continue
         allowed_document_fields = {"requirement", "format", "limit"}
         if name == "selection_criteria":
-            allowed_document_fields.add("criteria_count")
+            allowed_document_fields.update({"criteria_count", "criteria_references"})
         if set(document) - allowed_document_fields:
             errors.append(f"{name} contains unsupported fields.")
         requirement, format_value = document.get("requirement"), document.get("format")
@@ -212,6 +219,9 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
     count = selection.get("criteria_count")
     if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
         errors.append("criteria_count must be a non-negative integer or null.")
+    references = selection.get("criteria_references", [])
+    if not isinstance(references, list) or any(not isinstance(item, str) for item in references):
+        errors.append("criteria_references must be a list of strings.")
     if selection.get("format") == "embedded_in_cover_letter":
         cover = documents.get("cover_letter") or {}
         if cover.get("requirement") == "not_required" or cover.get("format") == "not_applicable":

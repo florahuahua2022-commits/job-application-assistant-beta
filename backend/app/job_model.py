@@ -25,6 +25,7 @@ def is_selection_instruction(text: str) -> bool:
         )
         or re.search(r"(?i)\b(?:maximum|limit|no more than|not exceed|up to)\b.*\b(?:words?|pages?)\b", cleaned)
         or re.search(r"(?i)^(?:these|the following)\s+(?:criteria|responses?).*\b(?:addressed|answered|pages?|words?)\b", cleaned)
+        or re.search(r"(?i)\bcover(?:ing)? letter\b.{0,100}\b(?:address|respond|criteria)\b", cleaned)
     )
 
 
@@ -184,4 +185,7 @@ def validate_job_model(model: dict[str, Any]) -> list[str]:
             errors.append(f"Criterion {index} has invalid categories.")
         if not str(criterion.get("criteria_text") or "").strip():
             errors.append(f"Criterion {index} has no criteria_text.")
+        for field in ("source_id", "source_section", "source_reference"):
+            if field in criterion and not isinstance(criterion[field], str):
+                errors.append(f"Criterion {index} has invalid {field}.")
     return errors
