@@ -27,6 +27,40 @@
 .confirmCard { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 16px 0; padding: 14px 16px; border: 1px solid #e1b86a; border-radius: 10px; background: #fff8e8; }
 .confirmCard.confirmed { border-color: #80bdab; background: #eaf6f1; }
 .confirmCard p { margin: .45rem 0 0; color: var(--muted); font-size: .87rem; line-height: 1.55; }
+.requirementsCard { margin: 0 0 16px; padding: 16px; border: 1px solid #e1b86a; border-radius: 12px; background: #fffdf7; }
+.requirementsCard.confirmed, .requirementsCard.user_overridden { border-color: #80bdab; background: #f4fbf8; }
+.requirementsHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.requirementsHeading > div { display: grid; gap: 4px; }
+.requirementsStatus { flex: none; padding: 5px 9px; border-radius: 999px; background: #fff0cb; color: #713f00; font-size: .78rem; font-weight: 800; }
+.requirementsCard.confirmed .requirementsStatus, .requirementsCard.user_overridden .requirementsStatus { background: #dcefe8; color: var(--accent-dark); }
+.requirementsStatusHelp { margin: 12px 0; color: var(--muted); font-size: .88rem; }
+.requirementsGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.requirementsGrid article { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.requirementsGrid dl { display: grid; gap: 7px; margin: 10px 0 0; }
+.requirementsGrid dl > div { display: grid; gap: 2px; }
+.requirementsGrid dt { color: var(--muted); font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.requirementsGrid dd { margin: 0; font-size: .88rem; font-weight: 700; overflow-wrap: anywhere; }
+.embeddedRequirementNote, .unknownRequirementNotice, .legacyRequirementNotice, .requirementsWarnings { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid #d29a36; background: #fff8e8; color: #713f00; font-size: .84rem; line-height: 1.5; }
+.embeddedRequirementNote { margin-bottom: 0; }
+.legacyRequirementNotice p, .requirementsWarnings ul { margin: 5px 0 0; }
+.requirementsWarnings ul, .additionalRequirements ul { padding-left: 20px; }
+.additionalRequirements { margin-top: 14px; font-size: .88rem; }
+.requirementsSource { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.requirementsSource > summary, .requirementsSource details > summary { color: var(--accent-dark); font-weight: 700; }
+.requirementsSource blockquote { margin: 10px 0 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); font-size: .86rem; line-height: 1.55; }
+.requirementsSource details { margin-top: 10px; }
+.requirementsSource pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border-radius: 8px; background: #f7f8f6; color: var(--muted); font: .78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.requirementsActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.requirementsError { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: #fff0ef; color: #9f241d; font-size: .85rem; }
+.requirementsError p { margin: 5px 0 10px; }
+.requirementsEditor { display: grid; gap: 12px; margin-top: 14px; }
+.requirementsEditor fieldset { margin: 0; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.requirementsEditor legend { padding: 0 7px; color: var(--accent-dark); font-weight: 800; }
+.requirementsEditor label { margin: 7px 0; }
+.requirementsEditor select, .requirementLimitFields select { display: block; width: 100%; margin-top: 6px; padding: 11px 12px; border: 1px solid #abb7b1; border-radius: 8px; background: #fff; color: var(--ink); font: inherit; font-weight: 400; }
+.requirementEditGrid, .requirementLimitFields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 12px; }
+.requirementCheckbox { display: flex !important; align-items: center; gap: 8px; font-weight: 600; }
+.requirementCheckbox input { width: auto; margin: 0; }
 .jobEditPanel { margin: 0 0 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf8; }
 .jobEditPanel > summary { font-weight: 700; color: var(--accent-dark); }
 .jobEditPanel > form { margin-top: 10px; }
@@ -69,6 +103,10 @@
 @media (max-width: 760px) {
   .uploadBox, .quickStartUpload, .linkImportRow, .contactConfirm { grid-template-columns: 1fr; }
   .confirmCard { align-items: stretch; flex-direction: column; }
+  .requirementsHeading { align-items: stretch; flex-direction: column; }
+  .requirementsStatus { align-self: flex-start; }
+  .requirementsGrid, .requirementEditGrid, .requirementLimitFields { grid-template-columns: 1fr; }
+  .requirementsActions { align-items: stretch; flex-direction: column; }
   .selectedActions { width: 100%; }
   .selectedActions button { flex: 1; }
   .templatePicker { align-items: stretch; flex-direction: column; }

@@ -1,7 +1,13 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, Session } from "@supabase/supabase-js";
+import {
+  ApplicationRequirements, ApplicationRequirementsCorrectionDraft, ApplicationRequirementsResponse,
+  DocumentFormat, LimitConstraint, LimitScope, LimitUnit, RequirementValue, SubmissionLimit,
+  createCorrectionDraft, formatDocumentFormat, formatRequirementLabel, formatSubmissionLimit,
+  getRequirementsStatusLabel, requirementsHasUnknown,
+} from "./applicationRequirements";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -11,7 +17,7 @@ type Experience = { id: string; role_title: string; organization: string; respon
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
-type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string };
+type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
 type ReviewerResult = { status: "pass" | "fail"; results: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; severity?: "critical" | "major" | "advisory"; description: string; recommended_action?: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
@@ -33,6 +39,28 @@ const labels: Record<string, string> = {
 };
 const applicationStatuses = ["draft", "ready_to_apply", "applied"] as const;
 const statusLabels: Record<string, string> = { draft: "Draft", ready_to_apply: "Ready", applied: "Applied" };
+const requirementOptions: RequirementValue[] = ["required", "optional", "not_required", "unknown"];
+const coverFormatOptions: DocumentFormat[] = ["standalone", "portal_fields", "not_applicable", "unknown"];
+const selectionFormatOptions: DocumentFormat[] = ["standalone", "embedded_in_cover_letter", "embedded_in_resume", "portal_fields", "not_applicable", "unknown"];
+const limitUnits: LimitUnit[] = ["words", "characters", "pages"];
+const limitScopes: LimitScope[] = ["document", "per_criterion", "combined_documents"];
+const limitConstraints: LimitConstraint[] = ["maximum", "minimum", "exact", "recommended"];
+
+function RequirementLimitEditor({ limit, onToggle, onChange }: {
+  limit: SubmissionLimit | null;
+  onToggle: (enabled: boolean) => void;
+  onChange: (changes: Partial<SubmissionLimit>) => void;
+}) {
+  return <div className="requirementLimitEditor">
+    <label className="requirementCheckbox"><input type="checkbox" checked={Boolean(limit)} onChange={(event) => onToggle(event.target.checked)} /> Include a submission limit</label>
+    {limit && <div className="requirementLimitFields">
+      <label>Value<input type="number" min="1" value={limit.value} onChange={(event) => onChange({ value: Number(event.target.value) })} /></label>
+      <label>Unit<select value={limit.unit} onChange={(event) => onChange({ unit: event.target.value as LimitUnit })}>{limitUnits.map((unit) => <option key={unit} value={unit}>{unit}</option>)}</select></label>
+      <label>Scope<select value={limit.scope} onChange={(event) => onChange({ scope: event.target.value as LimitScope })}>{limitScopes.map((scope) => <option key={scope} value={scope}>{scope.replaceAll("_", " ")}</option>)}</select></label>
+      <label>Constraint<select value={limit.constraint} onChange={(event) => onChange({ constraint: event.target.value as LimitConstraint })}>{limitConstraints.map((constraint) => <option key={constraint} value={constraint}>{constraint}</option>)}</select></label>
+    </div>}
+  </div>;
+}
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
@@ -68,6 +96,13 @@ export default function Home() {
   const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
   const [referralCode, setReferralCode] = useState("");
   const [exportTemplate, setExportTemplate] = useState<"classic" | "modern" | "traditional">("classic");
+  const [applicationRequirements, setApplicationRequirements] = useState<ApplicationRequirements | null>(null);
+  const [requirementsLoadState, setRequirementsLoadState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [requirementsSaveState, setRequirementsSaveState] = useState<"idle" | "saving" | "error">("idle");
+  const [requirementsEditDraft, setRequirementsEditDraft] = useState<ApplicationRequirementsCorrectionDraft | null>(null);
+  const [requirementsError, setRequirementsError] = useState("");
+  const [isEditingRequirements, setIsEditingRequirements] = useState(false);
+  const requirementsRequestId = useRef(0);
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -137,6 +172,8 @@ export default function Home() {
     setResumes([]);
     setApplications([]);
     setDocuments([]);
+    setApplicationRequirements(null);
+    setRequirementsEditDraft(null);
   }
 
   const latestDocuments = useMemo(() => {
@@ -407,7 +444,120 @@ export default function Home() {
     setApplications((current) => current.map((application) => application.id === result.id ? result : application));
     setConfirmedApplication(null);
     setQualityResult(null);
+    await loadApplicationRequirements(selectedApplication);
     setNotice("Saved job details updated. Confirm them again before generating or applying.");
+  }
+
+  async function loadApplicationRequirements(applicationId: number) {
+    const requestId = ++requirementsRequestId.current;
+    setApplicationRequirements(null);
+    setRequirementsEditDraft(null);
+    setIsEditingRequirements(false);
+    setRequirementsError("");
+    setRequirementsSaveState("idle");
+    setRequirementsLoadState("loading");
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${applicationId}/application-requirements`);
+      const result = await response.json().catch(() => null) as ApplicationRequirementsResponse | { detail?: string } | null;
+      if (requestId !== requirementsRequestId.current) return;
+      if (!response.ok || !result || !("requirements" in result)) {
+        setRequirementsLoadState("error");
+        setRequirementsError(result && "detail" in result && result.detail ? result.detail : "Could not load the application requirements.");
+        return;
+      }
+      setApplicationRequirements(result.requirements);
+      setRequirementsLoadState("success");
+    } catch {
+      if (requestId !== requirementsRequestId.current) return;
+      setRequirementsLoadState("error");
+      setRequirementsError("Could not load the application requirements. Check the connection and try again.");
+    }
+  }
+
+  async function confirmApplicationRequirements() {
+    if (!selectedApplication || !applicationRequirements || requirementsSaveState === "saving") return;
+    if (requirementsHasUnknown(applicationRequirements) && !window.confirm("Some requirements are still unknown. Edit them if the advertisement provides more detail. Confirm these requirements without changing the unknown values?")) return;
+    setRequirementsSaveState("saving");
+    setRequirementsError("");
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/application-requirements`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "confirm" }),
+      });
+      const result = await response.json().catch(() => null) as ApplicationRequirementsResponse | { detail?: string } | null;
+      if (!response.ok || !result || !("requirements" in result)) {
+        setRequirementsSaveState("error");
+        return setRequirementsError(result && "detail" in result && result.detail ? result.detail : "Could not confirm the application requirements.");
+      }
+      setApplicationRequirements(result.requirements);
+      setRequirementsEditDraft(null);
+      setIsEditingRequirements(false);
+      setRequirementsSaveState("idle");
+    } catch {
+      setRequirementsSaveState("error");
+      setRequirementsError("Could not confirm the application requirements. Check the connection and try again.");
+    }
+  }
+
+  function beginRequirementsEdit() {
+    if (!applicationRequirements) return;
+    setRequirementsEditDraft(createCorrectionDraft(applicationRequirements));
+    setRequirementsError("");
+    setRequirementsSaveState("idle");
+    setIsEditingRequirements(true);
+  }
+
+  function cancelRequirementsEdit() {
+    setRequirementsEditDraft(null);
+    setRequirementsError("");
+    setRequirementsSaveState("idle");
+    setIsEditingRequirements(false);
+  }
+
+  function updateRequirementDocument(documentType: "resume" | "cover_letter" | "selection_criteria", changes: Partial<ApplicationRequirementsCorrectionDraft["documents"]["resume"]>) {
+    setRequirementsEditDraft((current) => current ? {
+      ...current,
+      documents: { ...current.documents, [documentType]: { ...current.documents[documentType], ...changes } },
+    } : current);
+  }
+
+  function toggleRequirementLimit(documentType: "cover_letter" | "selection_criteria", enabled: boolean) {
+    const limit: SubmissionLimit | null = enabled
+      ? { value: 1, unit: "pages", scope: "document", constraint: "maximum", source_text: "User-corrected limit" }
+      : null;
+    updateRequirementDocument(documentType, { limit });
+  }
+
+  function updateRequirementLimit(documentType: "cover_letter" | "selection_criteria", changes: Partial<SubmissionLimit>) {
+    const currentLimit = requirementsEditDraft?.documents[documentType].limit;
+    if (!currentLimit) return;
+    updateRequirementDocument(documentType, { limit: { ...currentLimit, ...changes, source_text: "User-corrected limit" } });
+  }
+
+  async function saveApplicationRequirementsCorrections() {
+    if (!selectedApplication || !requirementsEditDraft || requirementsSaveState === "saving") return;
+    setRequirementsSaveState("saving");
+    setRequirementsError("");
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/application-requirements`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "correct", ...requirementsEditDraft }),
+      });
+      const result = await response.json().catch(() => null) as ApplicationRequirementsResponse | { detail?: string } | null;
+      if (!response.ok || !result || !("requirements" in result)) {
+        setRequirementsSaveState("error");
+        return setRequirementsError(result && "detail" in result && result.detail ? result.detail : "Could not save the requirement corrections.");
+      }
+      setApplicationRequirements(result.requirements);
+      setRequirementsEditDraft(null);
+      setIsEditingRequirements(false);
+      setRequirementsSaveState("idle");
+    } catch {
+      setRequirementsSaveState("error");
+      setRequirementsError("Could not save the requirement corrections. Check the connection and try again.");
+    }
   }
 
   async function openApplication(id: number) {
@@ -415,7 +565,10 @@ export default function Home() {
     setPackNotice("");
     setConfirmedApplication(null);
     setQualityResult(null);
-    const response = await authenticatedFetch(`${api}/applications/${id}/documents`);
+    const [response] = await Promise.all([
+      authenticatedFetch(`${api}/applications/${id}/documents`),
+      loadApplicationRequirements(id),
+    ]);
     const loaded = response.ok ? await response.json() : [];
     setDocuments(loaded);
     const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
@@ -942,6 +1095,42 @@ export default function Home() {
                 <div><strong>Confirm before generating</strong><p>Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}</p></div>
                 <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={() => setConfirmedApplication(selected.id)}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
               </div>
+              <section className={`requirementsCard ${applicationRequirements?.review_status || "loading"}`} aria-live="polite">
+                <div className="requirementsHeading">
+                  <div><strong>Application Requirements</strong><small>Review what the employer asks you to submit. This does not change the current generation workflow.</small></div>
+                  {applicationRequirements && <span className="requirementsStatus">{getRequirementsStatusLabel(applicationRequirements.review_status)}</span>}
+                </div>
+                {requirementsLoadState === "loading" && <p className="helper">Loading application requirements…</p>}
+                {requirementsLoadState === "error" && <div className="requirementsError" role="alert"><strong>Requirements could not be loaded</strong><p>{requirementsError}</p><button type="button" className="secondary" onClick={() => loadApplicationRequirements(selected.id)}>Retry</button></div>}
+                {requirementsLoadState === "success" && applicationRequirements && <>
+                  {applicationRequirements.source === "legacy_inference" && <div className="legacyRequirementNotice"><strong>Legacy estimate</strong><p>These requirements were inferred from the previous application-pack behaviour. Check them against the job advertisement.</p></div>}
+                  <p className="requirementsStatusHelp">{applicationRequirements.review_status === "needs_confirmation"
+                    ? "Check these requirements against the job advertisement before relying on them."
+                    : applicationRequirements.review_status === "confirmed"
+                      ? "You confirmed the parsed requirements."
+                      : "Your corrections are saved."}</p>
+                  {requirementsHasUnknown(applicationRequirements) && <p className="unknownRequirementNotice"><strong>Unable to determine automatically.</strong> Some requirements are still Unknown. Edit them if the advertisement provides more detail.</p>}
+                  {!isEditingRequirements ? <>
+                    <div className="requirementsGrid">
+                      <article><strong>Resume</strong><dl><div><dt>Requirement</dt><dd>{formatRequirementLabel(applicationRequirements.documents.resume.requirement)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(applicationRequirements.documents.resume.limit)}</dd></div></dl></article>
+                      <article><strong>Cover Letter</strong><dl><div><dt>Requirement</dt><dd>{formatRequirementLabel(applicationRequirements.documents.cover_letter.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(applicationRequirements.documents.cover_letter.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(applicationRequirements.documents.cover_letter.limit)}</dd></div></dl></article>
+                      <article><strong>Selection Criteria</strong><dl><div><dt>Submission requirement</dt><dd>{formatRequirementLabel(applicationRequirements.documents.selection_criteria.requirement)}</dd></div><div><dt>Response format</dt><dd>{formatDocumentFormat(applicationRequirements.documents.selection_criteria.format)}</dd></div><div><dt>Criteria count</dt><dd>{applicationRequirements.documents.selection_criteria.criteria_count ?? "Unknown"}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(applicationRequirements.documents.selection_criteria.limit)}</dd></div></dl>{applicationRequirements.documents.selection_criteria.requirement === "not_required" && applicationRequirements.documents.selection_criteria.format === "embedded_in_cover_letter" && <p className="embeddedRequirementNote">No separate Selection Criteria attachment is required, but the criteria need to be addressed in the Cover Letter.</p>}</article>
+                    </div>
+                    {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
+                    {applicationRequirements.warnings.length > 0 && <div className="requirementsWarnings"><strong>Check these parser warnings</strong><ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
+                    <details className="requirementsSource"><summary>Why this was detected</summary>{applicationRequirements.source_excerpt ? <blockquote>{applicationRequirements.source_excerpt}</blockquote> : applicationRequirements.source === "legacy_inference" ? <p>No source excerpt is available for this legacy application.</p> : <p>No source excerpt was identified.</p>}{applicationRequirements.source_text && <details><summary>Show full source</summary><pre>{applicationRequirements.source_text}</pre></details>}</details>
+                    {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
+                    <div className="requirementsActions"><button type="button" onClick={confirmApplicationRequirements} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Confirm requirements"}</button><button type="button" className="secondary" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Edit / Correct</button></div>
+                  </> : requirementsEditDraft && <div className="requirementsEditor">
+                    <fieldset><legend>Resume</legend><label>Requirement<select value={requirementsEditDraft.documents.resume.requirement} onChange={(event) => updateRequirementDocument("resume", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label></fieldset>
+                    <fieldset><legend>Cover Letter</legend><div className="requirementEditGrid"><label>Requirement<select value={requirementsEditDraft.documents.cover_letter.requirement} onChange={(event) => updateRequirementDocument("cover_letter", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Format<select value={requirementsEditDraft.documents.cover_letter.format} onChange={(event) => updateRequirementDocument("cover_letter", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></div><RequirementLimitEditor limit={requirementsEditDraft.documents.cover_letter.limit} onToggle={(enabled) => toggleRequirementLimit("cover_letter", enabled)} onChange={(changes) => updateRequirementLimit("cover_letter", changes)} /></fieldset>
+                    <fieldset><legend>Selection Criteria</legend><div className="requirementEditGrid"><label>Submission requirement<select value={requirementsEditDraft.documents.selection_criteria.requirement} onChange={(event) => updateRequirementDocument("selection_criteria", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Response format<select value={requirementsEditDraft.documents.selection_criteria.format} onChange={(event) => updateRequirementDocument("selection_criteria", { format: event.target.value as DocumentFormat })}>{selectionFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><label>Criteria count <em>leave blank if unknown</em><input type="number" min="0" value={requirementsEditDraft.documents.selection_criteria.criteria_count ?? ""} onChange={(event) => updateRequirementDocument("selection_criteria", { criteria_count: event.target.value === "" ? null : Number(event.target.value) })} /></label></div><RequirementLimitEditor limit={requirementsEditDraft.documents.selection_criteria.limit} onToggle={(enabled) => toggleRequirementLimit("selection_criteria", enabled)} onChange={(changes) => updateRequirementLimit("selection_criteria", changes)} /></fieldset>
+                    {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><p className="helper">Shown for reference in this first editor version.</p><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
+                    {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
+                    <div className="requirementsActions"><button type="button" onClick={saveApplicationRequirementsCorrections} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Save corrections"}</button><button type="button" className="secondary" onClick={cancelRequirementsEdit} disabled={requirementsSaveState === "saving"}>Cancel</button></div>
+                  </div>}
+                </>}
+              </section>
               <details className="jobEditPanel" key={`edit-${selected.id}`}>
                 <summary>Edit saved job details</summary>
                 <form onSubmit={updateSavedJob} className="compactForm">
