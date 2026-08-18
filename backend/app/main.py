@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume
+from .application_requirements import parse_application_requirements
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -677,6 +678,9 @@ def create_application(
     values["job_model_json"] = serialise_job_model(
         values["job_description"], values.get("selection_criteria"), values["position_title"], values["company"]
     )
+    values["application_requirements_json"] = json.dumps(parse_application_requirements(
+        "\n".join(filter(None, (values["job_description"], values.get("selection_criteria"))))
+    ), ensure_ascii=False)
     application = JobApplication.model_validate(values)
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
@@ -707,7 +711,9 @@ def parse_application_ad(
 ):
     previous_companies = [item.company for item in session.exec(select_for_user(JobApplication, user_id)).all()]
     try:
-        return JobAdParseResponse.model_validate(parse_job_ad_text(payload.raw_text, previous_companies))
+        parsed = parse_job_ad_text(payload.raw_text, previous_companies)
+        parsed["application_requirements"] = parse_application_requirements(payload.raw_text)
+        return JobAdParseResponse.model_validate(parsed)
     except ValueError as error:
         raise HTTPException(400, str(error))
 
@@ -745,6 +751,9 @@ def update_application(
         application.evidence_matches_json = "{}"
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
+        application.application_requirements_json = json.dumps(parse_application_requirements(
+            "\n".join(filter(None, (application.job_description, application.selection_criteria)))
+        ), ensure_ascii=False)
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()

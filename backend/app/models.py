@@ -72,6 +72,7 @@ class JobApplication(SQLModel, table=True):
     job_description: str
     selection_criteria: str | None = None
     job_model_json: str = "{}"
+    application_requirements_json: str = "{}"
     evidence_matches_json: str = "{}"
     selection_plan_json: str = "{}"
     selection_confirmations_json: str = "[]"
@@ -219,6 +220,7 @@ class JobAdParseResponse(SQLModel):
     position_title: str = ""
     job_description: str
     selection_criteria: str = ""
+    application_requirements: dict = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
 

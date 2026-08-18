@@ -1,0 +1,37 @@
+[
+  {
+    "id": "standalone_selection_criteria",
+    "text": "How to apply\nSubmit your CV. Submit a separate Selection Criteria response addressing the following two criteria, maximum 1 page.\n1. Demonstrated integrity.\n2. Effective communication.",
+    "expected": {"resume": "required", "cover_letter": "unknown", "selection_requirement": "required", "selection_format": "standalone", "criteria_count": 2, "limit_unit": "pages", "limit_scope": "document", "limit_value": 1}
+  },
+  {
+    "id": "embedded_selection_criteria",
+    "text": "Submit your CV and a cover letter addressing the following three criteria, maximum two pages.\n1. Project delivery.\n2. Stakeholder engagement.\n3. Written communication.",
+    "expected": {"resume": "required", "cover_letter": "required", "selection_requirement": "not_required", "selection_format": "embedded_in_cover_letter", "criteria_count": 3, "cover_limit_unit": "pages", "cover_limit_value": 2}
+  },
+  {
+    "id": "criteria_without_response_document",
+    "text": "Submit your CV and cover letter. The role has the following selection criteria. No separate response to the criteria is required.\n1. Communication.\n2. Planning.",
+    "expected": {"resume": "required", "cover_letter": "required", "selection_requirement": "not_required", "selection_format": "not_applicable"}
+  },
+  {
+    "id": "ambiguous",
+    "text": "Applications are invited for this role. Read the position description carefully before applying.",
+    "expected": {"resume": "unknown", "cover_letter": "unknown", "selection_requirement": "unknown", "warning": true}
+  },
+  {
+    "id": "character_limit",
+    "text": "Submit a cover letter with a maximum 2000 characters.",
+    "expected": {"cover_letter": "required", "cover_limit_unit": "characters", "cover_limit_value": 2000, "warning": true}
+  },
+  {
+    "id": "per_criterion_words",
+    "text": "Submit a separate response to the selection criteria, maximum 300 words per criterion.",
+    "expected": {"selection_requirement": "required", "selection_format": "standalone", "limit_unit": "words", "limit_scope": "per_criterion", "limit_value": 300}
+  },
+  {
+    "id": "document_words",
+    "text": "Provide a Selection Criteria statement with a maximum 900 words in total.",
+    "expected": {"selection_requirement": "required", "selection_format": "standalone", "limit_unit": "words", "limit_scope": "document", "limit_value": 900}
+  }
+]

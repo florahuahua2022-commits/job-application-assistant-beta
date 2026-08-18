@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -242,6 +243,38 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(payload["company"], "Metrowest")
         self.assertEqual(payload["job_url"], "https://example.com/job/123")
         self.assertIn("purchase orders", payload["job_description"])
+
+    def test_created_application_persists_unconfirmed_application_requirements(self):
+        response = self.client.post("/applications", json={
+            "company": "Example Department",
+            "position_title": "Policy Officer",
+            "job_description": "Submit your CV and a cover letter addressing the following three criteria, maximum two pages.",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        requirements = json.loads(response.json()["application_requirements_json"])
+        self.assertEqual(requirements["review_status"], "needs_confirmation")
+        self.assertEqual(requirements["source"], "deterministic_parser")
+        self.assertEqual(requirements["documents"]["selection_criteria"]["format"], "embedded_in_cover_letter")
+
+    def test_parse_ad_response_serialises_application_requirements_without_routing(self):
+        raw_text = """Position title: Project Officer
+Organisation: Example Department
+How to apply
+Submit your CV and a cover letter addressing the following three criteria, maximum two pages.
+1. Project delivery.
+2. Stakeholder engagement.
+3. Written communication.
+This role coordinates projects, prepares reports and supports public-sector stakeholders.
+"""
+
+        response = self.client.post("/applications/parse-ad", json={"raw_text": raw_text})
+
+        self.assertEqual(response.status_code, 200)
+        requirements = response.json()["application_requirements"]
+        self.assertEqual(requirements["documents"]["cover_letter"]["limit"]["unit"], "pages")
+        self.assertEqual(requirements["documents"]["selection_criteria"]["criteria_count"], 3)
+        self.assertEqual(requirements["review_status"], "needs_confirmation")
 
     def test_rejects_blank_required_job_details(self):
         response = self.client.patch(
