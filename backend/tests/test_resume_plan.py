@@ -2,7 +2,6 @@ import json
 import unittest
 
 from app.ckb import build_career_knowledge_base
-from app.ingest import extract_resume_experiences
 from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 
 
@@ -51,26 +50,96 @@ class ResumeCurationPlanTests(unittest.TestCase):
         self.assertIn("missing_role_period", [item["code"] for item in misplaced["issues"]])
         self.assertIn("role_order_mismatch", [item["code"] for item in reversed_roles["issues"]])
 
-    def test_bennco_style_dates_survive_extraction_ckb_and_plan(self):
+    def test_bennco_five_role_plan_validates_identity_dates_and_chronology(self):
         roles = [
-            ("Finance Administration Officer", "Department of Communities", "Feb 2026 – Present"),
-            ("Executive Assistant", "Avaintec", "Nov 2017 – Jan 2019"),
-            ("Project Administration Officer", "China Communications Construction Company – Kenya Branch", "Jan 2016 – Aug 2017"),
+            ("Finance Administration Officer", "Department of Communities – Disability Services", "Feb 2026 – Present"),
+            ("Executive Assistant to Board Member", "Avaintec", "Nov 2017 – Jan 2019"),
+            ("Project Administration Officer", "CCCC Kenya", "Jan 2016 – Aug 2017"),
             ("Project Administration Officer", "Chevron CDB Project", "Aug 2012 – Dec 2015"),
             ("Project Assistant", "Pratt & Whitney", "Oct 2007 – Aug 2012"),
         ]
-        source = "Work Experience\n" + "\n".join(
-            f"{role}\n{organisation}\n{period}\nProvided grounded project and administrative support across business operations."
-            for role, organisation, period in roles
-        )
-        extracted = extract_resume_experiences(source)
-        ckb = build_career_knowledge_base(source, json.dumps(extracted))
+        ckb = [
+            evidence(
+                f"BENNCO{index}", f"Work Experience > {organisation} > {role}",
+                f"Provided distinct grounded support for employment role {index}.",
+                period={"start": period.split(" – ")[0], "end": period.split(" – ")[1]},
+            )
+            for index, (role, organisation, period) in enumerate(roles)
+        ]
         matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [item["evidence_id"] for item in ckb], "match_type": "direct", "coverage": "strong"}]}
         plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb)
 
         self.assertEqual([item["time_period"]["end"] for item in ckb], ["Present", "Jan 2019", "Aug 2017", "Dec 2015", "Aug 2012"])
         self.assertEqual([role["display_period"] for role in plan["roles"]], [period.replace("–", "-") for _, _, period in roles])
         self.assertEqual([role["chronology_order"] for role in plan["roles"]], list(range(5)))
+        self.assertEqual(
+            [(role["employer_marker"], role["role_marker"]) for role in plan["roles"]],
+            [(organisation, role) for role, organisation, _ in roles],
+        )
+        generated = """## Professional Summary
+Grounded support.
+## Key Skills
+Administration
+## Work Experience
+### Department of Communities – Disability Services | Finance Administration Officer
+Feb 2026 – Present
+**Executive Assistant to Board Member**
+**Avaintec**
+Nov 2017 – Jan 2019
+- Grounded executive support.
+CCCC Kenya — Project Administration Officer
+Jan 2016 - Aug 2017
+Project Administration Officer | Chevron CDB Project
+Aug 2012 — Dec 2015
+Pratt & Whitney
+Project Assistant
+Oct 2007 - Aug 2012
+"""
+        self.assertTrue(validate_resume_content(generated, plan, [item["evidence_id"] for item in ckb])["valid"])
+
+    def test_structured_role_headers_accept_layout_variants_without_fuzzy_titles(self):
+        role = {
+            "employer_marker": "Avaintec", "role_marker": "Executive Assistant to Board Member",
+            "include_role_header": True, "display_period": "Nov 2017 - Jan 2019",
+        }
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [role]}
+        valid_headers = [
+            "Avaintec — Executive Assistant to Board Member",
+            "Executive Assistant to Board Member | Avaintec",
+            "Avaintec\nExecutive Assistant to Board Member",
+            "**Executive Assistant to Board Member**\n**Avaintec**",
+            "### Avaintec - Executive Assistant to Board Member",
+        ]
+        for header in valid_headers:
+            with self.subTest(header=header):
+                self.assertTrue(validate_resume_content(f"{header}\nNov 2017 – Jan 2019", plan, [])["valid"])
+        changed = validate_resume_content("Avaintec\nExecutive Assistant – Board Member\nNov 2017 – Jan 2019", plan, [])
+        self.assertIn("missing_role_header", [item["code"] for item in changed["issues"]])
+
+    def test_duplicate_titles_are_bound_to_employer_date_and_chronology(self):
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [
+            {"employer_marker": "CCCC Kenya", "role_marker": "Project Administration Officer", "include_role_header": True, "display_period": "Jan 2016 - Aug 2017"},
+            {"employer_marker": "Chevron CDB Project", "role_marker": "Project Administration Officer", "include_role_header": True, "display_period": "Aug 2012 - Dec 2015"},
+        ]}
+        correct = "CCCC Kenya\nProject Administration Officer\nJan 2016 – Aug 2017\nChevron CDB Project\nProject Administration Officer\nAug 2012 – Dec 2015"
+        wrong_date = "CCCC Kenya\nProject Administration Officer\nAug 2012 – Dec 2015\nChevron CDB Project\nProject Administration Officer\nJan 2016 – Aug 2017"
+        reversed_roles = "Chevron CDB Project\nProject Administration Officer\nAug 2012 – Dec 2015\nCCCC Kenya\nProject Administration Officer\nJan 2016 – Aug 2017"
+        missing_employer = "Project Administration Officer\nJan 2016 – Aug 2017\nChevron CDB Project\nProject Administration Officer\nAug 2012 – Dec 2015"
+
+        self.assertTrue(validate_resume_content(correct, plan, [])["valid"])
+        self.assertIn("missing_role_period", [item["code"] for item in validate_resume_content(wrong_date, plan, [])["issues"]])
+        self.assertIn("role_order_mismatch", [item["code"] for item in validate_resume_content(reversed_roles, plan, [])["issues"]])
+        self.assertIn("missing_role_header", [item["code"] for item in validate_resume_content(missing_employer, plan, [])["issues"]])
+
+    def test_omitted_or_ambiguous_structured_role_is_rejected(self):
+        role = {"employer_marker": "Avaintec", "role_marker": "Executive Assistant to Board Member", "include_role_header": True, "display_period": ""}
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [role]}
+        omitted = validate_resume_content("Other Employer\nExecutive Assistant", plan, [])
+        repeated = validate_resume_content(
+            "Avaintec | Executive Assistant to Board Member\nOther text\nAvaintec\nExecutive Assistant to Board Member", plan, [],
+        )
+        self.assertIn("missing_role_header", [item["code"] for item in omitted["issues"]])
+        self.assertIn("ambiguous_role_header", [item["code"] for item in repeated["issues"]])
 
     def test_date_uncertainty_is_explicit_and_no_date_is_fabricated(self):
         uncertain = build_career_knowledge_base("", json.dumps([{

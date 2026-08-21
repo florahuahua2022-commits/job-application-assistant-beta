@@ -19,6 +19,54 @@ from app.release_state import generation_inputs_fingerprint
 
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_post_repair_resume_must_retain_authoritative_employment_block(self):
+        plan = {
+            "schema_version": "1.1", "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
+            "selected_evidence": [], "roles": [{
+                "employer_marker": "Avaintec", "role_marker": "Executive Assistant to Board Member",
+                "display_period": "Nov 2017 - Jan 2019", "chronology_order": 0, "include_role_header": True,
+            }],
+        }
+        valid = """## Professional Summary
+Grounded support.
+## Key Skills
+Administration
+## Work Experience
+**Executive Assistant to Board Member**
+**Avaintec**
+Nov 2017 – Jan 2019"""
+        missing = """## Professional Summary
+Grounded support.
+## Key Skills
+Administration
+## Work Experience
+Other grounded work."""
+        for repaired, expected_status in ((valid, 200), (missing, 502)):
+            with self.subTest(expected_status=expected_status):
+                application_id = self.seed(required=("resume",))
+                with Session(self.engine) as session:
+                    application = session.get(JobApplication, application_id)
+                    profile = session.exec(select(ApplicantProfile)).first()
+                    requirements = json.loads(application.application_requirements_json)
+                    requirements["source"] = "source_aware_parser"
+                    application.application_requirements_json = json.dumps(requirements)
+                    application.application_decision_json = json.dumps({
+                        "schema_version": "1.0", "status": "ready", "application_recommendation": "apply",
+                        "inputs": decision_inputs(json.loads(application.job_model_json), requirements, [], profile),
+                        "requirements": [], "questions": [], "blocking_issues": [],
+                    })
+                    session.add(application); session.commit()
+                with patch("app.main.match_evidence_batch", return_value={"schema_version": "1.0", "matches": [], "unused_evidence": []}), patch(
+                    "app.main.build_resume_curation_plan", return_value=plan
+                ), patch("app.main.generate_draft", return_value=valid), patch(
+                    "app.main.repair_tailored_resume", return_value=(repaired, {"status": "pass", "results": []})
+                ):
+                    response = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
+
+                self.assertEqual(response.status_code, expected_status, response.text)
+                if expected_status == 502:
+                    self.assertIn("missing the required role header", response.json()["detail"])
+
     def test_resume_name_is_restored_after_automatic_repair(self):
         application_id = self.seed(required=("resume",))
         with Session(self.engine) as session:

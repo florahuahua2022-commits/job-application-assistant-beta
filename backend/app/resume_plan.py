@@ -8,6 +8,35 @@ from typing import Any
 RESUME_PLAN_SCHEMA_VERSION = "1.1"
 
 
+def _normalise_identity_text(value: Any) -> str:
+    value = str(value or "").casefold().replace("–", "-").replace("—", "-")
+    value = re.sub(r"[#*_`~|•▪■]+", " ", value)
+    return re.sub(r"[^\w]+", " ", value, flags=re.UNICODE).strip()
+
+
+def _contains_identity(line: str, marker: str) -> bool:
+    return bool(marker and f" {marker} " in f" {line} ")
+
+
+def _role_identity_positions(lines: list[str], role: dict[str, Any]) -> list[int]:
+    role_marker = _normalise_identity_text(role.get("role_marker"))
+    employer_marker = _normalise_identity_text(role.get("employer_marker"))
+    if not employer_marker:  # Backward compatibility for historical pre-4C.2 plans.
+        return [index for index, line in enumerate(lines) if _contains_identity(line, role_marker)]
+    positions = set()
+    for index, line in enumerate(lines):
+        if _contains_identity(line, role_marker) and _contains_identity(line, employer_marker):
+            positions.add(index)
+        if index + 1 < len(lines):
+            next_line = lines[index + 1]
+            if (
+                (_contains_identity(line, role_marker) and _contains_identity(next_line, employer_marker))
+                or (_contains_identity(line, employer_marker) and _contains_identity(next_line, role_marker))
+            ):
+                positions.add(index)
+    return sorted(positions)
+
+
 def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: list[str]) -> dict[str, Any]:
     issues = []
     for section in plan.get("required_sections") or []:
@@ -18,24 +47,25 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         issues.append({"code": "resume_too_long", "message": f"The CV contains {word_count} words; the two-page target allows at most 750."})
     if set(map(str, evidence_used)) - selected_resume_evidence_ids(plan):
         issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
-    normalised_content = re.sub(r"\s+", " ", content.replace("–", "-").replace("—", "-")).lower()
+    normalised_lines = [_normalise_identity_text(line) for line in content.splitlines()]
+    normalised_lines = [line for line in normalised_lines if line]
     visible_roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
-    positions = {
-        id(role): normalised_content.find(str(role.get("role_marker") or "").strip().lower())
-        for role in visible_roles
-    }
+    candidates = {id(role): _role_identity_positions(normalised_lines, role) for role in visible_roles}
+    positions = {id(role): values[0] if len(values) == 1 else -1 for role in visible_roles for values in [candidates[id(role)]]}
     role_positions = []
     for role in visible_roles:
-        marker = str(role.get("role_marker") or "").strip().lower()
+        marker = str(role.get("role_marker") or "").strip()
         position = positions[id(role)] if marker else -1
-        if marker and position < 0:
+        if len(candidates[id(role)]) > 1:
+            issues.append({"code": "ambiguous_role_header", "message": f"The CV contains an ambiguous employment header for {marker}."})
+        elif marker and position < 0:
             issues.append({"code": "missing_role_header", "message": f"The CV is missing the required role header: {role['role_marker']}."})
         elif position >= 0:
             role_positions.append(position)
-        period = re.sub(r"\s+", " ", str(role.get("display_period") or "").replace("–", "-").replace("—", "-")).lower()
+        period = _normalise_identity_text(role.get("display_period"))
         later_positions = [value for value in positions.values() if value > position]
-        role_block = normalised_content[position:min(later_positions, default=len(normalised_content))] if position >= 0 else ""
-        if period and period not in role_block:
+        role_block = " ".join(normalised_lines[position:min(later_positions, default=len(normalised_lines))]) if position >= 0 else ""
+        if period and not _contains_identity(role_block, period):
             issues.append({"code": "missing_role_period", "message": f"The CV is missing the authoritative employment period for {role.get('role_marker') or role.get('source_section')}."})
     if len(role_positions) > 1 and role_positions != sorted(role_positions):
         issues.append({"code": "role_order_mismatch", "message": "The CV role headers do not follow reverse chronological Resume Plan order."})
@@ -92,6 +122,11 @@ def _display_period(items: list[dict[str, Any]]) -> str:
 def _role_marker(section: str) -> str:
     parts = [part.strip() for part in section.split(">") if part.strip()]
     return parts[-1] if parts else ""
+
+
+def _employer_marker(section: str) -> str:
+    parts = [part.strip() for part in section.split(">") if part.strip()]
+    return parts[-2] if len(parts) >= 3 else ""
 
 
 def _has_bullet_content(item: dict[str, Any]) -> bool:
@@ -236,6 +271,7 @@ def build_resume_curation_plan(
             "source_order": source_order,
             "display_period": _display_period(items),
             "date_status": "verified" if _display_period(items) else "uncertain" if any(item.get("time_period_status") == "uncertain" for item in items) else "not_provided",
+            "employer_marker": _employer_marker(section),
             "role_marker": _role_marker(section),
             "is_current": is_current,
             "curation_action": action,
