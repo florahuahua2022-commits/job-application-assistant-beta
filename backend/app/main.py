@@ -22,7 +22,7 @@ from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
-from .ckb import build_career_knowledge_base, validate_career_knowledge_base
+from .ckb import build_career_knowledge_base, career_knowledge_base_is_current, validate_career_knowledge_base
 from .config import settings
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .evidence_allocation import apply_selection_allocation, build_evidence_allocation
@@ -157,6 +157,22 @@ def serialise_ckb(source_text: str, experiences_json: str) -> str:
     return json.dumps(ckb, ensure_ascii=False)
 
 
+def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id: UUID | None) -> tuple[list[dict], str]:
+    try:
+        persisted = json.loads(master_resume.ckb_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        persisted = None
+    if career_knowledge_base_is_current(persisted):
+        return persisted, "reused_current"
+    refreshed = json.loads(serialise_ckb(master_resume.source_text, master_resume.experiences_json or "[]"))
+    if refreshed != persisted:
+        master_resume.ckb_json = json.dumps(refreshed, ensure_ascii=False)
+        session.add(master_resume)
+        session.commit()
+        invalidate_evidence_matches(session, user_id)
+    return refreshed, "refreshed_stale"
+
+
 def serialise_job_model(job_description: str, selection_criteria: str | None, position_title: str, company: str) -> str:
     model = build_job_model(job_description, selection_criteria, position_title, company)
     errors = validate_job_model(model)
@@ -209,13 +225,13 @@ def invalidate_application_decisions(session: Session, user_id: UUID | None) -> 
     session.commit()
 
 
-def prepare_application_decision(application: JobApplication, master_resume: Resume, profile: ApplicantProfile | None) -> dict:
+def prepare_application_decision(
+    session: Session, application: JobApplication, master_resume: Resume,
+    profile: ApplicantProfile | None, user_id: UUID | None,
+) -> dict:
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     job_model = json.loads(application.job_model_json or "{}")
-    ckb = json.loads(master_resume.ckb_json or "[]")
-    if not ckb:
-        ckb = build_career_knowledge_base(master_resume.source_text, master_resume.experiences_json or "[]")
-        master_resume.ckb_json = json.dumps(ckb, ensure_ascii=False)
+    ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
     if not matches:
         matches = match_evidence_batch(json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False))
@@ -1164,12 +1180,13 @@ def get_application_decision(
         raise HTTPException(404, "Application not found.")
     if not master_resume:
         raise HTTPException(400, "Create a Master Resume first.")
-    decision = json.loads(application.application_decision_json or "{}")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
+    decision = json.loads(application.application_decision_json or "{}")
     inputs = decision_inputs(
         json.loads(application.job_model_json or "{}"),
         load_application_requirements(application.application_requirements_json, application.selection_criteria),
-        json.loads(master_resume.ckb_json or "[]"),
+        ckb,
         profile,
     )
     return {"decision": decision, "current": decision_is_current(decision, inputs)}
@@ -1187,7 +1204,7 @@ def diagnose_application(
         raise HTTPException(400, "Create a Master Resume and job application first.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     try:
-        decision = prepare_application_decision(application, master_resume, profile)
+        decision = prepare_application_decision(session, application, master_resume, profile, user_id)
     except (RuntimeError, ValueError, json.JSONDecodeError) as error:
         raise HTTPException(400, str(error)) from error
     except AIServiceError as error:
@@ -1207,6 +1224,7 @@ def confirm_application_decision(
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
+    get_or_refresh_current_ckb(session, master_resume, user_id)
     current = json.loads(application.application_decision_json or "{}")
     question = next((item for item in current.get("questions") or [] if item.get("question_id") == payload.question_id), None)
     if not question:
@@ -1218,7 +1236,7 @@ def confirm_application_decision(
     )
     application.application_decision_json = json.dumps(current, ensure_ascii=False)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
-    decision = prepare_application_decision(application, master_resume, profile)
+    decision = prepare_application_decision(session, application, master_resume, profile, user_id)
     session.add(application); session.commit()
     return decision
 
@@ -1514,6 +1532,7 @@ def quality_check(
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    current_ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id) if master_resume else ([], "reused_current")
     current_documents = current_required_documents(session, application, user_id, master_resume, profile)
     decision = json.loads(application.application_decision_json or "{}")
     decision_current = False
@@ -1521,7 +1540,7 @@ def quality_check(
         try:
             decision_current = decision_is_current(decision, decision_inputs(
                 json.loads(application.job_model_json or "{}"), requirements,
-                json.loads(master_resume.ckb_json or "[]"), profile,
+                current_ckb, profile,
             ))
         except json.JSONDecodeError:
             decision_current = False
@@ -2327,12 +2346,8 @@ def generate(
     used_experiences = "[]"
     used_closing_styles = "[]"
     profile_text = applicant_profile_prompt(profile) if profile else None
-    ckb_source_json = master_resume.ckb_json or "[]"
-    if ckb_source_json.strip() in {"", "[]"}:
-        ckb_source_json = serialise_ckb(master_resume.source_text, master_resume.experiences_json or "[]")
-        master_resume.ckb_json = ckb_source_json
-        session.add(master_resume)
-        session.commit()
+    current_ckb, ckb_status = get_or_refresh_current_ckb(session, master_resume, user_id)
+    ckb_source_json = json.dumps(current_ckb, ensure_ascii=False)
     stored_requirements = load_application_requirements(
         application.application_requirements_json, application.selection_criteria
     )
@@ -2496,6 +2511,7 @@ def generate(
         input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
     )
     trace["runtime"]["status"] = "review_pending"
+    trace["runtime"]["ckb_status"] = ckb_status
     document = GeneratedDocument(
         user_id=user_id,
         application_id=application.id,
@@ -2594,6 +2610,7 @@ def generate(
         retry_count=retry_count,
         input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
     )
+    trace["runtime"]["ckb_status"] = ckb_status
     document.content = content
     document.structured_content_json = json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False)
     document.reviewer_json = json.dumps(review_result, ensure_ascii=False)

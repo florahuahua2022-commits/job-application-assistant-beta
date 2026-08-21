@@ -11,14 +11,81 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.application_decision import decision_inputs
 from app.ai import AIServiceError
 from app.application_requirements import empty_application_requirements
+from app.ckb import build_career_knowledge_base
 from app.database import get_session
-from app.main import app
+from app.main import app, get_or_refresh_current_ckb
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, JobSource, Resume
 from app.outcome_learning import build_submission_snapshot
 from app.release_state import generation_inputs_fingerprint
+from app.resume_plan import build_resume_curation_plan, validate_resume_content
 
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_bennco_stale_ckb_refreshes_once_and_enforces_all_five_periods(self):
+        roles = [
+            ("Finance Administration Officer", "Department of Communities – Disability Services", "Feb 2026", "Present"),
+            ("Executive Assistant to Board Member", "Avaintec", "Nov 2017", "Jan 2019"),
+            ("Project Administration Officer", "CCCC Kenya", "Jan 2016", "Aug 2017"),
+            ("Project Administration Officer", "Chevron CDB Project", "Aug 2012", "Dec 2015"),
+            ("Project Assistant", "Pratt & Whitney", "Oct 2007", "Aug 2012"),
+        ]
+        experiences = [{
+            "role_title": role, "organization": employer, "responsibility": f"Distinct grounded duty {index}.",
+            "source_section": f"Work Experience > {employer} > {role}",
+            "source_text": f"{role}\n{employer}\n{start} – {end}\nDistinct grounded duty {index}.",
+        } for index, (role, employer, start, end) in enumerate(roles)]
+        source_text = "Work Experience\n" + "\n".join(item["source_text"] for item in experiences)
+        current = build_career_knowledge_base(source_text, json.dumps(experiences))
+        stale = json.loads(json.dumps(current))
+        for index, item in enumerate(stale):
+            item.pop("time_period_status", None)
+            if index != 2:
+                item["time_period"] = {"start": None, "end": None}
+
+        with Session(self.engine) as session:
+            resume = Resume(source_text=source_text, experiences_json=json.dumps(experiences), ckb_json=json.dumps(stale))
+            application = JobApplication(company="Bennco", position_title="Office Administrator", job_description="Administration", application_decision_json='{"status":"ready"}')
+            session.add_all([resume, application]); session.commit(); session.refresh(resume); session.refresh(application)
+            refreshed, status = get_or_refresh_current_ckb(session, resume, None)
+            self.assertEqual(application.application_decision_json, "{}")
+            application.application_decision_json = '{"status":"sentinel"}'
+            session.add(application); session.commit()
+            reused, second_status = get_or_refresh_current_ckb(session, resume, None)
+            session.refresh(application)
+
+        self.assertEqual((status, second_status), ("refreshed_stale", "reused_current"))
+        self.assertEqual(refreshed, reused)
+        self.assertEqual(application.application_decision_json, '{"status":"sentinel"}')
+        self.assertEqual(
+            [(item["time_period"]["start"], item["time_period"]["end"], item["time_period_status"]) for item in refreshed],
+            [(start, end, "verified") for _, _, start, end in roles],
+        )
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [item["evidence_id"] for item in refreshed], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, refreshed)
+        self.assertEqual([item["display_period"] for item in plan["roles"]], [f"{start} - {end}" for _, _, start, end in roles])
+
+        headers = [f"### {role}\n{employer}" for role, employer, _, _ in roles]
+        incomplete = "## Professional Summary\nGrounded.\n## Key Skills\nAdministration.\n## Work Experience\n" + "\n".join(
+            f"{header}\n{start} – {end}" if index == 2 else header
+            for index, (header, (_, _, start, end)) in enumerate(zip(headers, roles))
+        )
+        missing = validate_resume_content(incomplete, plan, [item["evidence_id"] for item in refreshed])
+        self.assertEqual([item["code"] for item in missing["issues"]].count("missing_role_period"), 4)
+        complete = "## Professional Summary\nGrounded.\n## Key Skills\nAdministration.\n## Work Experience\n" + "\n".join(
+            f"{header}\n{start} – {end}" for header, (_, _, start, end) in zip(headers, roles)
+        )
+        self.assertTrue(validate_resume_content(complete, plan, [item["evidence_id"] for item in refreshed])["valid"])
+
+    def test_current_empty_date_states_are_reused_without_rebuild(self):
+        for status in ("uncertain", "not_provided"):
+            with self.subTest(status=status), Session(self.engine) as session:
+                ckb = [{"evidence_type": "experience", "time_period": {"start": None, "end": None}, "time_period_status": status}]
+                resume = Resume(source_text="Authoritative source", experiences_json="[]", ckb_json=json.dumps(ckb))
+                session.add(resume); session.commit(); session.refresh(resume)
+                with patch("app.main.serialise_ckb", side_effect=AssertionError("current CKB must not rebuild")):
+                    result, current_status = get_or_refresh_current_ckb(session, resume, None)
+                self.assertEqual((result, current_status), (ckb, "reused_current"))
+
     def test_post_repair_resume_must_retain_authoritative_employment_block(self):
         plan = {
             "schema_version": "1.1", "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
@@ -41,7 +108,12 @@ Grounded support.
 Administration
 ## Work Experience
 Other grounded work."""
-        for repaired, expected_status in ((valid, 200), (missing, 502)):
+        missing_date = valid.replace("Nov 2017 – Jan 2019", "")
+        for repaired, expected_status, expected_error in (
+            (valid, 200, ""),
+            (missing, 502, "missing the required role header"),
+            (missing_date, 502, "missing the authoritative employment period"),
+        ):
             with self.subTest(expected_status=expected_status):
                 application_id = self.seed(required=("resume",))
                 with Session(self.engine) as session:
@@ -64,8 +136,10 @@ Other grounded work."""
                     response = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
 
                 self.assertEqual(response.status_code, expected_status, response.text)
+                if expected_status == 200:
+                    self.assertEqual(json.loads(response.json()["trace_json"])["runtime"]["ckb_status"], "reused_current")
                 if expected_status == 502:
-                    self.assertIn("missing the required role header", response.json()["detail"])
+                    self.assertIn(expected_error, response.json()["detail"])
 
     def test_resume_name_is_restored_after_automatic_repair(self):
         application_id = self.seed(required=("resume",))

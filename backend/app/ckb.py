@@ -147,6 +147,13 @@ def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") 
     return list(unique.values())
 
 
+def career_knowledge_base_is_current(items: Any) -> bool:
+    return isinstance(items, list) and all(isinstance(item, dict) for item in items) and all(
+        item.get("evidence_type") != "experience" or "time_period_status" in item
+        for item in items
+    )
+
+
 def validate_career_knowledge_base(items: list[dict[str, Any]]) -> list[str]:
     errors: list[str] = []
     required = {"schema_version", "evidence_id", "evidence_type", "source_section", "source_text", "time_period", "evidence_quality", "fact_verification"}

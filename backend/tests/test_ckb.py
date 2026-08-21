@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from app.ckb import EVIDENCE_TYPES, build_career_knowledge_base, stable_evidence_id, validate_career_knowledge_base
+from app.ckb import EVIDENCE_TYPES, build_career_knowledge_base, career_knowledge_base_is_current, stable_evidence_id, validate_career_knowledge_base
 
 
 class CareerKnowledgeBaseTests(unittest.TestCase):
@@ -29,6 +29,13 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
     def test_supports_all_frozen_evidence_types(self):
         expected = {"experience", "project", "volunteer", "education", "qualification", "award", "publication"}
         self.assertEqual(EVIDENCE_TYPES, expected)
+
+    def test_currentness_uses_date_status_not_an_empty_period_heuristic(self):
+        base = {"evidence_type": "experience", "time_period": {"start": None, "end": None}}
+        self.assertFalse(career_knowledge_base_is_current([base]))
+        for status in ("verified", "uncertain", "not_provided"):
+            with self.subTest(status=status):
+                self.assertTrue(career_knowledge_base_is_current([{**base, "time_period_status": status}]))
 
     def test_extracts_non_employment_detail_evidence(self):
         source = """Education
