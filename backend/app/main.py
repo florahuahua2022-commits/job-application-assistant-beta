@@ -22,7 +22,7 @@ from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
-from .ckb import build_career_knowledge_base, career_knowledge_base_is_current, validate_career_knowledge_base
+from .ckb import build_career_knowledge_base, career_knowledge_base_is_current, split_time_period, validate_career_knowledge_base
 from .config import settings
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .evidence_allocation import apply_selection_allocation, build_evidence_allocation
@@ -157,14 +157,59 @@ def serialise_ckb(source_text: str, experiences_json: str) -> str:
     return json.dumps(ckb, ensure_ascii=False)
 
 
+def _normalise_experience_identity(value: object) -> str:
+    return re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
+
+
+def _recover_explicit_experience_periods(source_text: str, experiences_json: str) -> tuple[str, list[tuple[str, str, str]]]:
+    try:
+        experiences = json.loads(experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        experiences = []
+    if not isinstance(experiences, list):
+        experiences = []
+    extracted = {
+        (_normalise_experience_identity(item.get("role_title")), _normalise_experience_identity(item.get("organization"))): item
+        for item in extract_resume_experiences(source_text)
+        if item.get("role_title") and item.get("organization") and item.get("time_period_text")
+    }
+    recoveries = []
+    for item in experiences:
+        if not isinstance(item, dict):
+            continue
+        period = item.get("time_period") or {}
+        if item.get("time_period_text") or period.get("start") or period.get("end"):
+            continue
+        key = (_normalise_experience_identity(item.get("role_title")), _normalise_experience_identity(item.get("organization")))
+        source_item = extracted.get(key)
+        if not source_item:
+            continue
+        item["time_period_text"] = source_item["time_period_text"]
+        recovered_period = split_time_period(source_item["time_period_text"])
+        recoveries.append((_normalise_experience_identity(item.get("source_section")), recovered_period.get("start"), recovered_period.get("end")))
+    return json.dumps(experiences, ensure_ascii=False), recoveries
+
+
 def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id: UUID | None) -> tuple[list[dict], str]:
     try:
         persisted = json.loads(master_resume.ckb_json or "[]")
     except (TypeError, json.JSONDecodeError):
         persisted = None
-    if career_knowledge_base_is_current(persisted):
+    recovered_experiences, recoveries = _recover_explicit_experience_periods(
+        master_resume.source_text, master_resume.experiences_json or "[]"
+    )
+    persisted_periods = {
+        _normalise_experience_identity(item.get("source_section")): item.get("time_period") or {}
+        for item in persisted or [] if isinstance(item, dict) and item.get("evidence_type") == "experience"
+    }
+    source_periods_current = all(
+        persisted_periods.get(section, {}).get("start") == start
+        and persisted_periods.get(section, {}).get("end") == end
+        for section, start, end in recoveries
+    )
+    if career_knowledge_base_is_current(persisted) and source_periods_current:
         return persisted, "reused_current"
-    refreshed = json.loads(serialise_ckb(master_resume.source_text, master_resume.experiences_json or "[]"))
+    refreshed = json.loads(serialise_ckb(master_resume.source_text, recovered_experiences))
     if refreshed != persisted:
         master_resume.ckb_json = json.dumps(refreshed, ensure_ascii=False)
         session.add(master_resume)
@@ -1587,6 +1632,25 @@ def quality_check(
         document = current_documents.get(document_type)
         if not document:
             continue
+        if document_type == "tailored_resume":
+            try:
+                resume_validation = validate_resume_content(
+                    document.content,
+                    json.loads(document.structured_content_json or "{}"),
+                    json.loads(document.used_experiences_json or "[]"),
+                )
+            except (TypeError, json.JSONDecodeError):
+                resume_validation = {"issues": [{
+                    "code": "invalid_resume_plan",
+                    "message": "The current Resume integrity information is invalid. Regenerate the Resume before applying.",
+                }]}
+            for validation_issue in resume_validation["issues"]:
+                issues.append(QualityCheckIssue(
+                    severity="error",
+                    code=str(validation_issue.get("code") or "resume_integrity_failed"),
+                    message=str(validation_issue.get("message") or "The current Resume failed its integrity check. Regenerate it before applying."),
+                    document_type="tailored_resume",
+                ))
         try:
             reviewer_status = json.loads(document.reviewer_json or "{}").get("status")
         except (json.JSONDecodeError, AttributeError):

@@ -16,7 +16,7 @@ from app.database import get_session
 from app.main import app, get_or_refresh_current_ckb
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, JobSource, Resume
 from app.outcome_learning import build_submission_snapshot
-from app.release_state import generation_inputs_fingerprint
+from app.release_state import details_fingerprint, fingerprint, generation_inputs_fingerprint, pack_fingerprint
 from app.resume_plan import build_resume_curation_plan, validate_resume_content
 
 
@@ -29,18 +29,23 @@ class RealUserRegressionTests(unittest.TestCase):
             ("Project Administration Officer", "Chevron CDB Project", "Aug 2012", "Dec 2015"),
             ("Project Assistant", "Pratt & Whitney", "Oct 2007", "Aug 2012"),
         ]
-        experiences = [{
+        authoritative = [{
             "role_title": role, "organization": employer, "responsibility": f"Distinct grounded duty {index}.",
             "source_section": f"Work Experience > {employer} > {role}",
             "source_text": f"{role}\n{employer}\n{start} – {end}\nDistinct grounded duty {index}.",
         } for index, (role, employer, start, end) in enumerate(roles)]
-        source_text = "Work Experience\n" + "\n".join(item["source_text"] for item in experiences)
-        current = build_career_knowledge_base(source_text, json.dumps(experiences))
-        stale = json.loads(json.dumps(current))
-        for index, item in enumerate(stale):
-            item.pop("time_period_status", None)
-            if index != 2:
-                item["time_period"] = {"start": None, "end": None}
+        source_text = "Work Experience\n" + "\n".join(item["source_text"] for item in authoritative)
+        experiences = json.loads(json.dumps(authoritative))
+        for index, item in enumerate(experiences):
+            if index in {1, 2}:
+                item["time_period_text"] = f"{roles[index][2]} – {roles[index][3]}"
+            else:
+                item["source_text"] = f"{item['role_title']}\n{item['organization']}\n{item['responsibility']}"
+        stale = build_career_knowledge_base(source_text, json.dumps(experiences))
+        self.assertEqual(
+            [item["time_period_status"] for item in stale],
+            ["not_provided", "verified", "verified", "not_provided", "not_provided"],
+        )
 
         with Session(self.engine) as session:
             resume = Resume(source_text=source_text, experiences_json=json.dumps(experiences), ckb_json=json.dumps(stale))
@@ -71,6 +76,13 @@ class RealUserRegressionTests(unittest.TestCase):
         )
         missing = validate_resume_content(incomplete, plan, [item["evidence_id"] for item in refreshed])
         self.assertEqual([item["code"] for item in missing["issues"]].count("missing_role_period"), 4)
+        for missing_index in range(len(roles)):
+            individually_incomplete = "## Professional Summary\nGrounded.\n## Key Skills\nAdministration.\n## Work Experience\n" + "\n".join(
+                header if index == missing_index else f"{header}\n{start} – {end}"
+                for index, (header, (_, _, start, end)) in enumerate(zip(headers, roles))
+            )
+            result = validate_resume_content(individually_incomplete, plan, [item["evidence_id"] for item in refreshed])
+            self.assertIn("missing_role_period", [item["code"] for item in result["issues"]])
         complete = "## Professional Summary\nGrounded.\n## Key Skills\nAdministration.\n## Work Experience\n" + "\n".join(
             f"{header}\n{start} – {end}" for header, (_, _, start, end) in zip(headers, roles)
         )
@@ -85,6 +97,72 @@ class RealUserRegressionTests(unittest.TestCase):
                 with patch("app.main.serialise_ckb", side_effect=AssertionError("current CKB must not rebuild")):
                     result, current_status = get_or_refresh_current_ckb(session, resume, None)
                 self.assertEqual((result, current_status), (ckb, "reused_current"))
+
+    def test_persisted_resume_integrity_blocks_release_despite_pack_and_ats_pass(self):
+        application_id = self.seed(required=("resume",))
+        roles = [
+            ("Finance Administration Officer", "Department of Communities – Disability Services", "Feb 2026 – Present"),
+            ("Executive Assistant to Board Member", "Avaintec", "Nov 2017 – Jan 2019"),
+            ("Project Administration Officer", "China Communications Construction Company – Kenya Branch", "Jan 2016 – Aug 2017"),
+            ("Project Administration Officer", "Chevron CDB Project", "Aug 2012 – Dec 2015"),
+            ("Project Assistant", "Pratt & Whitney", "Oct 2007 – Aug 2012"),
+        ]
+        plan = {
+            "schema_version": "1.1", "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
+            "selected_evidence": [], "roles": [{
+                "role_marker": role, "employer_marker": employer, "display_period": period,
+                "chronology_order": index, "include_role_header": True,
+            } for index, (role, employer, period) in enumerate(roles)],
+        }
+        prefix = "Alex Morgan\n0400000000 | alex@example.com\n## Professional Summary\nGrounded.\n## Key Skills\nAdministration.\n## Work Experience\n"
+        incomplete = prefix + "\n".join(
+            f"**{role}**\n{employer}" + (f"\n{period}" if index in {1, 2} else "")
+            for index, (role, employer, period) in enumerate(roles)
+        )
+        complete = prefix + "\n".join(f"**{role}**\n{employer}\n{period}" for role, employer, period in roles)
+
+        def persist(content):
+            with Session(self.engine) as session:
+                application = session.get(JobApplication, application_id)
+                profile = session.exec(select(ApplicantProfile)).first()
+                document = session.exec(select(GeneratedDocument).where(GeneratedDocument.application_id == application_id)).first()
+                if not document:
+                    document = GeneratedDocument(
+                        application_id=application_id, document_type="tailored_resume", reviewer_json='{"status":"pass"}',
+                        structured_content_json=json.dumps(plan), used_experiences_json="[]", content=content,
+                    )
+                    session.add(document); session.flush()
+                else:
+                    document.content = content
+                pack = {"status": "pass", "blocks_release": False, "skipped": True, "skip_reason": "No comparison candidates.", "results": []}
+                application.release_state_json = json.dumps({
+                    "schema_version": "1.0",
+                    "details_confirmation": {"fingerprint": details_fingerprint(application, profile)},
+                    "pack_review": {"fingerprint": pack_fingerprint(application, profile, {"tailored_resume": document}), "result": pack},
+                    "ats": {"document_id": document.id, "content_sha256": fingerprint(content), "format": "docx", "template": "classic", "result": {"status": "pass", "ready": True}},
+                })
+                session.add_all([application, document]); session.commit()
+
+        persist(incomplete)
+        final = self.client.get(f"/applications/{application_id}/quality-check").json()
+        release = self.client.get(f"/applications/{application_id}/release-checklist").json()
+        blocked = self.client.post(f"/applications/{application_id}/prepare-submission")
+
+        self.assertEqual([item["code"] for item in final["issues"]].count("missing_role_period"), 3)
+        self.assertFalse(final["ready"])
+        self.assertTrue(release["checks"]["pack_review"]["ready"])
+        self.assertTrue(release["checks"]["ats"]["ready"])
+        self.assertFalse(release["ready"])
+        self.assertNotEqual(release["status"], "ready_to_apply")
+        self.assertEqual(blocked.status_code, 409)
+
+        persist(complete)
+        final = self.client.get(f"/applications/{application_id}/quality-check").json()
+        release = self.client.get(f"/applications/{application_id}/release-checklist").json()
+        self.assertTrue(final["ready"], final["issues"])
+        self.assertTrue(release["ready"])
+        self.assertEqual(release["status"], "ready_to_apply")
+        self.assertEqual(self.client.post(f"/applications/{application_id}/prepare-submission").status_code, 200)
 
     def test_post_repair_resume_must_retain_authoritative_employment_block(self):
         plan = {

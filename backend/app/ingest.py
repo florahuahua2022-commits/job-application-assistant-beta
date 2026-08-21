@@ -119,7 +119,9 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
             continue
         combined = previous[-1]
         parts = [part.strip() for part in re.split(r"\s+(?:\||–|—)\s+", combined, maxsplit=1)]
-        if len(parts) == 2:
+        if len(parts) == 2 and ("|" in combined or not (
+            len(previous) >= 2 and company_hint.search(combined) and not company_hint.search(previous[-2])
+        )):
             role_title, organization = parts
             header_start = date_index - 1
         elif len(previous) >= 2:
