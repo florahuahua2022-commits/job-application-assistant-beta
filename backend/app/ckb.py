@@ -9,6 +9,13 @@ EVIDENCE_TYPES = {
     "experience", "project", "volunteer", "education", "qualification", "award", "publication",
 }
 
+EMPLOYMENT_PERIOD_PATTERN = re.compile(
+    r"(?i)\b((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:19|20)\d{2})\s*(?:-|–|—|to)\s*"
+    r"((?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:19|20)\d{2}|present|current|now))\b"
+)
+
 
 def stable_evidence_id(evidence_type: str, source_text: str) -> str:
     digest = hashlib.sha1(f"{evidence_type}|{source_text.strip()}".encode("utf-8")).hexdigest()[:12].upper()
@@ -44,6 +51,14 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
     date_text = str(item.get("time_period_text") or "").strip()
     if not date_text and situation.lower().startswith("employment dates:"):
         date_text = situation.split(":", 1)[1].strip()
+    if not date_text:
+        matches = EMPLOYMENT_PERIOD_PATTERN.findall(raw_source)
+        if len(matches) == 1:
+            date_text = f"{matches[0][0]} - {matches[0][1]}"
+    supplied_period = item.get("time_period") or {}
+    if not supplied_period.get("start") and not supplied_period.get("end"):
+        supplied_period = split_time_period(date_text)
+    date_status = "verified" if supplied_period.get("start") else "uncertain" if re.search(r"(?i)\b(?:19|20)\d{2}\b", raw_source) else "not_provided"
     evidence_type = str(item.get("evidence_type") or "experience").lower()
     if evidence_type not in EVIDENCE_TYPES:
         evidence_type = "experience"
@@ -54,7 +69,8 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         "evidence_type": evidence_type,
         "source_section": str(item.get("source_section") or f"Work Experience > {organisation or 'Unknown organisation'} > {role or 'Unknown role'}"),
         "source_text": source_text,
-        "time_period": item.get("time_period") or split_time_period(date_text),
+        "time_period": supplied_period,
+        "time_period_status": date_status,
         "situation": situation,
         "task": task,
         "action": action,

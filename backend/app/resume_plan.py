@@ -19,18 +19,23 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
     if set(map(str, evidence_used)) - selected_resume_evidence_ids(plan):
         issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
     normalised_content = re.sub(r"\s+", " ", content.replace("–", "-").replace("—", "-")).lower()
+    visible_roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
+    positions = {
+        id(role): normalised_content.find(str(role.get("role_marker") or "").strip().lower())
+        for role in visible_roles
+    }
     role_positions = []
-    for role in plan.get("roles") or []:
-        if not role.get("include_role_header"):
-            continue
+    for role in visible_roles:
         marker = str(role.get("role_marker") or "").strip().lower()
-        position = normalised_content.find(marker) if marker else -1
+        position = positions[id(role)] if marker else -1
         if marker and position < 0:
             issues.append({"code": "missing_role_header", "message": f"The CV is missing the required role header: {role['role_marker']}."})
         elif position >= 0:
             role_positions.append(position)
         period = re.sub(r"\s+", " ", str(role.get("display_period") or "").replace("–", "-").replace("—", "-")).lower()
-        if period and period not in normalised_content:
+        later_positions = [value for value in positions.values() if value > position]
+        role_block = normalised_content[position:min(later_positions, default=len(normalised_content))] if position >= 0 else ""
+        if period and period not in role_block:
             issues.append({"code": "missing_role_period", "message": f"The CV is missing the authoritative employment period for {role.get('role_marker') or role.get('source_section')}."})
     if len(role_positions) > 1 and role_positions != sorted(role_positions):
         issues.append({"code": "role_order_mismatch", "message": "The CV role headers do not follow reverse chronological Resume Plan order."})
@@ -230,6 +235,7 @@ def build_resume_curation_plan(
             "chronology_order": source_order,
             "source_order": source_order,
             "display_period": _display_period(items),
+            "date_status": "verified" if _display_period(items) else "uncertain" if any(item.get("time_period_status") == "uncertain" for item in items) else "not_provided",
             "role_marker": _role_marker(section),
             "is_current": is_current,
             "curation_action": action,

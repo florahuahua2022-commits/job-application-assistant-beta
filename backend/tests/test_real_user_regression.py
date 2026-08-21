@@ -19,6 +19,31 @@ from app.release_state import generation_inputs_fingerprint
 
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_resume_name_is_restored_after_automatic_repair(self):
+        application_id = self.seed(required=("resume",))
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, application_id)
+            profile = session.exec(select(ApplicantProfile)).first()
+            requirements = json.loads(application.application_requirements_json)
+            requirements["source"] = "source_aware_parser"
+            application.application_requirements_json = json.dumps(requirements)
+            application.application_decision_json = json.dumps({
+                "schema_version": "1.0", "status": "ready", "application_recommendation": "apply",
+                "inputs": decision_inputs(json.loads(application.job_model_json), requirements, [], profile),
+                "requirements": [], "questions": [], "blocking_issues": [],
+            })
+            session.add(application); session.commit()
+        draft = "## Professional Summary\nGrounded support.\n## Key Skills\nAdministration\n## Work Experience\nGrounded support."
+        with patch("app.main.match_evidence_batch", return_value={"schema_version": "1.0", "matches": [], "unused_evidence": []}), patch(
+            "app.main.generate_draft", return_value=draft
+        ), patch("app.main.repair_tailored_resume", return_value=(draft, {"status": "pass", "results": []})):
+            response = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("Alex Morgan", response.json()["content"])
+        self.assertIn("0400000000", response.json()["content"])
+        self.assertIn("alex@example.com", response.json()["content"])
+
     def test_reviewer_provider_failure_keeps_same_draft_for_safe_retry(self):
         application_id = self.seed(required=("cover_letter",))
         with Session(self.engine) as session:

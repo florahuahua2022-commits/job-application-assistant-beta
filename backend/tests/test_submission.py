@@ -173,6 +173,20 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertTrue(corrected.startswith("Phone: 0400 000 000\nEmail: correct@example.com"))
 
+    def test_missing_canonical_name_is_added_without_changing_contact_enforcement(self):
+        profile = ApplicantProfile(first_name="HUA", last_name="ZHONG", phone="0400 000 000", email="hua@example.com")
+
+        corrected = enforce_profile_contact("## Professional Summary\nGrounded experience.", profile, "tailored_resume")
+
+        self.assertTrue(corrected.startswith("HUA ZHONG\nPhone: 0400 000 000\nEmail: hua@example.com"))
+
+    def test_blank_canonical_name_is_not_fabricated(self):
+        profile = ApplicantProfile(first_name="", last_name="", phone="0400 000 000", email="hua@example.com")
+
+        corrected = enforce_profile_contact("## Professional Summary\nGrounded experience.", profile, "tailored_resume")
+
+        self.assertTrue(corrected.startswith("Phone: 0400 000 000\nEmail: hua@example.com"))
+
     def setUp(self):
         self.backup_directory = TemporaryDirectory()
         self.backup_patch = patch.object(backup, "BACKUP_DIR", Path(self.backup_directory.name))

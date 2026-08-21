@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, delete, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
 from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
 from .ats_verification import verify_resume_artifact
@@ -655,6 +655,9 @@ def enforce_profile_contact(content: str, profile: ApplicantProfile, document_ty
     corrected, phone_replacements = mobile_pattern.subn(profile.phone.strip(), content)
     corrected, email_replacements = email_pattern.subn(profile.email.strip(), corrected)
     missing_lines: list[str] = []
+    full_name = " ".join(filter(None, [profile.first_name.strip(), profile.last_name.strip()]))
+    if document_type == "tailored_resume" and full_name and full_name.casefold() not in corrected.casefold():
+        missing_lines.append(full_name)
     if phone_replacements == 0:
         missing_lines.append(f"Phone: {profile.phone.strip()}")
     if email_replacements == 0:
@@ -2508,6 +2511,7 @@ def generate(
     session.add(document); session.commit(); session.refresh(document)
 
     def reviewer_failed(error: Exception) -> None:
+        provider_response = provider_response_telemetry()
         document.reviewer_json = json.dumps({
             "status": "provider_failed", "state": "provider_failed",
             "message": "The automatic review could not be completed.",
@@ -2515,12 +2519,15 @@ def generate(
         failed_trace = json.loads(document.trace_json or "{}")
         failed_trace["runtime"] = {**failed_trace.get("runtime", {}), "status": "review_provider_failed"}
         failed_trace["review"] = {"status": "provider_failed", "finding_count": 0}
+        if provider_response:
+            failed_trace["runtime"]["provider_response"] = provider_response
         document.trace_json = json.dumps(failed_trace, ensure_ascii=False)
         session.add(document); session.commit()
         operations.warning(json.dumps({
             "event": "document_review_failed", "application_id": application.id,
             "document_id": document.id, "document_type": document.document_type,
             "provider": provider, "model": model_name, "failure_category": "review_output_invalid",
+            "provider_response": provider_response,
         }, separators=(",", ":")))
 
     if payload.document_type == "tailored_resume":
@@ -2530,6 +2537,8 @@ def generate(
                 json.dumps(resume_plan or {}, ensure_ascii=False),
                 profile_text,
             )
+            if profile:
+                content = enforce_profile_contact(content, profile, "tailored_resume")
             repaired_validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
             if not repaired_validation["valid"]:
                 raise HTTPException(502, repaired_validation["issues"][0]["message"] + " Please regenerate it.")

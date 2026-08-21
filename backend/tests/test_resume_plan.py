@@ -1,6 +1,8 @@
 import json
 import unittest
 
+from app.ckb import build_career_knowledge_base
+from app.ingest import extract_resume_experiences
 from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 
 
@@ -35,6 +37,56 @@ class ResumeCurationPlanTests(unittest.TestCase):
         )
         result = validate_resume_content("## Professional Summary\nX\n## Key Skills\nX\n## Work Experience\nOfficer", dated, ["A"])
         self.assertIn("missing_role_period", [item["code"] for item in result["issues"]])
+
+    def test_employment_period_must_be_inside_its_role_block(self):
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [
+            {"role_marker": "Current Officer", "include_role_header": True, "display_period": "Feb 2026 - Present"},
+            {"role_marker": "Earlier Officer", "include_role_header": True, "display_period": "Nov 2017 - Jan 2019"},
+        ]}
+        correct = validate_resume_content("Current Officer\nFeb 2026 – Present\nEarlier Officer\nNov 2017 – Jan 2019", plan, [])
+        misplaced = validate_resume_content("Current Officer\nEarlier Officer\nFeb 2026 – Present\nNov 2017 – Jan 2019", plan, [])
+        reversed_roles = validate_resume_content("Earlier Officer\nNov 2017 – Jan 2019\nCurrent Officer\nFeb 2026 – Present", plan, [])
+
+        self.assertTrue(correct["valid"])
+        self.assertIn("missing_role_period", [item["code"] for item in misplaced["issues"]])
+        self.assertIn("role_order_mismatch", [item["code"] for item in reversed_roles["issues"]])
+
+    def test_bennco_style_dates_survive_extraction_ckb_and_plan(self):
+        roles = [
+            ("Finance Administration Officer", "Department of Communities", "Feb 2026 – Present"),
+            ("Executive Assistant", "Avaintec", "Nov 2017 – Jan 2019"),
+            ("Project Administration Officer", "China Communications Construction Company – Kenya Branch", "Jan 2016 – Aug 2017"),
+            ("Project Administration Officer", "Chevron CDB Project", "Aug 2012 – Dec 2015"),
+            ("Project Assistant", "Pratt & Whitney", "Oct 2007 – Aug 2012"),
+        ]
+        source = "Work Experience\n" + "\n".join(
+            f"{role}\n{organisation}\n{period}\nProvided grounded project and administrative support across business operations."
+            for role, organisation, period in roles
+        )
+        extracted = extract_resume_experiences(source)
+        ckb = build_career_knowledge_base(source, json.dumps(extracted))
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [item["evidence_id"] for item in ckb], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb)
+
+        self.assertEqual([item["time_period"]["end"] for item in ckb], ["Present", "Jan 2019", "Aug 2017", "Dec 2015", "Aug 2012"])
+        self.assertEqual([role["display_period"] for role in plan["roles"]], [period.replace("–", "-") for _, _, period in roles])
+        self.assertEqual([role["chronology_order"] for role in plan["roles"]], list(range(5)))
+
+    def test_date_uncertainty_is_explicit_and_no_date_is_fabricated(self):
+        uncertain = build_career_knowledge_base("", json.dumps([{
+            "role_title": "Officer", "organization": "Example", "responsibility": "Administration",
+            "source_text": "Officer at Example, approximately 2018",
+        }]))[0]
+        undated = build_career_knowledge_base("", json.dumps([{
+            "role_title": "Assistant", "organization": "Example", "responsibility": "Administration",
+            "source_text": "Assistant at Example",
+        }]))[0]
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [uncertain["evidence_id"], undated["evidence_id"]], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, [uncertain, undated])
+
+        self.assertEqual((uncertain["time_period_status"], uncertain["time_period"]), ("uncertain", {"start": None, "end": None}))
+        self.assertEqual((undated["time_period_status"], undated["time_period"]), ("not_provided", {"start": None, "end": None}))
+        self.assertEqual({role["date_status"] for role in plan["roles"]}, {"uncertain", "not_provided"})
 
     def test_relevance_controls_budget_while_source_order_controls_chronology(self):
         ckb = [

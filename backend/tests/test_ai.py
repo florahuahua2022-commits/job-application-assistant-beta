@@ -1,4 +1,6 @@
+import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from openai import APIConnectionError
@@ -7,6 +9,31 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+    def test_deepseek_captures_content_free_termination_telemetry(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"status":"pass"}'), finish_reason="length")],
+            usage=SimpleNamespace(completion_tokens=321),
+        )
+        with patch.object(ai, "OpenAI") as client:
+            client.return_value.chat.completions.create.return_value = response
+            result = ai._deepseek_draft("private prompt")
+
+        self.assertEqual(result, '{"status":"pass"}')
+        self.assertEqual(ai.provider_response_telemetry(), {
+            "finish_reason": "length", "response_characters": 17, "completion_tokens": 321,
+        })
+        self.assertNotIn("private prompt", json.dumps(ai.provider_response_telemetry()))
+
+    def test_deepseek_telemetry_tolerates_missing_usage(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"), finish_reason=None)], usage=None,
+        )
+        with patch.object(ai, "OpenAI") as client:
+            client.return_value.chat.completions.create.return_value = response
+            ai._deepseek_draft("private prompt")
+
+        self.assertEqual(ai.provider_response_telemetry()["response_characters"], 2)
+        self.assertIsNone(ai.provider_response_telemetry()["completion_tokens"])
     def test_resume_review_errors_use_only_safe_fix_types(self):
         review = {"results": [{"issues": [
             {"type": "unsupported_claim", "severity": "critical", "description": "Excel is not mentioned in source_text.", "location": "Advanced Excel"},

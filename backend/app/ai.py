@@ -1,4 +1,5 @@
 from datetime import date
+from contextvars import ContextVar
 import json
 import re
 
@@ -97,6 +98,13 @@ class AIServiceError(Exception):
     """A safe, user-facing failure when the AI provider cannot generate a draft."""
 
 
+_provider_response_telemetry: ContextVar[dict] = ContextVar("provider_response_telemetry", default={})
+
+
+def provider_response_telemetry() -> dict:
+    return dict(_provider_response_telemetry.get())
+
+
 def _json_object(value: str) -> dict:
     cleaned = value.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -108,14 +116,23 @@ def _json_object(value: str) -> dict:
 
 
 def _openai_draft(prompt: str) -> str:
+    _provider_response_telemetry.set({})
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
     client = OpenAI(api_key=settings.openai_api_key)
     response = client.responses.create(model=settings.openai_model, input=prompt)
-    return response.output_text
+    content = response.output_text
+    usage = getattr(response, "usage", None)
+    _provider_response_telemetry.set({
+        "finish_reason": None,
+        "response_characters": len(content or ""),
+        "completion_tokens": getattr(usage, "output_tokens", None) if usage else None,
+    })
+    return content
 
 
 def _deepseek_draft(prompt: str) -> str:
+    _provider_response_telemetry.set({})
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured.")
     client = OpenAI(
@@ -135,6 +152,12 @@ def _deepseek_draft(prompt: str) -> str:
         extra_body={"thinking": {"type": "disabled"}},
     )
     content = response.choices[0].message.content
+    usage = getattr(response, "usage", None)
+    _provider_response_telemetry.set({
+        "finish_reason": getattr(response.choices[0], "finish_reason", None),
+        "response_characters": len(content or ""),
+        "completion_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+    })
     if not content:
         raise AIServiceError("DeepSeek returned an empty draft. Please try again.")
     return content

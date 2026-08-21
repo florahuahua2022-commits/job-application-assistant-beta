@@ -102,6 +102,10 @@ export function requirementsHasUnknown(requirements: ApplicationRequirements): b
   return Object.values(requirements.documents).some((document) => document.requirement === "unknown" || (["required", "optional"].includes(document.requirement) && document.format === "unknown"));
 }
 
+export function requirementsNeedConfirmation(requirements: ApplicationRequirements): boolean {
+  return requirements.review_status === "needs_confirmation";
+}
+
 export function unresolvedRequirementLabels(requirements: ApplicationRequirements): string[] {
   const names = { resume: "Resume", cover_letter: "Cover Letter", selection_criteria: "Selection Criteria" };
   return (Object.keys(names) as (keyof typeof names)[]).flatMap((name) => {
