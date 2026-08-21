@@ -11,6 +11,7 @@ from app.application_requirements import (
     parse_application_requirements,
     requirements_source_changed,
     validate_application_requirements,
+    correct_application_requirements,
 )
 
 
@@ -18,6 +19,24 @@ FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "application_requi
 
 
 class ApplicationRequirementsParserTests(unittest.TestCase):
+    def test_document_basis_distinguishes_employer_text_user_choice_and_legacy_default(self):
+        explicit = parse_application_requirements("Submit your CV and cover letter.")
+        self.assertEqual(explicit["documents"]["resume"]["basis"], "employer_explicit")
+        ambiguous = parse_application_requirements("Join our administration team.")
+        documents = copy.deepcopy(ambiguous["documents"])
+        documents["resume"].update(requirement="required", format="standalone")
+        documents["cover_letter"].update(requirement="required", format="standalone")
+        documents["selection_criteria"].update(requirement="not_required", format="not_applicable")
+        corrected = correct_application_requirements(ambiguous, documents, [])
+        self.assertEqual(corrected["documents"]["resume"]["basis"], "user_confirmed")
+        self.assertNotIn("Submission document requirements could not be determined from the supplied text.", corrected["warnings"])
+
+    def test_legacy_confirmed_material_unknown_loads_as_unresolved(self):
+        contradictory = empty_application_requirements("Ambiguous")
+        contradictory["review_status"] = "confirmed"
+        loaded = load_application_requirements(json.dumps(contradictory))
+        self.assertEqual(loaded["review_status"], "needs_confirmation")
+
     def test_fixture_matrix(self):
         cases = json.loads(FIXTURES.read_text(encoding="utf-8"))
         for case in cases:

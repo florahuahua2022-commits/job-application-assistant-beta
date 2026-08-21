@@ -1,10 +1,19 @@
+import json
 import unittest
 from types import SimpleNamespace
 
-from app.cover_letter_plan import COVER_LETTER_PLAN_SCHEMA_VERSION, build_cover_letter_plan, selected_cover_letter_evidence_ids
+from app.cover_letter_plan import COVER_LETTER_PLAN_SCHEMA_VERSION, build_cover_letter_plan, cover_letter_evidence_pack, selected_cover_letter_evidence_ids
+from app.evidence_allocation import build_evidence_allocation
 
 
 class CoverLetterPlanTests(unittest.TestCase):
+    def test_no_selection_criteria_context_still_selects_grounded_differentiator(self):
+        resume = {"selected_evidence": [{"evidence_id": "EV1", "curation_action": "feature", "evidence_framing": "direct"}]}
+        decision = {"requirements": [{"criteria_id": "C1", "importance": "essential", "evidence_classification": "verified_match", "matched_evidence": ["EV1"]}]}
+        allocation = build_evidence_allocation(resume, {"items": []}, self.ckb, decision)
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1"])
+
     def setUp(self):
         self.job_model = {"criteria": [
             {"criteria_id": "C1", "criteria_text": "Stakeholder engagement", "criteria_type": "essential"},
@@ -52,6 +61,50 @@ class CoverLetterPlanTests(unittest.TestCase):
 
         alignment = next(item for item in plan["narrative_plan"] if item["section"] == "role_and_organisation_alignment")
         self.assertIn("do not invent applicant motivation", alignment["purpose"])
+
+    def test_distinct_primary_does_not_fill_second_slot_with_reused_evidence(self):
+        allocation = {"items": [
+            {"evidence_id": "EV1", "cover_letter": {"use": "allowed_if_needed", "purpose": "differentiator"}, "selection_criteria": [{"use": "primary"}]},
+            {"evidence_id": "EV2", "cover_letter": {"use": "primary", "purpose": "differentiator"}, "selection_criteria": [{"use": "secondary"}]},
+        ]}
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV2"])
+        self.assertEqual(plan["selected_evidence"][0]["allocation_use"], "primary")
+
+    def test_two_distinct_primary_differentiators_may_both_be_selected(self):
+        allocation = {"items": [
+            {"evidence_id": "EV1", "cover_letter": {"use": "primary", "purpose": "differentiator"}, "selection_criteria": [{"criteria_id": "C1"}]},
+            {"evidence_id": "EV2", "cover_letter": {"use": "primary", "purpose": "differentiator"}, "selection_criteria": [{"criteria_id": "C2"}]},
+        ]}
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1", "EV2"])
+
+    def test_sole_reused_strong_evidence_remains_selectable(self):
+        allocation = {"items": [{"evidence_id": "EV1", "cover_letter": {"use": "allowed_if_needed", "purpose": "differentiator"}, "selection_criteria": [{"criteria_id": "C1", "use": "primary"}]}]}
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1"])
+
+    def test_distinct_primary_can_add_bridge_for_different_requirement(self):
+        allocation = {"items": [
+            {"evidence_id": "EV1", "cover_letter": {"use": "primary", "purpose": "differentiator"}, "selection_criteria": [{"criteria_id": "C1"}]},
+            {"evidence_id": "EV2", "cover_letter": {"use": "allowed_if_needed", "purpose": "bridge"}, "selection_criteria": [{"criteria_id": "C2"}]},
+        ]}
+        plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1", "EV2"])
+
+    def test_cover_letter_allocation_never_selects_more_than_two(self):
+        ckb = self.ckb + [{"evidence_id": "EV3", "source_section": "Project > Third"}]
+        matches = {"matches": [
+            {"criteria_id": "C1", "matched_evidence": ["EV1", "EV2", "EV3"], "match_type": "direct", "coverage": "strong"},
+            *self.matches["matches"][1:],
+        ]}
+        allocation = {"items": [{"evidence_id": value, "cover_letter": {"use": "primary", "purpose": "differentiator"}, "selection_criteria": []} for value in ("EV1", "EV2", "EV3")]}
+        plan = build_cover_letter_plan(self.job_model, matches, ckb, evidence_allocation=allocation)
+        self.assertEqual(len(plan["selected_evidence"]), 2)
+
+    def test_cover_letter_pack_contains_only_plan_selected_evidence(self):
+        pack = cover_letter_evidence_pack(json.dumps(self.ckb), json.dumps({"selected_evidence": [{"evidence_id": "EV2"}]}))
+        self.assertEqual([item["evidence_id"] for item in pack], ["EV2"])
 
 
 if __name__ == "__main__":

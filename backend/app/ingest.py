@@ -464,9 +464,8 @@ def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None
 
     criteria = ""
     criteria_match = re.search(
-        r"(?is)(?:key selection criteria|selection criteria|essential criteria|essential requirements|role requirements|"
-        r"what you(?:(?:'|’)?ll| will) bring|what we(?:(?:'|’)?re| are) looking for|about you)\s*[:\n]+(.+?)"
-        r"(?=\n\s*(?:what we offer|what you(?:'|’)?ll get|benefits|how to apply|about us|about the company|employer questions?)\b|\Z)",
+        r"(?is)(?:key selection criteria|selection criteria|essential criteria)\s*[:\n]+(.+?)"
+        r"(?=\n\s*(?:we offer|what we offer|benefits|employee benefits|our benefits|perks|rewards and benefits|why join us|what(?:'|’)?s in it for you|what you(?:'|’)?ll get|how to apply|about us|about the company|employer questions?)\b|\Z)",
         text,
     )
     if criteria_match:

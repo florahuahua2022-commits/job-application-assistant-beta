@@ -79,3 +79,17 @@ Do not send the beta link to a tester until all of these pass:
 - Privacy notice and beta disclaimer visible.
 - Local Windows version still starts and passes its existing tests.
 
+## Tester release workflow
+
+Each application must follow the visible release checklist:
+
+Diagnose → Generate → Review → Final Check → Pack Review → ATS verify the selected Resume format and template → Ready to Apply → Applied.
+
+- Final Check covers deterministic pack completeness and content checks.
+- Pack Review checks material cross-document semantic conflicts; a legitimate no-candidate skip is explained and non-blocking.
+- ATS verification applies only to the displayed Resume document ID, format and template. A DOCX pass does not verify PDF, and changing the template requires another check.
+- Draft downloads remain available for review, but they are not labelled as verified submission artifacts.
+- Advisory warnings remain visible and do not block release.
+
+Before inviting testers, also verify the deployed two-user isolation boundary, SMTP/invite flow, upload/generation/export smoke test, privacy and beta notice, account deletion/export, and server-side secret handling.
+

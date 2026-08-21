@@ -34,6 +34,12 @@
 .requirementsStatus { flex: none; padding: 5px 9px; border-radius: 999px; background: #fff0cb; color: #713f00; font-size: .78rem; font-weight: 800; }
 .requirementsCard.confirmed .requirementsStatus, .requirementsCard.user_overridden .requirementsStatus { background: #dcefe8; color: var(--accent-dark); }
 .requirementsStatusHelp { margin: 12px 0; color: var(--muted); font-size: .88rem; }
+.documentChoices { display: grid; gap: 10px; margin: 12px 0; }
+.documentChoice { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.documentChoice > span { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; background: #e8f4ef; color: var(--accent-dark); font-weight: 900; }
+.documentChoice div { display: grid; gap: 2px; }
+.documentChoice small { color: var(--muted); }
+.editModeNotice { padding: 10px 12px; border-left: 4px solid var(--accent); background: #eef7f5; }
 .requirementsGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .requirementsGrid article { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .requirementsGrid dl { display: grid; gap: 7px; margin: 10px 0 0; }
@@ -109,6 +115,22 @@
 .templatePicker > div { display: grid; gap: 3px; }
 .templatePicker small { color: var(--muted); }
 .templatePicker select { width: min(100%, 260px); margin: 0; }
+.releaseChecklist { margin: 0 0 18px; padding: 16px; border: 1px solid #e1b86a; border-radius: 12px; background: #fffdf7; }
+.releaseChecklist.pass { border-color: #80bdab; background: #f4fbf8; }
+.releaseChecks { display: grid; gap: 7px; margin: 14px 0; padding: 0; list-style: none; }
+.releaseChecks li { padding-left: 23px; position: relative; font-size: .88rem; }
+.releaseChecks li::before { content: "○"; position: absolute; left: 0; color: #a15c00; font-weight: 900; }
+.releaseChecks li[data-ready="true"]::before { content: "✓"; color: var(--accent); }
+.releaseChecklist .requirementsWarnings summary { display: block; color: #713f00; font: inherit; font-weight: 800; }
+.accountActions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+.dangerButton { color: #9f241d; }
+.privacyLink { border: 0; padding: 0; background: transparent; color: var(--accent-dark); text-decoration: underline; }
+.privacyLink:hover { background: transparent; color: var(--accent); }
+.modalBackdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(10, 24, 33, .62); }
+.privacyModal { width: min(680px, 100%); max-height: 90vh; overflow: auto; padding: 24px; border-radius: 14px; background: #fff; box-shadow: var(--shadow); }
+.privacyModal h2 { margin: 0; font: 700 1.35rem Georgia, serif; }
+.privacyModal p { line-height: 1.55; }
+.activationPanel { max-width: 620px; margin-top: 24px; }
 @media (max-width: 760px) {
   .uploadBox, .quickStartUpload, .linkImportRow, .contactConfirm { grid-template-columns: 1fr; }
   .confirmCard { align-items: stretch; flex-direction: column; }
@@ -125,4 +147,5 @@
   .workspaceOverview { grid-template-columns: 1fr; }
   .overviewActions { flex-direction: row; }
   .overviewActions button { flex: 1; }
+  .accountActions { flex-direction: column; }
 }

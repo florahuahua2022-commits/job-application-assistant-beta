@@ -10,7 +10,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import A4, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
@@ -25,6 +25,25 @@ EXPORT_THEMES = {
     "modern": {"font": "Arial", "body_size": 10.5, "margin": 0.85, "line_spacing": 1.08, "accent": RGBColor(37, 99, 135), "pdf_font": "Helvetica", "pdf_bold": "Helvetica-Bold"},
     "traditional": {"font": "Georgia", "body_size": 11, "margin": 1.0, "line_spacing": 1.12, "accent": RGBColor(52, 63, 82), "pdf_font": "Times-Roman", "pdf_bold": "Times-Bold"},
 }
+
+PAGE_SIZES = {"A4": A4, "Letter": letter}
+MARKET_PAGE_SIZES = {
+    "AU": "A4", "AUSTRALIA": "A4", "NZ": "A4", "NEW ZEALAND": "A4",
+    "GB": "A4", "UK": "A4", "UNITED KINGDOM": "A4", "IE": "A4", "IRELAND": "A4",
+    "US": "Letter", "USA": "Letter", "UNITED STATES": "Letter",
+    "CA": "Letter", "CANADA": "Letter",
+}
+PRODUCT_PAGE_SIZE = "A4"
+
+
+def resolve_page_size(market: str | None = None, explicit: str | None = None) -> dict:
+    if explicit in PAGE_SIZES:
+        name, source = explicit, "authoritative_requirement"
+    elif str(market or "").strip().upper() in MARKET_PAGE_SIZES:
+        name, source = MARKET_PAGE_SIZES[str(market).strip().upper()], "market_default"
+    else:
+        name, source = PRODUCT_PAGE_SIZE, "product_fallback"
+    return {"name": name, "dimensions": PAGE_SIZES[name], "source": source}
 
 
 def export_theme(template: str) -> dict:
@@ -62,10 +81,10 @@ def _add_page_number(paragraph, theme: dict) -> None:
     run._r.extend([begin, instruction, end])
 
 
-def _configure_docx(document: Document, theme: dict) -> None:
+def _configure_docx(document: Document, theme: dict, page_size: tuple[float, float]) -> None:
     section = document.sections[0]
-    section.page_width = Inches(8.5)
-    section.page_height = Inches(11)
+    section.page_width = Inches(page_size[0] / 72)
+    section.page_height = Inches(page_size[1] / 72)
     section.top_margin = section.right_margin = section.bottom_margin = section.left_margin = Inches(theme["margin"])
     section.header_distance = section.footer_distance = Inches(0.492)
     _add_page_number(section.footer.paragraphs[0], theme)
@@ -94,10 +113,10 @@ def _add_inline_markdown(paragraph, text: str, theme: dict) -> None:
         _set_font(run, size=theme["body_size"], bold=bold, font_name=theme["font"])
 
 
-def create_docx(content: str, title: str, template: str = "classic") -> bytes:
+def create_docx(content: str, title: str, template: str = "classic", market: str | None = None, page_size: str | None = None) -> bytes:
     theme = export_theme(template)
     document = Document()
-    _configure_docx(document, theme)
+    _configure_docx(document, theme, resolve_page_size(market, page_size)["dimensions"])
     lines = _ascii_punctuation(content).splitlines()
 
     for index, raw in enumerate(lines):
@@ -144,7 +163,7 @@ def create_docx(content: str, title: str, template: str = "classic") -> bytes:
     return stream.getvalue()
 
 
-def create_pdf(content: str, title: str, template: str = "classic") -> bytes:
+def create_pdf(content: str, title: str, template: str = "classic", market: str | None = None, page_size: str | None = None) -> bytes:
     theme = export_theme(template)
     accent_hex = "#" + "".join(f"{channel:02X}" for channel in theme["accent"])
     stream = BytesIO()
@@ -173,6 +192,6 @@ def create_pdf(content: str, title: str, template: str = "classic") -> bytes:
             story.append(Paragraph(escaped, body))
 
     margin = theme["margin"] * inch
-    pdf = SimpleDocTemplate(stream, pagesize=letter, rightMargin=margin, leftMargin=margin, topMargin=margin, bottomMargin=margin, title=title, author="")
+    pdf = SimpleDocTemplate(stream, pagesize=resolve_page_size(market, page_size)["dimensions"], rightMargin=margin, leftMargin=margin, topMargin=margin, bottomMargin=margin, title=title, author="")
     pdf.build(story)
     return stream.getvalue()

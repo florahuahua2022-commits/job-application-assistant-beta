@@ -5,21 +5,26 @@ import { createClient, Session } from "@supabase/supabase-js";
 import {
   ApplicationRequirements, ApplicationRequirementsCorrectionDraft, ApplicationRequirementsResponse,
   DocumentFormat, LimitConstraint, LimitScope, LimitUnit, RequirementValue, SubmissionLimit,
-  createCorrectionDraft, formatDocumentFormat, formatRequirementLabel, formatSubmissionLimit,
-  getRequirementsStatusLabel, requirementsHasUnknown,
+  createCorrectionDraft, documentChoiceLabel, formatDocumentFormat, formatRequirementLabel, formatSubmissionLimit,
+  getRequirementsStatusLabel, requiredGeneratedDocumentTypes, requirementsHasUnknown, unresolvedRequirementLabels,
 } from "./applicationRequirements";
+import { ApplicationDecision, decisionLabel } from "./applicationDecision";
+import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
+import { ActivationState, activationIntent, activationTransition } from "./authActivation";
+import { releaseFailureState, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
 type Experience = { id: string; role_title: string; organization: string; responsibility: string; context: string; result: string; no_result_data: boolean };
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
 type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
-type ReviewerResult = { status: "pass" | "fail"; results: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; severity?: "critical" | "major" | "advisory"; description: string; recommended_action?: string }[]; recommendation?: string }[] };
+type ReviewerResult = { status: "pass" | "fail" | "pending" | "provider_failed"; state?: string; message?: string; results?: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; severity?: "critical" | "major" | "advisory"; description: string; recommended_action?: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
 type QualityResult = { ready: boolean; issues: QualityIssue[]; checked_documents: string[] };
 type ResumeContentCheckItem = { field: string; label: string; value: string; status: "matched" | "review" | "missing"; message: string };
@@ -83,6 +88,8 @@ export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState("");
+  const [activation, setActivation] = useState<ActivationState>({ mode: "idle" });
+  const [showPrivacy, setShowPrivacy] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
@@ -95,6 +102,7 @@ export default function Home() {
   const [draftText, setDraftText] = useState("");
   const [qualityResult, setQualityResult] = useState<QualityResult | null>(null);
   const [finalCheckState, setFinalCheckState] = useState<"idle" | "checking">("idle");
+  const [documentReviewState, setDocumentReviewState] = useState<"idle" | "reviewing">("idle");
   const [resumeContentCheck, setResumeContentCheck] = useState<ResumeContentCheckResult | null>(null);
   const [resumeCheckState, setResumeCheckState] = useState<"idle" | "checking" | "done" | "error">("idle");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -113,11 +121,19 @@ export default function Home() {
   const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
   const [referralCode, setReferralCode] = useState("");
   const [exportTemplate, setExportTemplate] = useState<"classic" | "modern" | "traditional">("classic");
+  const [submissionFormat, setSubmissionFormat] = useState<"docx" | "pdf">("docx");
+  const [releaseChecklist, setReleaseChecklist] = useState<ReleaseChecklist | null>(null);
+  const [packReviewResult, setPackReviewResult] = useState<PackReviewResult | null>(null);
+  const [atsResult, setAtsResult] = useState<AtsResult | null>(null);
+  const [releaseBusy, setReleaseBusy] = useState<"idle" | "pack" | "ats">("idle");
   const [applicationRequirements, setApplicationRequirements] = useState<ApplicationRequirements | null>(null);
   const [requirementsLoadState, setRequirementsLoadState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [requirementsSaveState, setRequirementsSaveState] = useState<"idle" | "saving" | "error">("idle");
+  const [requirementsSavedMessage, setRequirementsSavedMessage] = useState("");
   const [requirementsEditDraft, setRequirementsEditDraft] = useState<ApplicationRequirementsCorrectionDraft | null>(null);
   const [requirementsError, setRequirementsError] = useState("");
+  const [applicationDecision, setApplicationDecision] = useState<ApplicationDecision | null>(null);
+  const [decisionBusy, setDecisionBusy] = useState(false);
   const [isEditingRequirements, setIsEditingRequirements] = useState(false);
   const requirementsRequestId = useRef(0);
   const [sources, setSources] = useState<JobSource[]>([]);
@@ -129,7 +145,20 @@ export default function Home() {
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
     if (session?.access_token) headers.set("Authorization", `Bearer ${session.access_token}`);
-    return window.fetch(input, { ...init, headers });
+    const response = await window.fetch(input, { ...init, headers });
+    if (shouldExpireSession(response.status) && supabase) {
+      await supabase.auth.signOut({ scope: "local" });
+      clearAuthenticatedState();
+      setAuthNotice("Your session expired. Sign in again to reload your saved workspace.");
+    }
+    return response;
+  }
+
+  function clearAuthenticatedState() {
+    setProfile(null); setResumes([]); setApplications([]); setDocuments([]);
+    setApplicationRequirements(null); setApplicationDecision(null); setReleaseChecklist(null);
+    setRequirementsEditDraft(null); setSources([]); setSourcesLoadState("idle");
+    setSourcesError(""); setSourceUploadId(null); sourcesRequestId.current += 1;
   }
 
   async function refresh() {
@@ -149,13 +178,28 @@ export default function Home() {
 
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    const intent = activationIntent(window.location.href);
+    if (intent.mode === "error") {
+      setActivation(activationTransition({ mode: "idle" }, "failure", intent.message));
       setAuthReady(true);
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } else if (intent.mode === "password_setup") {
+      setActivation(activationTransition({ mode: "idle" }, "start"));
+      const establish = intent.code ? supabase.auth.exchangeCodeForSession(intent.code) : supabase.auth.getSession();
+      establish.then(({ data, error }) => {
+        const callbackSession = "session" in data ? data.session : null;
+        setSession(callbackSession);
+        setActivation(error || !callbackSession
+          ? activationTransition({ mode: "checking" }, "failure", error?.message)
+          : activationTransition({ mode: "checking" }, "session_ready"));
+        setAuthReady(true);
+      });
+    } else {
+      supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthReady(true); });
+    }
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       setAuthReady(true);
+      if (event === "PASSWORD_RECOVERY" && nextSession) setActivation({ mode: "password_setup" });
     });
     return () => data.subscription.unsubscribe();
   }, []);
@@ -190,17 +234,19 @@ export default function Home() {
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();
-    setProfile(null);
-    setResumes([]);
-    setApplications([]);
-    setDocuments([]);
-    setApplicationRequirements(null);
-    setRequirementsEditDraft(null);
-    setSources([]);
-    setSourcesLoadState("idle");
-    setSourcesError("");
-    setSourceUploadId(null);
-    sourcesRequestId.current += 1;
+    clearAuthenticatedState();
+  }
+
+  async function setActivationPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    const password = String(new FormData(event.currentTarget).get("password") || "");
+    if (password.length < 8) return setActivation({ mode: "error", message: "Use a password of at least eight characters, then reopen the invitation link if needed." });
+    setActivation((state) => activationTransition(state, "save"));
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) return setActivation((state) => activationTransition(state, "failure", error.message));
+    window.history.replaceState({}, "", window.location.pathname);
+    setActivation((state) => activationTransition(state, "success"));
   }
 
   const latestDocuments = useMemo(() => {
@@ -214,7 +260,7 @@ export default function Home() {
   const activeDocument = latestDocuments[activeType];
   const activeReviewer = useMemo(() => {
     if (!activeDocument?.reviewer_json) return null;
-    try { return JSON.parse(activeDocument.reviewer_json) as ReviewerResult; } catch { return null; }
+    try { const reviewer = JSON.parse(activeDocument.reviewer_json) as ReviewerResult; return reviewer.status ? reviewer : null; } catch { return null; }
   }, [activeDocument?.reviewer_json]);
   const activeEvidence = useMemo(() => {
     if (!activeDocument?.used_experiences_json) return [];
@@ -303,6 +349,7 @@ export default function Home() {
     });
     setNotice(response.ok ? "Master Resume saved. You only need to update it when your experience changes." : "Could not save the Master Resume.");
     if (response.ok) {
+      setApplicationDecision(null);
       setResumeContentCheck(null);
       setResumeCheckState("idle");
       refresh();
@@ -342,26 +389,23 @@ export default function Home() {
   async function uploadResume(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setResumeUploadState("uploading");
-    const response = await authenticatedFetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
-    const result = await response.json();
-    if (!response.ok) {
-      setResumeUploadState("error");
-      return setNotice(result.detail || "Could not read this resume file.");
+    try {
+      const response = await authenticatedFetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Validation failed: the Resume file could not be read.");
+      let extractedExperienceCount = 0;
+      try { extractedExperienceCount = JSON.parse(result.experiences_json || "[]").length; } catch { extractedExperienceCount = 0; }
+      const guess = detectContact(result.source_text || "");
+      setContactGuess(guess);
+      const contactSaved = await saveDetectedContact(guess);
+      await refresh(); await runResumeContentCheck(result.id);
+      const experienceMessage = extractedExperienceCount ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.` : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.";
+      setNotice((contactSaved ? "CV uploaded. We found and saved your name, phone and email — please check them once." : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.") + experienceMessage);
+      setResumeUploadState("saved");
+    } catch (error) {
+      setResumeUploadState(uploadFailureState());
+      setNotice(error instanceof Error ? error.message : "Network error: Resume upload failed. Check the connection and try again.");
     }
-    setResumeUploadState("saved");
-    let extractedExperienceCount = 0;
-    try { extractedExperienceCount = JSON.parse(result.experiences_json || "[]").length; } catch { extractedExperienceCount = 0; }
-    const guess = detectContact(result.source_text || "");
-    setContactGuess(guess);
-    const contactSaved = await saveDetectedContact(guess);
-    await refresh();
-    await runResumeContentCheck(result.id);
-    const experienceMessage = extractedExperienceCount
-      ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.`
-      : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.";
-    setNotice((contactSaved
-      ? "CV uploaded. We found and saved your name, phone and email — please check them once."
-      : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.") + experienceMessage);
   }
 
   async function importJobLink() {
@@ -448,7 +492,7 @@ export default function Home() {
     setAdParseState("idle");
     await refresh();
     await openApplication(application.id);
-    setNotice("Job saved. Click Generate Application Pack when you are ready.");
+    setNotice("Job saved. Diagnose the application, resolve any material questions, then generate the application pack.");
   }
 
   async function updateSavedJob(event: FormEvent<HTMLFormElement>) {
@@ -473,8 +517,9 @@ export default function Home() {
     setApplications((current) => current.map((application) => application.id === result.id ? result : application));
     setConfirmedApplication(null);
     setQualityResult(null);
-    await loadApplicationRequirements(selectedApplication);
-    setNotice("Saved job details updated. Confirm them again before generating or applying.");
+    setDocuments([]); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+    await Promise.all([loadApplicationRequirements(selectedApplication), loadSources(selectedApplication)]);
+    setNotice("Saved job details updated. Earlier documents are now historical; diagnose and regenerate from the current job.");
   }
 
   async function loadApplicationRequirements(applicationId: number) {
@@ -495,6 +540,7 @@ export default function Home() {
         return;
       }
       setApplicationRequirements(result.requirements);
+      setApplicationDecision(null);
       setRequirementsLoadState("success");
     } catch {
       if (requestId !== requirementsRequestId.current) return;
@@ -567,9 +613,13 @@ export default function Home() {
         return setRequirementsError(result && "detail" in result && result.detail ? result.detail : "Could not confirm the application requirements.");
       }
       setApplicationRequirements(result.requirements);
+      setApplicationDecision(null);
       setRequirementsEditDraft(null);
       setIsEditingRequirements(false);
       setRequirementsSaveState("idle");
+      setRequirementsSavedMessage("✓ Saved");
+      setDocuments([]); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+      await openApplication(selectedApplication);
     } catch {
       setRequirementsSaveState("error");
       setRequirementsError("Could not confirm the application requirements. Check the connection and try again.");
@@ -581,6 +631,7 @@ export default function Home() {
     setRequirementsEditDraft(createCorrectionDraft(applicationRequirements));
     setRequirementsError("");
     setRequirementsSaveState("idle");
+    setRequirementsSavedMessage("");
     setIsEditingRequirements(true);
   }
 
@@ -627,9 +678,13 @@ export default function Home() {
         return setRequirementsError(result && "detail" in result && result.detail ? result.detail : "Could not save the requirement corrections.");
       }
       setApplicationRequirements(result.requirements);
+      setApplicationDecision(null);
       setRequirementsEditDraft(null);
       setIsEditingRequirements(false);
       setRequirementsSaveState("idle");
+      setRequirementsSavedMessage(requirementsHasUnknown(result.requirements) ? "✓ Changes saved — some document choices still need your decision." : "✓ Saved");
+      setDocuments([]); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+      await openApplication(selectedApplication);
     } catch {
       setRequirementsSaveState("error");
       setRequirementsError("Could not save the requirement corrections. Check the connection and try again.");
@@ -641,15 +696,113 @@ export default function Home() {
     setPackNotice("");
     setConfirmedApplication(null);
     setQualityResult(null);
-    const [response] = await Promise.all([
+    setApplicationDecision(null);
+    setReleaseChecklist(null);
+    setPackReviewResult(null);
+    setAtsResult(null);
+    const [response, decisionResponse] = await Promise.all([
       authenticatedFetch(`${api}/applications/${id}/documents`),
+      authenticatedFetch(`${api}/applications/${id}/decision`),
       loadApplicationRequirements(id),
       loadSources(id),
     ]);
     const loaded = response.ok ? await response.json() : [];
     setDocuments(loaded);
+    if (decisionResponse.ok) {
+      const result = await decisionResponse.json() as { decision: ApplicationDecision; current: boolean };
+      if (result.current) setApplicationDecision(result.decision);
+    }
     const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
     setActiveType(firstAvailable || "tailored_resume");
+    await loadReleaseChecklist(id, submissionFormat, exportTemplate);
+  }
+
+  async function loadReleaseChecklist(id = selectedApplication, format = submissionFormat, template = exportTemplate) {
+    if (!id) return null;
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${id}/release-checklist?format=${format}&template=${template}`);
+      if (!response.ok) throw new Error(response.status === 401 ? "Session expired." : "Verification unavailable.");
+      const result = await response.json() as ReleaseChecklist;
+      setReleaseChecklist(result);
+      setPackReviewResult(result.checks.pack_review.current ? result.checks.pack_review.result : null);
+      setAtsResult(result.checks.ats.ready ? result.checks.ats.result : null);
+      setConfirmedApplication(result.checks.details_confirmation.ready ? id : null);
+      return result;
+    } catch (error) {
+      const failed = releaseFailureState(); setReleaseChecklist(failed.checklist); setPackReviewResult(failed.packReview); setAtsResult(failed.ats);
+      setNotice(error instanceof Error && error.message === "Session expired." ? error.message : "Verification unavailable: readiness could not be checked. Refresh and try again.");
+      return null;
+    }
+  }
+
+  async function confirmReleaseDetails() {
+    if (!selectedApplication) return;
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/release-confirmation`, { method: "POST" });
+    if (!response.ok) return setNotice("Could not confirm the applicant, job and contact details.");
+    setConfirmedApplication(selectedApplication);
+    await loadReleaseChecklist();
+  }
+
+  async function runPackReview() {
+    if (!selectedApplication || releaseBusy !== "idle") return;
+    setReleaseBusy("pack"); setNotice("Running Pack Review…");
+    await withBusyReset(async () => { try {
+      const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/pack-review`, { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || "Provider unavailable: Pack Review could not be completed.");
+      setPackReviewResult(result); await loadReleaseChecklist();
+      setNotice(result.skipped ? `Pack Review not required: ${result.skip_reason}` : result.blocks_release ? "Pack Review found blocking issues." : "Pack Review passed.");
+    } catch (error) {
+      setReleaseChecklist(null);
+      setNotice(error instanceof Error ? error.message : "Network error: Pack Review failed. Try again.");
+    } }, () => setReleaseBusy("idle"));
+  }
+
+  async function runAtsVerification() {
+    const resume = latestDocuments.tailored_resume;
+    if (!resume || releaseBusy !== "idle") return;
+    setReleaseBusy("ats"); setNotice(`Verifying Resume #${resume.id} · ${submissionFormat.toUpperCase()} · ${exportTemplate}…`);
+    await withBusyReset(async () => { try {
+      const response = await authenticatedFetch(`${api}/documents/${resume.id}/ats-check`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: submissionFormat, template: exportTemplate }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Verification unavailable: ATS verification could not be completed.");
+      setAtsResult(result); await loadReleaseChecklist();
+      setNotice(result.ready ? "The selected Resume artifact passed ATS verification." : "The selected Resume artifact has blocking ATS issues.");
+    } catch (error) {
+      setReleaseChecklist(null); setAtsResult(null);
+      setNotice(error instanceof Error ? error.message : "Network error: ATS verification failed. Try again.");
+    } }, () => setReleaseBusy("idle"));
+  }
+
+  async function checkApplication() {
+    const resume = latestDocuments.tailored_resume;
+    if (!selectedApplication || !resume || releaseBusy !== "idle") return;
+    if (draftSaveState === "dirty" || draftSaveState === "saving") return setNotice("Save your document changes before checking the application.");
+    setReleaseBusy("pack"); setNotice("Checking your application…"); setQualityResult(null);
+    try {
+      const finalResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
+      const finalResult = await finalResponse.json().catch(() => null) as QualityResult | null;
+      if (!finalResponse.ok || !finalResult) throw new Error("Application checks are temporarily unavailable. Try again.");
+      setQualityResult(finalResult);
+      if (!finalResult.ready) { await loadReleaseChecklist(); return setNotice("Your application needs attention. Review the affected document and try again."); }
+
+      const packResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/pack-review`, { method: "POST" });
+      const packResult = await packResponse.json();
+      if (!packResponse.ok) throw new Error(typeof packResult.detail === "string" ? packResult.detail : packResult.detail?.message || "The consistency check could not be completed.");
+      setPackReviewResult(packResult);
+      if (packResult.blocks_release) { await loadReleaseChecklist(); return setNotice("The document consistency check found an issue. View check details, correct it and try again."); }
+
+      const atsResponse = await authenticatedFetch(`${api}/documents/${resume.id}/ats-check`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: submissionFormat, template: exportTemplate }) });
+      const ats = await atsResponse.json();
+      if (!atsResponse.ok) throw new Error(typeof ats.detail === "string" ? ats.detail : ats.detail?.message || "The Resume compatibility check could not be completed.");
+      setAtsResult(ats);
+      const checklist = await loadReleaseChecklist();
+      setNotice(ats.ready && checklist?.ready ? "Your application is ready to apply." : "Your Resume compatibility check needs attention. View check details before applying.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Application checks could not be completed. Try again.");
+    } finally {
+      setReleaseBusy("idle");
+    }
   }
 
   async function generatePack() {
@@ -658,11 +811,10 @@ export default function Home() {
       setNotice(message);
       setPackNotice(message);
     };
-    const application = applications.find((item) => item.id === selectedApplication);
-    const includesSelectionCriteria = Boolean(application?.selection_criteria?.trim());
-    let documentTypes: readonly (typeof packTypes[number])[] = includesSelectionCriteria
-      ? ["tailored_resume", "cover_letter", "selection_criteria"]
-      : ["tailored_resume", "cover_letter"];
+    const documentTypes = requiredGeneratedDocumentTypes(applicationRequirements);
+    if (!documentTypes.length) return showPackNotice("Resolve and confirm the employer's document requirements before generating.");
+    const includesSelectionCriteria = documentTypes.includes("selection_criteria");
+    let generationTypes: readonly (typeof packTypes[number])[] = documentTypes;
     let selectionCriteriaSkipped = false;
     if (includesSelectionCriteria) {
       const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
@@ -670,7 +822,7 @@ export default function Home() {
       const currentAccess = await accessResponse.json() as SelectionCriteriaAccess;
       setSelectionAccess(currentAccess);
       if (!currentAccess.unlimited && !currentAccess.remaining_credits) {
-        documentTypes = ["tailored_resume", "cover_letter"];
+        generationTypes = documentTypes.filter((type) => type !== "selection_criteria");
         selectionCriteriaSkipped = true;
       }
     }
@@ -682,9 +834,9 @@ export default function Home() {
     setActiveType("tailored_resume");
     const created: GeneratedDocument[] = [];
     try {
-      for (let index = 0; index < documentTypes.length; index += 1) {
-        const documentType = documentTypes[index];
-        showPackNotice(`Creating application pack: ${index + 1} of ${documentTypes.length} — ${labels[documentType]}…`);
+      for (let index = 0; index < generationTypes.length; index += 1) {
+        const documentType = generationTypes[index];
+        showPackNotice(`Creating application pack: ${index + 1} of ${generationTypes.length} — ${labels[documentType]}…`);
         const response = await authenticatedFetch(`${api}/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -692,7 +844,13 @@ export default function Home() {
           signal: AbortSignal.timeout(360_000),
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.detail || `${labels[documentType]} could not be generated.`);
+        if (!response.ok) {
+          if (result.detail?.document_id) {
+            const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
+            if (documentsResponse.ok) setDocuments(await documentsResponse.json());
+          }
+          throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`);
+        }
         created.push(result);
       }
       setDocuments((current) => [...created.reverse(), ...current]);
@@ -716,10 +874,13 @@ export default function Home() {
       } else {
         showPackNotice("Application pack created. Run Final Check before continuing.");
       }
+      await loadReleaseChecklist();
     } catch (error) {
-      if (created.length) setDocuments([...created].reverse());
+      const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
+      if (documentsResponse.ok) setDocuments(await documentsResponse.json());
+      else if (created.length) setDocuments([...created].reverse());
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
-      showPackNotice(`${detail} This pack is incomplete, so Final Check is unavailable. The failed attempt has not used today's completed-pack allowance. Click Generate Application Pack to retry.`);
+      showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. The failed attempt has not used today's completed-pack allowance.`);
     } finally {
       setBusy(false);
     }
@@ -754,8 +915,25 @@ export default function Home() {
     const updated = await response.json();
     setDocuments((current) => current.map((document) => document.id === updated.id ? updated : document));
     setQualityResult(null);
+    setPackReviewResult(null); setAtsResult(null);
     setDraftSaveState("saved");
     setNotice(`${labels[activeType]} edits saved.`);
+    await loadReleaseChecklist();
+  }
+
+  async function reviewEditedDocument() {
+    if (!activeDocument || documentReviewState === "reviewing") return;
+    setDocumentReviewState("reviewing"); setNotice(`Re-reviewing edited ${labels[activeType]}…`);
+    try {
+      const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}/review`, { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Provider unavailable: the edited document could not be reviewed.");
+      setDocuments((current) => current.map((document) => document.id === result.id ? result : document));
+      setNotice(JSON.parse(result.reviewer_json || "{}").status === "pass" ? "Edited document review passed. Run Final Check next." : "The edited document review found issues. Review them before Final Check.");
+      await loadReleaseChecklist();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Provider unavailable: the edited document could not be reviewed.");
+    } finally { setDocumentReviewState("idle"); }
   }
 
   async function runFinalCheck() {
@@ -799,8 +977,32 @@ export default function Home() {
       return null;
     }
     setQualityResult(result);
+    await loadReleaseChecklist();
     setNotice(result.ready ? "Content and grammar check passed. Review any warnings, then continue to the application page." : "Content and grammar check found errors. Fix them before applying.");
     return result as QualityResult;
+  }
+
+  async function diagnoseApplication() {
+    if (!selectedApplication || decisionBusy) return;
+    setDecisionBusy(true);
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/decision`, { method: "POST" });
+    const result = await response.json();
+    setDecisionBusy(false);
+    if (!response.ok) return setPackNotice(result.detail || "Could not diagnose this application.");
+    setApplicationDecision(result);
+    setPackNotice(result.status === "ready" ? "Diagnosis ready. Review it before generating." : "Diagnosis needs your confirmation.");
+  }
+
+  async function answerDecisionQuestion(questionId: string, answer: boolean) {
+    if (!selectedApplication || decisionBusy) return;
+    setDecisionBusy(true);
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/decision/confirm`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question_id: questionId, answer }),
+    });
+    const result = await response.json();
+    setDecisionBusy(false);
+    if (!response.ok) return setPackNotice(result.detail || "Could not save this confirmation.");
+    setApplicationDecision(result);
   }
 
   async function reviewAndApply() {
@@ -812,14 +1014,9 @@ export default function Home() {
       window.alert(message);
       return;
     }
-    if (!qualityResult) {
-      const message = "Run Final Check first and review its result before opening the employer page.";
-      setNotice(message);
-      window.alert(message);
-      return;
-    }
-    if (!qualityResult.ready) {
-      const message = "Final Check still has errors. Fix them, save the changes, and run Final Check again.";
+    const currentRelease = await loadReleaseChecklist();
+    if (!releaseCanProceed(currentRelease)) {
+      const message = "Complete every blocking item in the Release Checklist before opening the employer page.";
       setNotice(message);
       window.alert(message);
       return;
@@ -837,7 +1034,7 @@ export default function Home() {
       window.alert(message);
       return;
     }
-    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/prepare-submission`, { method: "POST" });
+    const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/prepare-submission?format=${submissionFormat}&template=${exportTemplate}`, { method: "POST" });
     const result = await response.json();
     if (!response.ok) return setNotice(result.detail || "Add the job application link before continuing.");
     const statusResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/status`, {
@@ -964,6 +1161,7 @@ export default function Home() {
     if (!response.ok) return setNotice(result.detail || "Could not save this confirmation.");
     setApplications((current) => current.map((item) => item.id === result.id ? result : item));
     setNotice(checked ? "Criterion reviewed and confirmed." : "Criterion confirmation removed.");
+    await loadReleaseChecklist();
   }
 
   async function downloadTrace() {
@@ -977,12 +1175,50 @@ export default function Home() {
     link.click();
     URL.revokeObjectURL(url);
   }
-  const requiredPackTypes = selected?.selection_criteria?.trim() ? packTypes : packTypes.slice(0, 2);
-  const packReady = requiredPackTypes.every((type) => latestDocuments[type]);
+
+  async function exportAccountData() {
+    try {
+      const response = await authenticatedFetch(`${api}/account/export`);
+      if (!response.ok) throw new Error("Could not export your account data.");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a"); link.href = url; link.download = "job-assistant-account-data.zip"; link.click(); URL.revokeObjectURL(url);
+      setNotice("Your account-data archive was downloaded.");
+    } catch { setNotice("Network error: account-data export failed. Try again."); }
+  }
+
+  async function deleteMyAccount() {
+    if (!window.confirm("Delete your account and all saved application data permanently? This cannot be undone.")) return;
+    const confirmation = window.prompt("Type DELETE MY ACCOUNT to confirm permanent deletion.");
+    if (confirmation !== "DELETE MY ACCOUNT") return setNotice("Account deletion cancelled; the confirmation text did not match.");
+    try {
+      const response = await authenticatedFetch(`${api}/account`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Account deletion failed.");
+      if (supabase) await supabase.auth.signOut({ scope: "local" });
+      clearAuthenticatedState(); setNotice("Your account and saved application data were deleted.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Network error: account deletion failed. Contact the beta operator."); }
+  }
+  const requiredPackTypes = requiredGeneratedDocumentTypes(applicationRequirements);
+  const generationLabel = requiredPackTypes.length
+    ? `Generate ${requiredPackTypes.map((type) => labels[type]).join(requiredPackTypes.length > 1 ? ", " : "")}`.replace(/, ([^,]+)$/, " & $1")
+    : "Choose documents first";
+  const requirementsReady = Boolean(applicationRequirements && applicationRequirements.review_status !== "needs_confirmation" && !requirementsHasUnknown(applicationRequirements) && applicationRequirements.completeness !== "incomplete");
+  const packReady = requiredPackTypes.length > 0 && requiredPackTypes.every((type) => latestDocuments[type]);
   const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, applications.filter((application) => application.status === status).length])), [applications]);
   const filteredApplications = statusFilter === "all" ? applications : applications.filter((application) => application.status === statusFilter);
+  const privacyNotice = showPrivacy && <div className="modalBackdrop" role="presentation" onClick={() => setShowPrivacy(false)}><section className="privacyModal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="requirementsHeading"><h2 id="privacy-title">Private Beta Privacy Notice</h2><button type="button" className="secondary" onClick={() => setShowPrivacy(false)}>Close</button></div><p>This service stores your profile, Resume, job descriptions, application records and generated documents. These materials may contain personal information.</p><p>Relevant Resume, job and application content is sent to the configured AI provider when the service generates or reviews documents. This is a beta service, so errors and interruptions may occur. Review every document yourself before submitting it.</p><p>Avoid uploading unnecessary highly sensitive information such as passwords, identity documents, health information or criminal-history details.</p><p>Use <strong>Export my data</strong> to download your account data. Use <strong>Delete my account</strong> to permanently remove your account and saved data.</p><p>For access, privacy or support questions, contact {betaSupportContact}.</p></section></div>;
 
   if (!authReady) return <main><section className="panel"><p>Preparing secure sign-in…</p></section></main>;
+
+  if (supabase && ["checking", "password_setup", "saving", "error", "complete"].includes(activation.mode)) return <main>
+    <header><p className="eyebrow">JOB APPLICATION ASSISTANT · PRIVATE BETA</p><h1>Activate your invited account.</h1></header>
+    <section className="panel activationPanel">
+      {activation.mode === "checking" && <p>Checking your invitation or recovery link…</p>}
+      {(activation.mode === "password_setup" || activation.mode === "saving") && <form onSubmit={setActivationPassword} className="compactForm"><p className="full helper">Create a password of at least eight characters. Supabase Auth remains the authority for this invitation or recovery session.</p><label className="full">New password<input name="password" type="password" minLength={8} autoComplete="new-password" required /></label><button className="full" disabled={activation.mode === "saving"}>{activation.mode === "saving" ? "Saving…" : "Set password"}</button></form>}
+      {activation.mode === "error" && <><div className="requirementsError"><strong>This link could not be used.</strong><p>{activation.message || "It may be expired, already used or malformed."}</p></div><p className="helper">Ask {betaSupportContact} for a new invitation or recovery link.</p><button type="button" onClick={() => { window.history.replaceState({}, "", window.location.pathname); setActivation({ mode: "idle" }); }}>Return to sign in</button></>}
+      {activation.mode === "complete" && <><p>Password saved. Your invited account is active.</p><button type="button" onClick={() => setActivation({ mode: "idle" })}>Open workspace</button></>}
+    </section>
+  </main>;
 
   if (supabase && !session) return <main>
     <header>
@@ -998,6 +1234,8 @@ export default function Home() {
         {authNotice && <p className="notice">{authNotice}</p>}
       </form>
     </section>
+    <footer className="safety"><button type="button" className="privacyLink" onClick={() => setShowPrivacy(true)}>Privacy / Beta Notice</button></footer>
+    {privacyNotice}
   </main>;
 
   return <main>
@@ -1005,7 +1243,7 @@ export default function Home() {
       <p className="eyebrow">JOB APPLICATION ASSISTANT</p>
       <h1>From job description to a tailored CV and cover letter.</h1>
       <p>Keep one truthful Master CV, add a job, and prepare the two documents most applications need. Selection Criteria is added only when the employer asks for it.</p>
-      {supabase && <button type="button" className="secondary" onClick={signOut}>Sign out</button>}
+      {supabase && <div className="accountActions"><button type="button" className="secondary" onClick={exportAccountData}>Export my data</button><button type="button" className="secondary dangerButton" onClick={deleteMyAccount}>Delete my account</button><button type="button" className="secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     <p className="notice">{notice}</p>
 
@@ -1157,7 +1395,7 @@ export default function Home() {
       </section>
 
       <section className="panel" id="application-workspace">
-        <div className="stepHeading"><span>4</span><div><strong>Generate, review and apply</strong><small>Creates your tailored CV and Cover Letter; Selection Criteria is optional</small></div></div>
+        <div className="stepHeading"><span>4</span><div><strong>Create and check your application</strong><small>Choose documents, generate drafts, review them, then check and download</small></div></div>
         <div className="applicationLayout">
           <aside className="jobList">
             {applications.length ? applications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
@@ -1166,40 +1404,36 @@ export default function Home() {
           </aside>
           <div className="reviewArea">
             {selected ? <>
-              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || confirmedApplication !== selected.id} onClick={generatePack}>{busy ? "Creating pack…" : "Generate Application Pack"}</button></div></div>
+              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || !requirementsReady || !canGenerate(applicationDecision?.status, confirmedApplication === selected.id)} title={!requirementsReady ? "Choose and confirm the documents for this application first." : confirmedApplication !== selected.id ? "Confirm the applicant and contact details first." : applicationDecision?.status !== "ready" ? "Complete the application match check first." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div></div>
+              <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
                 <div><strong>Confirm before generating</strong><p>Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}</p></div>
-                <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={() => setConfirmedApplication(selected.id)}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
+                <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={confirmReleaseDetails}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
               </div>
-              <section className={`requirementsCard ${applicationRequirements?.review_status || "loading"}`} aria-live="polite">
+              <section className={`requirementsCard ${applicationRequirements && requirementsHasUnknown(applicationRequirements) ? "needs_confirmation" : applicationRequirements?.review_status || "loading"}`} aria-live="polite">
                 <div className="requirementsHeading">
-                  <div><strong>Application Requirements</strong><small>Review what the employer asks you to submit. This does not change the current generation workflow.</small></div>
-                  {applicationRequirements && <span className="requirementsStatus">{getRequirementsStatusLabel(applicationRequirements.review_status)}</span>}
+                  <div><strong>Documents for this application</strong><small>Choose the documents you want to prepare before checking your match.</small></div>
+                  {applicationRequirements && <span className="requirementsStatus">{requirementsHasUnknown(applicationRequirements) ? "Needs resolution" : getRequirementsStatusLabel(applicationRequirements.review_status)}</span>}
                 </div>
                 {requirementsLoadState === "loading" && <p className="helper">Loading application requirements…</p>}
                 {requirementsLoadState === "error" && <div className="requirementsError" role="alert"><strong>Requirements could not be loaded</strong><p>{requirementsError}</p><button type="button" className="secondary" onClick={() => loadApplicationRequirements(selected.id)}>Retry</button></div>}
                 {requirementsLoadState === "success" && applicationRequirements && <>
                   {applicationRequirements.source === "legacy_inference" && <div className="legacyRequirementNotice"><strong>Legacy estimate</strong><p>These requirements were inferred from the previous application-pack behaviour. Check them against the job advertisement.</p></div>}
-                  <p className="requirementsStatusHelp">{applicationRequirements.review_status === "needs_confirmation"
-                    ? "Check these requirements against the job advertisement before relying on them."
-                    : applicationRequirements.review_status === "confirmed"
-                      ? "You confirmed the parsed requirements."
-                      : "Your corrections are saved."}</p>
-                  {requirementsHasUnknown(applicationRequirements) && <p className="unknownRequirementNotice"><strong>Unable to determine automatically.</strong> Some requirements are still Unknown. Edit them if the advertisement provides more detail.</p>}
+                  <p className="requirementsStatusHelp">{applicationRequirements.review_status === "needs_confirmation" ? "Review these document choices before generating." : applicationRequirements.review_status === "confirmed" ? "You confirmed these document choices." : "Your document choices are saved."}</p>
+                  {requirementsSavedMessage && <p className="saveStatus" data-state="saved" role="status">{requirementsSavedMessage}</p>}
+                  {requirementsHasUnknown(applicationRequirements) && <div className="unknownRequirementNotice"><strong>⚠ We’re not sure what documents this employer wants.</strong><p>Review requirements and decide:</p><ul>{unresolvedRequirementLabels(applicationRequirements).map((label) => <li key={label}>{label}</li>)}</ul></div>}
                   {!isEditingRequirements ? <>
-                    <div className="requirementsGrid">
-                      <article><strong>Resume</strong><dl><div><dt>Requirement</dt><dd>{formatRequirementLabel(applicationRequirements.documents.resume.requirement)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(applicationRequirements.documents.resume.limit)}</dd></div></dl></article>
-                      <article><strong>Cover Letter</strong><dl><div><dt>Requirement</dt><dd>{formatRequirementLabel(applicationRequirements.documents.cover_letter.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(applicationRequirements.documents.cover_letter.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(applicationRequirements.documents.cover_letter.limit)}</dd></div></dl></article>
-                      <article><strong>Selection Criteria</strong><dl><div><dt>Submission requirement</dt><dd>{formatRequirementLabel(applicationRequirements.documents.selection_criteria.requirement)}</dd></div><div><dt>Response format</dt><dd>{formatDocumentFormat(applicationRequirements.documents.selection_criteria.format)}</dd></div><div><dt>Criteria count</dt><dd>{applicationRequirements.documents.selection_criteria.criteria_count ?? "Unknown"}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(applicationRequirements.documents.selection_criteria.limit)}</dd></div></dl>{applicationRequirements.documents.selection_criteria.requirement === "not_required" && applicationRequirements.documents.selection_criteria.format === "embedded_in_cover_letter" && <p className="embeddedRequirementNote">No separate Selection Criteria attachment is required, but the criteria need to be addressed in the Cover Letter.</p>}</article>
-                    </div>
+                    <div className="documentChoices">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; const title = name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"; return <article className="documentChoice" key={name}><span aria-hidden="true">{document.requirement === "required" ? "✓" : "○"}</span><div><strong>{title}</strong><small>{documentChoiceLabel(document)}</small>{name === "selection_criteria" && document.format === "embedded_in_cover_letter" && <small>Addressed inside the Cover Letter</small>}</div></article>; })}</div>
+                    <details className="requirementsSource"><summary>View requirement details</summary><div className="requirementsGrid">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; return <article key={name}><strong>{name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"}</strong><dl><div><dt>Choice</dt><dd>{formatRequirementLabel(document.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(document.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(document.limit)}</dd></div></dl></article>; })}</div></details>
                     {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                     {applicationRequirements.warnings.length > 0 && <div className="requirementsWarnings"><strong>Check these parser warnings</strong><ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
                     <details className="requirementsSource"><summary>Why this was detected</summary>{applicationRequirements.source_excerpt ? <blockquote>{applicationRequirements.source_excerpt}</blockquote> : applicationRequirements.source === "legacy_inference" ? <p>No source excerpt is available for this legacy application.</p> : <p>No source excerpt was identified.</p>}{applicationRequirements.source_text && <details><summary>Show full source</summary><pre>{applicationRequirements.source_text}</pre></details>}</details>
                     {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
-                    <div className="requirementsActions"><button type="button" onClick={confirmApplicationRequirements} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Confirm requirements"}</button><button type="button" className="secondary" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Edit / Correct</button></div>
+                    <div className="requirementsActions"><button type="button" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Review / change documents</button><button type="button" className="secondary" onClick={confirmApplicationRequirements} disabled={requirementsSaveState === "saving" || requirementsHasUnknown(applicationRequirements)} title={requirementsHasUnknown(applicationRequirements) ? "Decide the unresolved document choices first." : ""}>{requirementsSaveState === "saving" ? "Saving…" : "Confirm document choices"}</button></div>
                   </> : requirementsEditDraft && <div className="requirementsEditor">
-                    <fieldset><legend>Resume</legend><label>Requirement<select value={requirementsEditDraft.documents.resume.requirement} onChange={(event) => updateRequirementDocument("resume", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label></fieldset>
+                    <p className="editModeNotice"><strong>Editing document choices</strong> — save your changes below.</p>
+                    <fieldset><legend>Resume</legend><div className="requirementEditGrid"><label>Requirement<select value={requirementsEditDraft.documents.resume.requirement} onChange={(event) => updateRequirementDocument("resume", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Format<select value={requirementsEditDraft.documents.resume.format} onChange={(event) => updateRequirementDocument("resume", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></div></fieldset>
                     <fieldset><legend>Cover Letter</legend><div className="requirementEditGrid"><label>Requirement<select value={requirementsEditDraft.documents.cover_letter.requirement} onChange={(event) => updateRequirementDocument("cover_letter", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Format<select value={requirementsEditDraft.documents.cover_letter.format} onChange={(event) => updateRequirementDocument("cover_letter", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></div><RequirementLimitEditor limit={requirementsEditDraft.documents.cover_letter.limit} onToggle={(enabled) => toggleRequirementLimit("cover_letter", enabled)} onChange={(changes) => updateRequirementLimit("cover_letter", changes)} /></fieldset>
                     <fieldset><legend>Selection Criteria</legend><div className="requirementEditGrid"><label>Submission requirement<select value={requirementsEditDraft.documents.selection_criteria.requirement} onChange={(event) => updateRequirementDocument("selection_criteria", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Response format<select value={requirementsEditDraft.documents.selection_criteria.format} onChange={(event) => updateRequirementDocument("selection_criteria", { format: event.target.value as DocumentFormat })}>{selectionFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><label>Criteria count <em>leave blank if unknown</em><input type="number" min="0" value={requirementsEditDraft.documents.selection_criteria.criteria_count ?? ""} onChange={(event) => updateRequirementDocument("selection_criteria", { criteria_count: event.target.value === "" ? null : Number(event.target.value) })} /></label></div><RequirementLimitEditor limit={requirementsEditDraft.documents.selection_criteria.limit} onToggle={(enabled) => toggleRequirementLimit("selection_criteria", enabled)} onChange={(changes) => updateRequirementLimit("selection_criteria", changes)} /></fieldset>
                     {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><p className="helper">Shown for reference in this first editor version.</p><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
@@ -1222,6 +1456,16 @@ export default function Home() {
                 })}</div>}
                 {sourcesLoadState === "success" && sourcesError && <p className="requirementsError" role="alert">{sourcesError}</p>}
               </section>
+              <section className={`requirementsCard ${applicationDecision?.status || "loading"}`} aria-live="polite">
+                <div className="requirementsHeading"><div><strong>Stage 1 · Application diagnosis</strong><small>Evidence decisions guide whether and how to proceed; they are not applicant evidence.</small></div>{applicationDecision && <span className="requirementsStatus">{decisionLabel(applicationDecision.application_recommendation)}</span>}</div>
+                {!applicationDecision ? <><p className="helper">Check evidence coverage, risks and material eligibility questions before generation.</p><button type="button" onClick={diagnoseApplication} disabled={decisionBusy || !resumes.length}>{decisionBusy ? "Diagnosing…" : "Diagnose application"}</button></> : <>
+                  {applicationDecision.blocking_issues.length > 0 && <div className="requirementsError"><strong>Blocking issues</strong><ul>{applicationDecision.blocking_issues.map((issue) => <li key={issue.criteria_id}>{issue.message}</li>)}</ul></div>}
+                  <div className="requirementsGrid">{applicationDecision.requirements.map((item) => <article key={item.criteria_id}><strong>{item.requirement_text}</strong><dl><div><dt>Importance</dt><dd>{decisionLabel(item.importance)}</dd></div><div><dt>Evidence</dt><dd>{item.evidence_classification ? decisionLabel(item.evidence_classification) : "Unsupported — no candidate conclusion"}</dd></div><div><dt>Risk</dt><dd>{decisionLabel(item.risk)}</dd></div><div><dt>Action</dt><dd>{decisionLabel(item.recommended_action)}</dd></div></dl></article>)}</div>
+                  {applicationDecision.questions.filter((question) => question.material).map((question) => <div className="confirmCard" key={question.question_id}><div><strong>Material confirmation</strong><p>{question.prompt}</p>{question.answer !== null && <small>Recorded as {question.answer ? "Yes" : "No"} · user confirmed</small>}</div><div className="selectedActions"><button type="button" onClick={() => answerDecisionQuestion(question.question_id, true)} disabled={decisionBusy}>Yes</button><button type="button" className="secondary" onClick={() => answerDecisionQuestion(question.question_id, false)} disabled={decisionBusy}>No</button></div></div>)}
+                  {applicationDecision.status === "ready" && confirmedApplication !== selected.id && <p className="unknownRequirementNotice"><strong>One more confirmation is required.</strong> Confirm the applicant, job and contact details above before Generate is enabled.</p>}
+                  <button type="button" className="secondary" onClick={diagnoseApplication} disabled={decisionBusy}>{decisionBusy ? "Diagnosing…" : "Run diagnosis again"}</button>
+                </>}
+              </section>
               <details className="jobEditPanel" key={`edit-${selected.id}`}>
                 <summary>Edit saved job details</summary>
                 <form onSubmit={updateSavedJob} className="compactForm">
@@ -1235,17 +1479,34 @@ export default function Home() {
                 </form>
               </details>
               {documents.length ? <>
-                {activeReviewer && <div className={activeReviewer.status === "pass" ? "reviewerResult pass" : "reviewerResult fail"}><strong>{activeReviewer.status === "pass" ? "Batch Reviewer passed" : "Batch Reviewer found issues"}</strong>{activeReviewer.status === "fail" && <ul>{activeReviewer.results.flatMap((result) => result.issues.map((issue) => <li key={`${result.criteria_id}-${issue.type}`}>{result.criteria_id}{issue.severity ? ` [${issue.severity.toUpperCase()}]` : ""}: {issue.description}</li>))}</ul>}</div>}
+                {releaseChecklist && <section className={`releaseChecklist ${releaseChecklist.ready ? "pass" : "pending"}`}>
+                  <div className="requirementsHeading"><div><strong>Check application</strong><small>Checks accuracy, consistency and Resume compatibility before you apply.</small></div><span className="requirementsStatus">{releaseChecklist.ready ? "Ready to apply" : documents.some((document) => { try { return ["pending", "provider_failed"].includes(JSON.parse(document.reviewer_json || "{}").status); } catch { return false; } }) ? "Needs attention" : releaseChecklist.checks.final_check.ready ? "Documents reviewed" : "Draft"}</span></div>
+                  <ul className="releaseChecks">
+                    <li data-ready={releaseChecklist.checks.documents.ready}>Required documents {releaseChecklist.checks.documents.ready ? "present" : "missing"}</li>
+                    <li data-ready={releaseChecklist.checks.details_confirmation.ready}>Applicant, job and contact details {releaseChecklist.checks.details_confirmation.ready ? "confirmed" : "need confirmation"}</li>
+                    <li data-ready={releaseChecklist.checks.selection_confirmations.ready}>Selection Criteria confirmations {releaseChecklist.checks.selection_confirmations.ready ? "complete" : "incomplete"}</li>
+                    <li data-ready={releaseChecklist.checks.final_check.ready}>Final Check {releaseChecklist.checks.final_check.ready ? "passed" : "not passed"}</li>
+                    <li data-ready={releaseChecklist.checks.pack_review.ready}>Pack Review {releaseChecklist.checks.pack_review.ready ? (packReviewResult?.skipped ? `not required — ${packReviewResult.skip_reason}` : "passed") : "not passed or stale"}</li>
+                    <li data-ready={releaseChecklist.checks.ats.ready}>Resume #{releaseChecklist.checks.ats.document_id || "—"} · {submissionFormat.toUpperCase()} · {exportTemplate}: {releaseChecklist.checks.ats.ready ? "ATS verified" : "not verified"}</li>
+                  </ul>
+                  <div className="selectedActions"><button type="button" onClick={checkApplication} disabled={!packReady || releaseBusy !== "idle"} title={!packReady ? "Generate and review every selected document first." : ""}>{releaseBusy !== "idle" ? "Checking application…" : "Check my application"}</button></div>
+                  <details className="requirementsSource"><summary>View check details</summary><p className="helper">Checks run in order: document content, pack consistency, then Resume compatibility.</p><div className="selectedActions"><button type="button" className="secondary" onClick={runFinalCheck} disabled={finalCheckState === "checking"}>{finalCheckState === "checking" ? "Checking…" : "Run content check"}</button><button type="button" className="secondary" onClick={runPackReview} disabled={!releaseChecklist.checks.final_check.ready || releaseBusy !== "idle"}>{releaseBusy === "pack" ? "Reviewing…" : "Run consistency check"}</button><button type="button" className="secondary" onClick={runAtsVerification} disabled={!releaseChecklist.checks.pack_review.ready || releaseBusy !== "idle"}>{releaseBusy === "ats" ? "Verifying…" : "Check Resume compatibility"}</button></div></details>
+                  {packReviewResult?.results?.some((result) => result.issues?.length) && <div className={packReviewResult.blocks_release ? "requirementsError" : "requirementsWarnings"}><strong>Pack Review findings</strong><ul>{packReviewResult.results.flatMap((result) => result.issues.map((issue, index) => <li key={`${result.document_type}-${index}`}>{labels[result.document_type] || result.document_type}: {issue.description}{issue.blocks_release ? " (blocking)" : " (advisory)"}</li>))}</ul></div>}
+                  {atsResult && !atsResult.ready && <div className="requirementsError"><strong>ATS blockers</strong><ul>{atsResult.checks.filter((item) => item.blocking && item.state !== "pass").map((item) => <li key={item.code}>{item.message}</li>)}</ul></div>}
+                  {releaseChecklist.warnings.length > 0 && <details className="requirementsWarnings"><summary>Advisory warnings ({releaseChecklist.warnings.length})</summary><ul>{releaseChecklist.warnings.map((warning, index) => <li key={`${warning.code}-${index}`}>{warning.message}</li>)}</ul></details>}
+                </section>}
+                {activeReviewer && <div className={activeReviewer.status === "pass" ? "reviewerResult pass" : "reviewerResult fail"}><strong>{activeReviewer.status === "pass" ? `${labels[activeType]} review passed` : activeReviewer.status === "provider_failed" || activeReviewer.status === "pending" ? `${labels[activeType]} needs review` : `${labels[activeType]} review found issues`}</strong>{activeReviewer.status === "provider_failed" && <p>The draft is saved. Retry its automatic review before checking the application.</p>}{activeReviewer.status === "fail" && <details><summary>View check details</summary><ul>{(activeReviewer.results || []).flatMap((result) => result.issues.map((issue) => <li key={`${result.criteria_id}-${issue.type}`}>{result.criteria_id}{issue.severity ? ` [${issue.severity.toUpperCase()}]` : ""}: {issue.description}</li>))}</ul></details>}</div>}
                 {activeType === "selection_criteria" && selectionPlan.length > 0 && <div className="criteriaReviewPanel"><div><strong>Selection Criteria evidence check</strong><p className="helper">Strong is ready for normal review. Transferable and Weak responses require your explicit confirmation.</p></div>{selectionPlan.map((item) => { const review = reviewerByCriteria[item.criteria_id]; const needsConfirmation = item.evidence_status !== "strong"; return <article className={`criterionReviewCard ${item.evidence_status}`} key={item.criteria_id}><div className="criterionReviewHeading"><span className="criterionStatus">{item.evidence_status === "strong" ? "Strong" : item.evidence_status === "transferable" ? "Transferable" : "Weak"}</span><span className={review?.status === "pass" ? "reviewStatus pass" : "reviewStatus fail"}>{review?.status === "pass" ? "Reviewer passed" : "Needs review"}</span></div><strong>{item.criteria_text}</strong><small>Target: {item.allocated_word_limit} words · {item.match_type} match · {item.coverage} coverage</small><div className="criterionSources"><small>Evidence sources</small>{item.matched_evidence.length ? <ul>{item.matched_evidence.map((evidenceId) => <li key={evidenceId}><code>{evidenceId}</code> {ckbById[evidenceId]?.source_section || "Uploaded Master CV"}</li>)}</ul> : <p>No direct evidence matched. Check this response carefully.</p>}</div>{review?.issues?.length > 0 && <ul className="criterionIssues">{review.issues.map((issue: { type: string; description: string }) => <li key={issue.type}>{issue.description}</li>)}</ul>}{needsConfirmation && <label className="criterionConfirmation"><input type="checkbox" checked={confirmedSelectionCriteria.includes(item.criteria_id)} onChange={(event) => setCriterionConfirmation(item.criteria_id, event.target.checked)} /> I reviewed this {item.evidence_status} response and confirm it is truthful.</label>}</article>; })}</div>}
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
-                <div className="templatePicker"><div><strong>Export style</strong><small>All options are single-column and ATS-friendly.</small></div><select aria-label="Export style" value={exportTemplate} onChange={(event) => setExportTemplate(event.target.value as "classic" | "modern" | "traditional")}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option></select></div>
-                {activeDocument && <div className="editor"><p className="helper"><strong>Latest generated:</strong> {new Date(activeDocument.created_at).toLocaleString()} · Document #{activeDocument.id}</p>{activeEvidence.length > 0 && <div className="evidenceTrace"><strong>Resume evidence used</strong><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></div>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button><button className="secondary" onClick={() => downloadDocument("docx")}>This DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>This PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>All DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>All PDF</button><button className="secondary" onClick={runFinalCheck} disabled={finalCheckState === "checking"}>{finalCheckState === "checking" ? "Checking…" : "Run Final Check"}</button><button onClick={reviewAndApply}>Review &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status === "applied"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Final check passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
-              </> : <div className="emptyState"><strong>Your CV and cover letter will appear here.</strong><p>If the saved job includes Selection Criteria, those responses will be added as an optional third document.</p></div>}
+                <div className="templatePicker"><div><strong>Selected Resume submission artifact</strong><small>Changing format or style requires ATS verification for the new artifact.</small></div><select aria-label="Submission format" value={submissionFormat} onChange={(event) => { const value = event.target.value as "docx" | "pdf"; setSubmissionFormat(value); setAtsResult(null); void loadReleaseChecklist(selectedApplication, value, exportTemplate); }}><option value="docx">DOCX</option><option value="pdf">PDF</option></select><select aria-label="Export style" value={exportTemplate} onChange={(event) => { const value = event.target.value as "classic" | "modern" | "traditional"; setExportTemplate(value); setAtsResult(null); void loadReleaseChecklist(selectedApplication, submissionFormat, value); }}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option></select></div>
+                {activeDocument && <div className="editor"><p className="helper"><strong>Latest generated:</strong> {new Date(activeDocument.created_at).toLocaleString()} · Document #{activeDocument.id}</p>{activeEvidence.length > 0 && <details className="evidenceTrace"><summary>View evidence and check details</summary><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></details>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button>{(!activeReviewer || activeReviewer.status === "provider_failed" || activeReviewer.status === "pending") && draftSaveState === "saved" && <button type="button" onClick={reviewEditedDocument} disabled={documentReviewState === "reviewing"}>{documentReviewState === "reviewing" ? "Reviewing…" : activeReviewer?.status === "provider_failed" ? `Retry ${labels[activeType]} review` : "Review edited document"}</button>}<button className="secondary" onClick={() => downloadDocument("docx")}>Draft DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>Draft PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>Draft pack DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>Draft pack PDF</button><button onClick={reviewAndApply} disabled={!releaseChecklist?.ready} title={!releaseChecklist?.ready ? "Check your application before applying." : ""}>Download &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status !== "ready_to_apply"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Application content checks passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
+              </> : <div className="emptyState"><strong>Your required application documents will appear here.</strong><p>A standalone Selection Criteria document is created only when the confirmed employer requirements request one.</p></div>}
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
           </div>
         </div>
       </section>
     </section>
-    <p className="safety">AI prepares drafts from your Master Resume only. You review the facts and make the final submission. Login and CAPTCHA are never bypassed.</p>
+    <footer className="safety">AI prepares drafts from your Master Resume only. You review the facts and make the final submission. Login and CAPTCHA are never bypassed. <button type="button" className="privacyLink" onClick={() => setShowPrivacy(true)}>Privacy / Beta Notice</button></footer>
+    {privacyNotice}
   </main>;
 }

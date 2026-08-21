@@ -8,6 +8,7 @@ APPLICATION_REQUIREMENTS_SCHEMA_VERSION = "1.0"
 REVIEW_STATUSES = {"needs_confirmation", "confirmed", "user_overridden"}
 REQUIREMENTS = {"required", "optional", "not_required", "unknown"}
 FORMATS = {"standalone", "embedded_in_cover_letter", "embedded_in_resume", "portal_fields", "not_applicable", "unknown"}
+BASES = {"employer_explicit", "user_confirmed", "product_default", "unknown"}
 LIMIT_UNITS = {"words", "characters", "pages"}
 LIMIT_SCOPES = {"document", "per_criterion", "combined_documents"}
 LIMIT_CONSTRAINTS = {"maximum", "minimum", "exact", "recommended"}
@@ -19,8 +20,8 @@ DOCUMENT_FORMATS = {
 }
 
 
-def _document(requirement: str = "unknown", format: str = "unknown", **extra: Any) -> dict[str, Any]:
-    return {"requirement": requirement, "format": format, "limit": None, **extra}
+def _document(requirement: str = "unknown", format: str = "unknown", basis: str = "unknown", **extra: Any) -> dict[str, Any]:
+    return {"requirement": requirement, "format": format, "basis": basis, "limit": None, **extra}
 
 
 def empty_application_requirements(source_text: str = "", source: str = "deterministic_parser") -> dict[str, Any]:
@@ -123,33 +124,33 @@ def parse_application_requirements(source_text: str) -> dict[str, Any]:
         if resume:
             relevant.append(sentence)
             if negative:
-                documents["resume"].update(requirement="not_required", format="not_applicable")
+                documents["resume"].update(requirement="not_required", format="not_applicable", basis="employer_explicit")
             elif submit or _matches(sentence, r"\b(?:required|must)\b"):
-                documents["resume"].update(requirement="required", format="standalone")
+                documents["resume"].update(requirement="required", format="standalone", basis="employer_explicit")
             elif optional:
-                documents["resume"].update(requirement="optional", format="standalone")
+                documents["resume"].update(requirement="optional", format="standalone", basis="employer_explicit")
         if cover:
             relevant.append(sentence)
             if negative:
-                documents["cover_letter"].update(requirement="not_required", format="not_applicable")
+                documents["cover_letter"].update(requirement="not_required", format="not_applicable", basis="employer_explicit")
             elif submit or _matches(sentence, r"\b(?:required|must)\b"):
-                documents["cover_letter"].update(requirement="required", format="standalone")
+                documents["cover_letter"].update(requirement="required", format="standalone", basis="employer_explicit")
             elif optional:
-                documents["cover_letter"].update(requirement="optional", format="standalone")
+                documents["cover_letter"].update(requirement="optional", format="standalone", basis="employer_explicit")
         embedded = cover and criteria and _matches(sentence, r"(?:address|respond|responses?|include).{0,100}(?:in|within|through).{0,30}cover(?:ing)? letter|cover(?:ing)? letter.{0,100}(?:address|respond|criteria|requirements)")
         standalone = criteria and not cover and submit and _matches(sentence, r"\b(?:separate|standalone|statement|document|responses?|attachment|attach|submit|provide)\b")
         if embedded:
-            documents["cover_letter"].update(requirement="required", format="standalone")
-            documents["selection_criteria"].update(requirement="not_required", format="embedded_in_cover_letter")
+            documents["cover_letter"].update(requirement="required", format="standalone", basis="employer_explicit")
+            documents["selection_criteria"].update(requirement="not_required", format="embedded_in_cover_letter", basis="employer_explicit")
             relevant.append(sentence)
         elif criteria and negative:
             if documents["selection_criteria"]["format"] == "embedded_in_cover_letter" and "separate" in lowered:
                 documents["selection_criteria"]["requirement"] = "not_required"
             else:
-                documents["selection_criteria"].update(requirement="not_required", format="not_applicable")
+                documents["selection_criteria"].update(requirement="not_required", format="not_applicable", basis="employer_explicit")
             relevant.append(sentence)
         elif standalone:
-            documents["selection_criteria"].update(requirement="required", format="standalone")
+            documents["selection_criteria"].update(requirement="required", format="standalone", basis="employer_explicit")
             relevant.append(sentence)
         limit = _parse_limit(sentence)
         if limit:
@@ -172,6 +173,8 @@ def parse_application_requirements(source_text: str) -> dict[str, Any]:
             documents["selection_criteria"]["criteria_count"] = len(numbered)
     extras = re.findall(r"(?i)(?:submit|attach|provide|include)\s+(?:an?\s+|your\s+)?(portfolio|academic transcript|qualification certificate|referee report|writing sample)", text)
     result["additional_documents"] = list(dict.fromkeys(item.lower() for item in extras))
+    if documents["resume"]["requirement"] == "required" and documents["cover_letter"]["requirement"] == "required" and documents["selection_criteria"]["requirement"] == "unknown":
+        documents["selection_criteria"].update(requirement="not_required", format="not_applicable", basis="product_default")
     result["source_excerpt"] = " | ".join(dict.fromkeys(relevant))[:2000]
     if all(item["requirement"] == "unknown" for item in documents.values()):
         result["warnings"].append("Submission document requirements could not be determined from the supplied text.")
@@ -211,12 +214,14 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
         if not isinstance(document, dict):
             errors.append(f"Missing {name} requirement.")
             continue
-        allowed_document_fields = {"requirement", "format", "limit"}
+        allowed_document_fields = {"requirement", "format", "basis", "limit"}
         if name == "selection_criteria":
             allowed_document_fields.update({"criteria_count", "criteria_references"})
         if set(document) - allowed_document_fields:
             errors.append(f"{name} contains unsupported fields.")
         requirement, format_value = document.get("requirement"), document.get("format")
+        if document.get("basis", "unknown") not in BASES:
+            errors.append(f"Invalid {name} basis.")
         if requirement not in REQUIREMENTS:
             errors.append(f"Invalid {name} requirement.")
         if format_value not in DOCUMENT_FORMATS[name]:
@@ -262,7 +267,11 @@ def validate_application_requirements(model: dict[str, Any]) -> list[str]:
 
 
 def confirm_application_requirements(model: dict[str, Any]) -> dict[str, Any]:
+    if material_requirements_unknown(model):
+        raise ValueError("Resolve the unknown document requirements and formats before confirming them.")
     confirmed = deepcopy(model)
+    for document in confirmed["documents"].values():
+        document.setdefault("basis", "unknown")
     confirmed["review_status"] = "confirmed"
     errors = validate_application_requirements(confirmed)
     if errors:
@@ -277,12 +286,36 @@ def correct_application_requirements(
 ) -> dict[str, Any]:
     corrected = deepcopy(model)
     corrected["documents"] = deepcopy(documents)
+    for name, document in corrected["documents"].items():
+        previous = (model.get("documents") or {}).get(name) or {}
+        if document.get("requirement") != "unknown" and (
+            document.get("requirement") != previous.get("requirement")
+            or document.get("format") != previous.get("format")
+            or previous.get("basis", "unknown") == "unknown"
+        ):
+            document["basis"] = "user_confirmed"
+        else:
+            document.setdefault("basis", previous.get("basis", "unknown"))
     corrected["additional_documents"] = list(additional_documents)
     corrected["review_status"] = "user_overridden"
+    if not material_requirements_unknown(corrected):
+        corrected["warnings"] = [
+            warning for warning in corrected.get("warnings") or []
+            if warning != "Submission document requirements could not be determined from the supplied text."
+            and "requirements remain unknown" not in warning.lower()
+        ]
     errors = validate_application_requirements(corrected)
     if errors:
         raise ValueError(errors[0])
     return corrected
+
+
+def material_requirements_unknown(model: dict[str, Any]) -> bool:
+    for document in (model.get("documents") or {}).values():
+        requirement = document.get("requirement")
+        if requirement == "unknown" or requirement in {"required", "optional"} and document.get("format") == "unknown":
+            return True
+    return False
 
 
 def normalise_requirements_source(value: str | None) -> str:
@@ -303,12 +336,12 @@ def requirements_source_changed(
 
 def legacy_application_requirements(selection_criteria: str | None = None) -> dict[str, Any]:
     model = empty_application_requirements(selection_criteria or "", source="legacy_inference")
-    model["documents"]["resume"].update(requirement="required", format="standalone")
-    model["documents"]["cover_letter"].update(requirement="required", format="standalone")
+    model["documents"]["resume"].update(requirement="required", format="standalone", basis="product_default")
+    model["documents"]["cover_letter"].update(requirement="required", format="standalone", basis="product_default")
     if (selection_criteria or "").strip():
-        model["documents"]["selection_criteria"].update(requirement="required", format="standalone")
+        model["documents"]["selection_criteria"].update(requirement="required", format="standalone", basis="product_default")
     else:
-        model["documents"]["selection_criteria"].update(requirement="not_required", format="not_applicable")
+        model["documents"]["selection_criteria"].update(requirement="not_required", format="not_applicable", basis="product_default")
     model["warnings"].append("Requirements were inferred from the legacy fixed-pack behaviour and must be confirmed.")
     return model
 
@@ -318,4 +351,12 @@ def load_application_requirements(raw_json: str | None, selection_criteria: str 
         parsed = json.loads(raw_json or "{}")
     except (json.JSONDecodeError, TypeError):
         return legacy_application_requirements(selection_criteria)
-    return parsed if parsed and not validate_application_requirements(parsed) else legacy_application_requirements(selection_criteria)
+    if not parsed:
+        return legacy_application_requirements(selection_criteria)
+    for document in (parsed.get("documents") or {}).values():
+        document.setdefault("basis", "unknown")
+    if validate_application_requirements(parsed):
+        return legacy_application_requirements(selection_criteria)
+    if parsed.get("review_status") == "confirmed" and material_requirements_unknown(parsed):
+        parsed["review_status"] = "needs_confirmation"
+    return parsed

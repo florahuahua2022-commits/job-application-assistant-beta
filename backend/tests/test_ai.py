@@ -72,12 +72,30 @@ class GenerateDraftTests(unittest.TestCase):
 
         prompt = provider.call_args.args[0]
         self.assertIn("factual and relevance Reviewer", prompt)
-        self.assertIn("Do not penalise factual compression or reordering", prompt)
+        self.assertIn("role order differs from the plan", prompt)
+        self.assertIn("include_role_header", prompt)
+        self.assertIn("adjacent", prompt)
+        self.assertIn("continuity_only", prompt)
+        self.assertNotIn("Do not penalise factual compression or reordering", prompt)
         self.assertIn("does not prove current employment", prompt)
         self.assertIn("government employer", prompt)
         self.assertIn("Work rights: permanent resident", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
+
+    def test_resume_repair_uses_only_selected_evidence_and_preserves_plan_authority(self):
+        ckb = '[{"evidence_id":"KEEP","source_text":"Transferable coordination."},{"evidence_id":"OMIT","source_text":"Advanced payroll."}]'
+        plan = '{"roles":[{"source_section":"Current role","include_role_header":true,"curation_action":"compress","max_bullets":0,"evidence_framing":"continuity_only"}],"selected_evidence":[{"evidence_id":"KEEP","evidence_framing":"adjacent"}],"omitted_evidence_ids":["OMIT"]}'
+        errors = [{"id":"err_1","claim":"claim","issue":"unsupported","fix_type":"remove_or_soften"}]
+        with patch.object(ai, "_openai_draft", return_value="Fixed") as provider:
+            ai.auto_fix_tailored_resume("Draft", errors, ckb, resume_plan_json=plan)
+        prompt = provider.call_args.args[0]
+        self.assertIn("Transferable coordination", prompt)
+        self.assertNotIn("Advanced payroll", prompt)
+        self.assertIn("Do not reorder roles", prompt)
+        self.assertIn("Do not convert adjacent evidence into direct ownership", prompt)
+        self.assertIn("continuity_only", prompt)
+        self.assertIn("visible role header even when max_bullets is zero", prompt)
 
     def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
         plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'
@@ -122,6 +140,19 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("fabricated_entity", provider.call_args.args[0])
         self.assertIn("motivation is absent or \"Not provided\"", provider.call_args.args[0])
         self.assertIn("Do not expand the letter to answer non-priority criteria", provider.call_args.args[0])
+
+    def test_cover_letter_repair_receives_only_selected_evidence(self):
+        review = {"status":"fail","results":[{"issues":[{"type":"unsupported_inference","severity":"major","description":"Managed is too strong.","location":"managed reports"}]}]}
+        ckb = '[{"evidence_id":"KEEP","source_text":"Supported monthly reporting."},{"evidence_id":"UNUSED","source_text":"Led procurement operations."}]'
+        plan = '{"selected_evidence":[{"evidence_id":"KEEP"}],"priorities":[{"criteria_id":"C1"}]}'
+        with patch.object(ai, "_selection_provider_response", return_value="I supported monthly reporting.") as provider:
+            fixed = ai.auto_fix_cover_letter("I managed reports.", review, ckb, "{}", plan, None)
+
+        prompt = provider.call_args.args[0]
+        self.assertEqual(fixed, "I supported monthly reporting.")
+        self.assertIn("Supported monthly reporting", prompt)
+        self.assertNotIn("Led procurement operations", prompt)
+        self.assertIn("Do not import another story", prompt)
 
     def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
@@ -293,6 +324,18 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("follow the COVER LETTER PLAN as authoritative", prompt)
         self.assertIn("do not turn the letter into a response to every Selection Criteria item", prompt)
         self.assertIn("If motivation is absent or 'Not provided'", prompt)
+        self.assertIn("Prefer a distinct comparable differentiator", prompt)
+
+    def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
+        ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'
+        plan = '{"selected_evidence":[{"evidence_id":"KEEP","allocation_use":"primary","purpose":"differentiator"}]}'
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as provider:
+            ai.generate_draft("Resume", "JD", "cover_letter", user_experiences_json=ckb, cover_letter_plan_json=plan)
+        prompt = provider.call_args.args[0]
+        self.assertIn("Selected fact", prompt)
+        self.assertNotIn("Broader matched fact", prompt)
 
     def test_resume_prompt_requires_standard_sections_and_two_page_limit(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
@@ -317,6 +360,23 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("RESUME CURATION PLAN", prompt)
         self.assertIn("Every evidence ID must exist in RESUME CURATION PLAN", prompt)
         self.assertIn("GENERATION_META", prompt)
+        self.assertIn("max_bullets ceilings are authoritative", prompt)
+        self.assertIn("never reorder roles by relevance", prompt)
+        self.assertIn("continuity_only", prompt)
+
+    def test_empty_resume_plan_does_not_fall_back_to_matched_evidence(self):
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai, "_deepseek_draft", return_value="Draft"
+        ) as provider:
+            ai.generate_draft(
+                "Resume", "Job description", "tailored_resume",
+                user_experiences_json='[{"evidence_id":"EV1","source_text":"Unselected"}]',
+                evidence_matches_json='{"matches":[{"matched_evidence":["EV1"]}]}',
+                resume_plan_json='{"schema_version":"1.1","selected_evidence":[]}',
+            )
+        prompt = provider.call_args.args[0]
+        self.assertIn("MATCHED RESUME EVIDENCE (the only factual source", prompt)
+        self.assertIn("MATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n[]", prompt)
 
     def test_builds_ranked_evidence_pack_from_structured_experience(self):
         experiences = '[{"id":"EV-project","role_title":"Project Officer","organization":"Agency","responsibility":"Managed stakeholder workshops","result":"Delivered the project on time"},{"id":"EV-retail","role_title":"Assistant","organization":"Shop","responsibility":"Processed sales"}]'

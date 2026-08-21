@@ -32,6 +32,7 @@ def _merge_requirements(base: dict, extra: dict) -> None:
         target = base["documents"][name]
         if document["requirement"] != "unknown":
             target["requirement"] = document["requirement"]
+            target["basis"] = document.get("basis", "employer_explicit")
         preserve_embedded = target["format"].startswith("embedded_in_") and document["format"] == "not_applicable" and document["requirement"] == "not_required"
         if document["format"] != "unknown" and not preserve_embedded:
             target["format"] = document["format"]

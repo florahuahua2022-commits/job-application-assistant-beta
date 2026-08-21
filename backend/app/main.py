@@ -1,17 +1,23 @@
 from datetime import datetime
+from hashlib import sha256
 from io import BytesIO
 import json
+import logging
 import re
 from time import perf_counter
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import func
-from sqlmodel import Session, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume
-from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, parse_application_requirements, requirements_source_changed, validate_application_requirements
+from sqlmodel import Session, delete, select
+from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
+from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
+from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
+from .ats_verification import verify_resume_artifact
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -19,21 +25,52 @@ from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, validate_career_knowledge_base
 from .config import settings
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
+from .evidence_allocation import apply_selection_allocation, build_evidence_allocation
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
+from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
 from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
-from .selection_logic import build_selection_plan, criteria_requiring_confirmation
+from .release_state import ats_is_current, details_fingerprint, document_is_current, fingerprint, generation_inputs_fingerprint, load_release_state, pack_fingerprint, pack_review_is_current
+from .selection_logic import actual_word_count, build_selection_plan, criteria_requiring_confirmation
 from .source_acquisition import acquire_sources, process_uploaded_document
 from .source_aware_parsing import build_source_aware_models
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+operations = logging.getLogger("job_assistant.operations")
+
+
+@app.middleware("http")
+async def operation_log(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    started = perf_counter()
+    token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    user_ref = sha256(token.encode()).hexdigest()[:12] if token else None
+    status, category = 500, "internal_error"
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        category = "success" if status < 400 else "session_expired" if status == 401 else "quota_reached" if status == 429 else "provider_unavailable" if status in {502, 503} else "validation_failed" if status < 500 else "internal_error"
+        response.headers["x-request-id"] = request_id
+        return response
+    finally:
+        match = re.search(r"/(applications|documents)/(\d+)", request.url.path)
+        operations.info(json.dumps({
+            "request_id": request_id, "operation": f"{request.method} {request.url.path}",
+            "user_ref": user_ref, "resource_type": match.group(1) if match else None,
+            "resource_id": int(match.group(2)) if match else None,
+            "provider": settings.ai_provider if request.url.path in {"/generate"} or request.url.path.endswith("/pack-review") else None,
+            "model": settings.deepseek_model if settings.ai_provider == "deepseek" else settings.openai_model if request.url.path == "/generate" else None,
+            "duration_ms": round((perf_counter() - started) * 1000), "status": status,
+            "success": status < 400, "error_category": None if status < 400 else category,
+        }, separators=(",", ":")))
 
 
 @app.on_event("startup")
@@ -70,6 +107,48 @@ def select_for_user(model, user_id: UUID | None):
     return statement.where(model.user_id == user_id) if user_id is not None else statement
 
 
+def latest_application_documents(session: Session, application_id: int, user_id: UUID | None) -> dict[str, GeneratedDocument]:
+    documents = session.exec(
+        select_for_user(GeneratedDocument, user_id)
+        .where(GeneratedDocument.application_id == application_id)
+        .order_by(GeneratedDocument.created_at.desc())
+    ).all()
+    latest: dict[str, GeneratedDocument] = {}
+    for document in documents:
+        latest.setdefault(document.document_type, document)
+    return latest
+
+
+def require_current_generation_contract(application: JobApplication) -> None:
+    state = load_release_state(application.release_state_json)
+    state.update(schema_version="1.0", generation_contract_required=True)
+    state.pop("pack_review", None)
+    state.pop("ats", None)
+    application.release_state_json = json.dumps(state, ensure_ascii=False)
+
+
+def current_required_documents(
+    session: Session,
+    application: JobApplication,
+    user_id: UUID | None,
+    master_resume: Resume | None = None,
+    profile: ApplicantProfile | None = None,
+) -> dict[str, GeneratedDocument]:
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    required = set(required_generated_documents(requirements))
+    master_resume = master_resume or session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    profile = profile or session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    latest = latest_application_documents(session, application.id, user_id)
+    require_contract = bool(load_release_state(application.release_state_json).get("generation_contract_required"))
+    if not master_resume:
+        return {key: document for key, document in latest.items() if key in required} if not require_contract else {}
+    current_input = generation_inputs_fingerprint(application, master_resume, profile)
+    return {
+        key: document for key, document in latest.items()
+        if key in required and document_is_current(document, current_input, require_contract)
+    }
+
+
 def serialise_ckb(source_text: str, experiences_json: str) -> str:
     ckb = build_career_knowledge_base(source_text, experiences_json)
     errors = validate_career_knowledge_base(ckb)
@@ -96,8 +175,10 @@ def rebuild_source_aware_models(application: JobApplication, sources: list[JobSo
     application.job_model_json = json.dumps(model, ensure_ascii=False)
     if previous_model != model:
         application.evidence_matches_json = "{}"
+        application.application_decision_json = "{}"
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
+        require_current_generation_contract(application)
     application.updated_at = datetime.utcnow()
 
 
@@ -112,10 +193,64 @@ def semantic_source_state(sources: list[JobSource]) -> tuple:
 def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
     for application in session.exec(select_for_user(JobApplication, user_id)).all():
         application.evidence_matches_json = "{}"
+        application.application_decision_json = "{}"
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
+        require_current_generation_contract(application)
         session.add(application)
     session.commit()
+
+
+def invalidate_application_decisions(session: Session, user_id: UUID | None) -> None:
+    for application in session.exec(select_for_user(JobApplication, user_id)).all():
+        application.application_decision_json = "{}"
+        require_current_generation_contract(application)
+        session.add(application)
+    session.commit()
+
+
+def prepare_application_decision(application: JobApplication, master_resume: Resume, profile: ApplicantProfile | None) -> dict:
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    job_model = json.loads(application.job_model_json or "{}")
+    ckb = json.loads(master_resume.ckb_json or "[]")
+    if not ckb:
+        ckb = build_career_knowledge_base(master_resume.source_text, master_resume.experiences_json or "[]")
+        master_resume.ckb_json = json.dumps(ckb, ensure_ascii=False)
+    matches = json.loads(application.evidence_matches_json or "{}")
+    if not matches:
+        matches = match_evidence_batch(json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False))
+        application.evidence_matches_json = json.dumps(matches, ensure_ascii=False)
+    previous = json.loads(application.application_decision_json or "{}")
+    decision = build_application_decision(job_model, requirements, matches, ckb, profile, previous)
+    errors = validate_application_decision(decision)
+    if errors:
+        raise HTTPException(500, errors[0])
+    application.application_decision_json = json.dumps(decision, ensure_ascii=False)
+    return decision
+
+
+def capture_first_submission(session: Session, application: JobApplication, user_id: UUID | None) -> None:
+    outcome = load_outcome(application.outcome_json)
+    if outcome.get("submission_snapshot_status") in {"captured", "unavailable"}:
+        return
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    current = current_required_documents(session, application, user_id, master_resume, profile)
+    documents = list(current.values())
+    sources = session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application.id)
+    ).all()
+    snapshot = build_submission_snapshot(
+        application, documents, json.loads((master_resume.ckb_json if master_resume else "[]") or "[]"),
+        profile.country if profile else None, sources, application.submitted_at or datetime.utcnow(),
+        required_generated_documents(requirements),
+    )
+    events = list(outcome["events"])
+    if not any(item.get("event_type") == "submitted" for item in events):
+        events.append(outcome_event("submitted", (application.submitted_at or datetime.utcnow()).date()))
+    outcome = set_events({**outcome, "submission_snapshot": snapshot, "submission_snapshot_status": "captured" if snapshot else "unavailable"}, events)
+    application.outcome_json = json.dumps(outcome, ensure_ascii=False)
 
 
 def _content_words(value: str) -> list[str]:
@@ -367,6 +502,87 @@ def restore_saved_backup(filename: str, payload: RestoreBackupRequest, session: 
         raise HTTPException(400, str(error))
 
 
+def user_data_bundle(session: Session, user_id: UUID) -> dict:
+    def rows(model):
+        return [item.model_dump() for item in session.exec(select(model).where(model.user_id == user_id)).all()]
+    return {
+        "schema_version": "1.0", "exported_at": datetime.utcnow(), "user_id": user_id,
+        "applicant_profiles": rows(ApplicantProfile), "referees": rows(Referee),
+        "resumes": rows(Resume), "job_applications": rows(JobApplication),
+        "job_sources": rows(JobSource), "generated_documents": rows(GeneratedDocument),
+        "generation_usage": rows(GenerationUsage), "credit_ledger": rows(CreditLedger),
+        "referrals": [item.model_dump() for item in session.exec(
+            select(Referral).where((Referral.inviter_user_id == user_id) | (Referral.invited_user_id == user_id))
+        ).all()],
+    }
+
+
+@app.get("/account/export")
+def export_account_data(
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    if user_id is None:
+        raise HTTPException(401, "Sign in to export account data.")
+    bundle = user_data_bundle(session, user_id)
+    stream = BytesIO()
+    with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("account-data.json", json.dumps(bundle, ensure_ascii=False, indent=2, default=str))
+        for document in bundle["generated_documents"]:
+            label = safe_filename(f"{document['application_id']}_{document['document_type']}_{document['id']}")
+            archive.writestr(f"generated-documents/{label}.md", document["content"])
+    return Response(
+        stream.getvalue(), media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="job-assistant-account-data.zip"'},
+    )
+
+
+def delete_supabase_auth_user(user_id: UUID) -> None:
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise HTTPException(503, "Account deletion is not configured. Contact the beta operator.")
+    request = UrlRequest(
+        f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/{user_id}", method="DELETE",
+        headers={"apikey": settings.supabase_service_role_key, "Authorization": f"Bearer {settings.supabase_service_role_key}"},
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            if response.status not in {200, 204}:
+                raise HTTPException(502, "The authentication account could not be deleted.")
+    except HTTPException:
+        raise
+    except (HTTPError, URLError, TimeoutError) as error:
+        raise HTTPException(502, "The authentication account could not be deleted. No success was recorded; contact the beta operator.") from error
+
+
+def delete_remaining_user_rows(session: Session, user_id: UUID) -> None:
+    # Supabase Auth deletion should cascade these rows. Explicit cleanup also
+    # makes the contract verifiable on databases where cascades were misapplied.
+    for model in (JobSource, GeneratedDocument, GenerationUsage, CreditLedger, Referral, Referee, JobApplication, Resume, ApplicantProfile):
+        if model is Referral:
+            session.exec(delete(Referral).where((Referral.inviter_user_id == user_id) | (Referral.invited_user_id == user_id)))
+        else:
+            session.exec(delete(model).where(model.user_id == user_id))
+    session.commit()
+
+
+@app.delete("/account")
+def delete_account(
+    payload: AccountDeletionRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    if user_id is None:
+        raise HTTPException(401, "Sign in to delete the account.")
+    if payload.confirmation.strip() != "DELETE MY ACCOUNT":
+        raise HTTPException(400, "Type DELETE MY ACCOUNT to confirm permanent deletion.")
+    delete_supabase_auth_user(user_id)
+    delete_remaining_user_rows(session, user_id)
+    remaining = any(session.exec(select(model).where(model.user_id == user_id)).first() for model in (ApplicantProfile, Resume, JobApplication, GeneratedDocument, JobSource))
+    if remaining:
+        raise HTTPException(500, "The authentication account was deleted, but owned data cleanup needs operator attention.")
+    return {"deleted": True}
+
+
 def profile_response(profile: ApplicantProfile, referees: list[Referee]) -> ApplicantProfileResponse:
     values = profile.model_dump(exclude={"created_at", "user_id"})
     values["referees"] = [
@@ -450,6 +666,16 @@ def enforce_profile_contact(content: str, profile: ApplicantProfile, document_ty
             if document_type == "tailored_resume"
             else f"{corrected.rstrip()}\n\n{contact_block}"
         )
+    corrected = re.sub(
+        rf"(?im)^(\s*Email:\s*{re.escape(profile.email.strip())})[ \t|,;–—-]+(.+?)\s*$",
+        r"\1\n\2",
+        corrected,
+    )
+    corrected = re.sub(
+        rf"(?im)^(\s*Phone:\s*{re.escape(profile.phone.strip())})[ \t|,;–—-]+(Email:\s*.+?)\s*$",
+        r"\1\n\2",
+        corrected,
+    )
     return corrected
 
 
@@ -567,6 +793,7 @@ def save_profile(
     if len(payload.referees) > 2:
         raise HTTPException(400, "A maximum of two referees can be saved.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    previous_decision_facts = (profile.work_rights, profile.availability_notice) if profile else None
     profile_values = payload.model_dump(exclude={"referees"})
     if profile:
         for key, value in profile_values.items():
@@ -593,6 +820,8 @@ def save_profile(
         )
         session.add(referee)
     session.commit()
+    if previous_decision_facts != (profile.work_rights, profile.availability_notice):
+        invalidate_application_decisions(session, user_id)
     referees = session.exec(
         select_for_user(Referee, user_id)
         .where(Referee.profile_id == profile.id)
@@ -910,10 +1139,85 @@ def update_application_requirements(
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     application.application_requirements_json = json.dumps(updated, ensure_ascii=False)
+    application.application_decision_json = "{}"
+    application.selection_plan_json = "{}"
+    application.selection_confirmations_json = "[]"
+    require_current_generation_contract(application)
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()
     return ApplicationRequirementsResponse(application_id=application.id, requirements=updated)
+
+
+@app.get("/applications/{application_id}/decision")
+def get_application_decision(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if not master_resume:
+        raise HTTPException(400, "Create a Master Resume first.")
+    decision = json.loads(application.application_decision_json or "{}")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    inputs = decision_inputs(
+        json.loads(application.job_model_json or "{}"),
+        load_application_requirements(application.application_requirements_json, application.selection_criteria),
+        json.loads(master_resume.ckb_json or "[]"),
+        profile,
+    )
+    return {"decision": decision, "current": decision_is_current(decision, inputs)}
+
+
+@app.post("/applications/{application_id}/decision")
+def diagnose_application(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    if not application or not master_resume:
+        raise HTTPException(400, "Create a Master Resume and job application first.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    try:
+        decision = prepare_application_decision(application, master_resume, profile)
+    except (RuntimeError, ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(400, str(error)) from error
+    except AIServiceError as error:
+        raise HTTPException(502, str(error)) from error
+    session.add(master_resume); session.add(application); session.commit()
+    return decision
+
+
+@app.post("/applications/{application_id}/decision/confirm")
+def confirm_application_decision(
+    application_id: int,
+    payload: ApplicationDecisionConfirmation,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    if not application or not master_resume:
+        raise HTTPException(400, "Create a Master Resume and job application first.")
+    current = json.loads(application.application_decision_json or "{}")
+    question = next((item for item in current.get("questions") or [] if item.get("question_id") == payload.question_id), None)
+    if not question:
+        raise HTTPException(422, "Decision question not found. Run diagnosis again.")
+    question.update(
+        answer=payload.answer,
+        provenance="user_confirmed",
+        answered_at=datetime.utcnow().isoformat(),
+    )
+    application.application_decision_json = json.dumps(current, ensure_ascii=False)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    decision = prepare_application_decision(application, master_resume, profile)
+    session.add(application); session.commit()
+    return decision
 
 
 @app.patch("/applications/{application_id}", response_model=JobApplication)
@@ -941,8 +1245,10 @@ def update_application(
             application.job_description, application.selection_criteria, application.position_title, application.company
         )
         application.evidence_matches_json = "{}"
+        application.application_decision_json = "{}"
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
+        require_current_generation_contract(application)
     if requirements_source_changed(
         old_job_description,
         old_selection_criteria,
@@ -952,6 +1258,18 @@ def update_application(
         application.application_requirements_json = json.dumps(parse_application_requirements(
             "\n".join(filter(None, (application.job_description, application.selection_criteria)))
         ), ensure_ascii=False)
+        primary = session.exec(
+            select_for_user(JobSource, user_id).where(
+                JobSource.application_id == application.id,
+                JobSource.source_type == "primary_advertisement",
+            )
+        ).first()
+        if primary:
+            source_text = "\n".join(filter(None, (application.job_description, application.selection_criteria)))
+            primary.extracted_text = source_text
+            primary.content_sha256 = sha256(source_text.encode()).hexdigest()
+            primary.updated_at = datetime.utcnow()
+            session.add(primary)
     application.updated_at = datetime.utcnow()
     session.add(application)
     session.commit()
@@ -969,11 +1287,17 @@ def record_application_submission(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
+    if application.status not in {"ready_to_apply", "applied"}:
+        raise HTTPException(409, "Prepare the application and complete the release checklist before marking it Applied.")
+    first_submission = application.status != "applied"
+    had_submission = application.submitted_at is not None
     reference = (payload.submission_reference or "").strip() or None
     application.status = "applied"
     application.submission_reference = reference
     application.submitted_at = payload.submitted_at or datetime.utcnow()
     application.updated_at = datetime.utcnow()
+    if first_submission and not had_submission:
+        capture_first_submission(session, application, user_id)
     session.add(application)
     session.commit()
     session.refresh(application)
@@ -990,14 +1314,135 @@ def update_application_status(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
+    if payload.status == "applied" and application.status != "ready_to_apply":
+        raise HTTPException(409, "Prepare the application before marking it Applied.")
+    if payload.status == "ready_to_apply":
+        state = load_release_state(application.release_state_json)
+        ats = state.get("ats") or {}
+        result = release_checklist(
+            application_id, str(ats.get("format") or "docx"), str(ats.get("template") or "classic"), session, user_id,
+        )
+        if not result["ready"]:
+            raise HTTPException(409, {"message": "Complete the release checklist before marking this application Ready.", "checklist": result})
+    first_submission = payload.status == "applied" and application.status != "applied"
+    had_submission = application.submitted_at is not None
     application.status = payload.status
     if payload.status == "applied" and not application.submitted_at:
         application.submitted_at = datetime.utcnow()
     application.updated_at = datetime.utcnow()
+    if first_submission and not had_submission:
+        capture_first_submission(session, application, user_id)
     session.add(application)
     session.commit()
     session.refresh(application)
     return application
+
+
+@app.get("/applications/{application_id}/outcome")
+def get_application_outcome(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    return load_outcome(application.outcome_json)
+
+
+@app.post("/applications/{application_id}/outcome/events")
+def add_application_outcome_event(
+    application_id: int, payload: OutcomeEventCreate,
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if not application.submitted_at:
+        raise HTTPException(409, "Mark the application as submitted before recording an outcome.")
+    outcome = load_outcome(application.outcome_json)
+    event = outcome_event(**payload.model_dump())
+    outcome = set_events(outcome, [*outcome["events"], event])
+    application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+    application.updated_at = datetime.utcnow()
+    session.add(application); session.commit()
+    return outcome
+
+
+@app.put("/applications/{application_id}/outcome/events/{event_id}")
+def correct_application_outcome_event(
+    application_id: int, event_id: str, payload: OutcomeEventUpdate,
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    outcome = load_outcome(application.outcome_json)
+    index = next((index for index, item in enumerate(outcome["events"]) if item.get("event_id") == event_id), None)
+    if index is None:
+        raise HTTPException(404, "Outcome event not found.")
+    events = list(outcome["events"])
+    events[index] = outcome_event(**payload.model_dump(), event_id=event_id)
+    outcome = set_events(outcome, events)
+    application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+    application.updated_at = datetime.utcnow()
+    session.add(application); session.commit()
+    return outcome
+
+
+@app.delete("/applications/{application_id}/outcome/events/{event_id}")
+def remove_application_outcome_event(
+    application_id: int, event_id: str,
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    outcome = load_outcome(application.outcome_json)
+    events = [item for item in outcome["events"] if item.get("event_id") != event_id]
+    if len(events) == len(outcome["events"]):
+        raise HTTPException(404, "Outcome event not found.")
+    outcome = set_events(outcome, events)
+    application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+    application.updated_at = datetime.utcnow()
+    session.add(application); session.commit()
+    return outcome
+
+
+@app.patch("/applications/{application_id}/outcome/exclusion")
+def set_application_outcome_exclusion(
+    application_id: int, payload: OutcomeLearningExclusion,
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    outcome = load_outcome(application.outcome_json)
+    outcome["excluded_from_learning"] = payload.excluded_from_learning
+    errors = validate_outcome(outcome)
+    if errors:
+        raise HTTPException(409, errors[0])
+    application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+    application.updated_at = datetime.utcnow()
+    session.add(application); session.commit()
+    return outcome
+
+
+@app.get("/applications/{application_id}/outcome-learning")
+def get_application_outcome_learning(
+    application_id: int,
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    applications = session.exec(select_for_user(JobApplication, user_id)).all()
+    return build_outcome_signals(
+        applications, application.id, profile.country if profile else None, application.position_title,
+        json.loads((resume.ckb_json if resume else "[]") or "[]"),
+    )
 
 
 @app.get("/applications/{application_id}/documents", response_model=list[GeneratedDocument])
@@ -1006,13 +1451,11 @@ def list_generated_documents(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    if not get_for_user(session, JobApplication, application_id, user_id):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
         raise HTTPException(404, "Application not found.")
-    return session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
-    ).all()
+    current = current_required_documents(session, application, user_id)
+    return sorted(current.values(), key=lambda document: document.created_at, reverse=True)
 
 
 @app.get("/applications/{application_id}/quality-check", response_model=QualityCheckResponse)
@@ -1034,9 +1477,75 @@ def quality_check(
         latest.setdefault(document.document_type, document)
 
     issues: list[QualityCheckIssue] = []
-    required = ("tailored_resume", "cover_letter") + (
-        ("selection_criteria",) if (application.selection_criteria or "").strip() else ()
+    requirements = load_application_requirements(
+        application.application_requirements_json, application.selection_criteria
     )
+    required = required_generated_documents(requirements)
+    if requirements.get("review_status") == "needs_confirmation":
+        issues.append(QualityCheckIssue(
+            severity="error", code="application_requirements_confirmation_required",
+            message="Confirm the employer's application requirements before finalising the application pack.",
+        ))
+    if requirements.get("completeness") == "incomplete":
+        issues.append(QualityCheckIssue(
+            severity="error", code="employer_requirements_incomplete",
+            message="The employer/JDF requirements are unresolved. Acquire or confirm the referenced source before finalising the application pack.",
+        ))
+    if material_requirements_unknown(requirements):
+        issues.append(QualityCheckIssue(
+            severity="error", code="application_requirements_unknown",
+            message="Resolve the unknown document requirements and formats before finalising the application pack.",
+        ))
+    unresolved_sources = session.exec(
+        select_for_user(JobSource, user_id).where(JobSource.application_id == application_id)
+    ).all()
+    if any(
+        source.source_type in {"job_description_attachment", "application_instruction_attachment"}
+        and source.extraction_status not in {"extracted", "not_applicable"}
+        for source in unresolved_sources
+    ):
+        issues.append(QualityCheckIssue(
+            severity="error", code="employer_source_unresolved",
+            message="A referenced employer/JDF source has not been acquired and extracted.",
+        ))
+
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    current_documents = current_required_documents(session, application, user_id, master_resume, profile)
+    decision = json.loads(application.application_decision_json or "{}")
+    decision_current = False
+    if master_resume:
+        try:
+            decision_current = decision_is_current(decision, decision_inputs(
+                json.loads(application.job_model_json or "{}"), requirements,
+                json.loads(master_resume.ckb_json or "[]"), profile,
+            ))
+        except json.JSONDecodeError:
+            decision_current = False
+    if not decision:
+        issues.append(QualityCheckIssue(
+            severity="error", code="application_decision_required",
+            message="Diagnose the application before finalising the application pack.",
+        ))
+    elif not decision_current:
+        issues.append(QualityCheckIssue(
+            severity="error", code="application_decision_stale",
+            message="The application diagnosis is no longer current. Diagnose the application again.",
+        ))
+    elif (
+        decision.get("status") != "ready"
+        or any(item.get("material") and item.get("answer") is None for item in decision.get("questions") or [])
+        or any(item.get("hard_gate_status") == "unverified" for item in decision.get("requirements") or [])
+        or any(item.get("hard_gate_status") == "fail" for item in decision.get("requirements") or [])
+    ):
+        hard_gate_failed = decision.get("status") == "blocked" or any(
+            item.get("hard_gate_status") == "fail" for item in decision.get("requirements") or []
+        )
+        code = "application_hard_gate_failed" if hard_gate_failed else "application_decision_not_ready"
+        issues.append(QualityCheckIssue(
+            severity="error", code=code,
+            message="Resolve the application diagnosis and its material questions before finalising the application pack.",
+        ))
     for document_type in required:
         if document_type not in latest:
             issues.append(QualityCheckIssue(
@@ -1045,11 +1554,35 @@ def quality_check(
                 message=f"Generate the {document_type.replace('_', ' ')} before applying.",
                 document_type=document_type,
             ))
-
-    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
-    content_to_check = {key: value.content for key, value in latest.items() if key in required}
-    for reviewed_type in ("selection_criteria", "cover_letter", "tailored_resume"):
-        reviewed_document = latest.get(reviewed_type)
+        elif document_type not in current_documents:
+            issues.append(QualityCheckIssue(
+                severity="error", code="stale_generated_document",
+                message=f"Regenerate the {document_type.replace('_', ' ')} from the current job and applicant information.",
+                document_type=document_type,
+            ))
+    content_to_check = {key: value.content for key, value in current_documents.items()}
+    for document_type in required:
+        document = current_documents.get(document_type)
+        if not document:
+            continue
+        try:
+            reviewer_status = json.loads(document.reviewer_json or "{}").get("status")
+        except (json.JSONDecodeError, AttributeError):
+            reviewer_status = None
+        if reviewer_status not in {"pass", "fail"}:
+            issues.append(QualityCheckIssue(
+                severity="error", code="document_review_required",
+                message=f"Review the current {document_type.replace('_', ' ')} before finalising the application pack.",
+                document_type=document_type,
+            ))
+        for evidence_issue in document_evidence_issues(
+            document_type, document.structured_content_json, document.used_experiences_json
+        ):
+            issues.append(QualityCheckIssue(
+                severity="error", document_type=document_type, **evidence_issue,
+            ))
+    for reviewed_type in required:
+        reviewed_document = current_documents.get(reviewed_type)
         if not reviewed_document or (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
             continue
         try:
@@ -1110,7 +1643,6 @@ def quality_check(
         ))
 
     current_job_context = "\n".join((application.job_description, application.job_model_json or "{}"))
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     applicant_evidence_context = (
         "\n".join((master_resume.source_text, master_resume.ckb_json or "[]"))
         if master_resume else ""
@@ -1266,6 +1798,14 @@ def quality_check(
             elif profile_phone.startswith("0"):
                 phone_variants.add("61" + profile_phone[1:])
             phone_found = bool(profile_phone) and any(value in document_phone_text for value in phone_variants)
+            full_name = f"{profile.first_name} {profile.last_name}".strip()
+            if content and full_name and full_name.lower() not in content.lower():
+                issues.append(QualityCheckIssue(
+                    severity="error",
+                    code="name_mismatch",
+                    message="The saved applicant name is missing from this document.",
+                    document_type=document_type,
+                ))
             if content and not phone_found:
                 issues.append(QualityCheckIssue(
                     severity="error",
@@ -1350,11 +1890,163 @@ def quality_check(
                 document_type="tailored_resume",
             ))
 
+    for issue in issues:
+        issue.blocks_release = issue.severity == "error"
     return QualityCheckResponse(
         ready=not any(issue.severity == "error" for issue in issues),
         issues=issues,
         checked_documents=sorted(content_to_check),
     )
+
+
+@app.post("/applications/{application_id}/release-confirmation")
+def confirm_release_details(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if not profile or not application.company.strip() or not application.position_title.strip():
+        raise HTTPException(409, "Complete the applicant, job and contact details before confirming them.")
+    state = load_release_state(application.release_state_json)
+    state["schema_version"] = "1.0"
+    state["details_confirmation"] = {"fingerprint": details_fingerprint(application, profile)}
+    application.release_state_json = json.dumps(state, ensure_ascii=False)
+    session.add(application); session.commit()
+    return {"confirmed": True}
+
+
+@app.get("/applications/{application_id}/release-checklist")
+def release_checklist(
+    application_id: int,
+    format: str = Query(default="docx", pattern="^(docx|pdf)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    required = required_generated_documents(requirements)
+    latest = current_required_documents(session, application, user_id, profile=profile)
+    final = quality_check(application_id, session, user_id)
+    state = load_release_state(application.release_state_json)
+    details_current = (state.get("details_confirmation") or {}).get("fingerprint") == details_fingerprint(application, profile)
+    pack_key = pack_fingerprint(application, profile, {key: value for key, value in latest.items() if key in required})
+    stored_pack = (state.get("pack_review") or {}).get("result") or {}
+    pack_current = pack_review_is_current(state, pack_key)
+    resume = latest.get("tailored_resume")
+    stored_ats = (state.get("ats") or {}).get("result") or {}
+    ats_current = bool(resume and ats_is_current(state, resume, format, template))
+    required_confirmations = (
+        criteria_requiring_confirmation(json.loads(application.selection_plan_json or "{}"))
+        if standalone_selection_criteria_required(requirements) else set()
+    )
+    confirmed = set(json.loads(application.selection_confirmations_json or "[]"))
+    selection_ready = not (required_confirmations - confirmed)
+    warnings = [item.model_dump() for item in final.issues if not item.blocks_release]
+    if (state.get("pack_review") or {}).get("fingerprint") == pack_key:
+        warnings.extend(
+            {"code": issue.get("type", "pack_review_advisory"), "message": issue.get("description", "Pack Review advisory."), "document_type": result.get("document_type")}
+            for result in stored_pack.get("results") or [] for issue in result.get("issues") or [] if not issue.get("blocks_release")
+        )
+    if resume and (state.get("ats") or {}).get("document_id") == resume.id and (state.get("ats") or {}).get("content_sha256") == fingerprint(resume.content):
+        warnings.extend(
+            {"code": item.get("code", "ats_warning"), "message": item.get("message", "ATS warning."), "document_type": "tailored_resume"}
+            for item in stored_ats.get("checks") or [] if item.get("state") == "warning"
+        )
+        warnings.extend(
+            {"code": "ats_keyword", "message": f"{item.get('term')}: {item.get('message')}", "document_type": "tailored_resume"}
+            for item in stored_ats.get("keywords") or [] if item.get("advisory") and item.get("status") != "covered"
+        )
+    checks = {
+        "documents": {"ready": all(key in latest for key in required), "required": required},
+        "details_confirmation": {"ready": details_current},
+        "selection_confirmations": {"ready": selection_ready},
+        "final_check": {"ready": final.ready, "issues": [item.model_dump() for item in final.issues]},
+        "pack_review": {"ready": pack_current, "current": (state.get("pack_review") or {}).get("fingerprint") == pack_key, "result": stored_pack},
+        "ats": {"ready": ats_current, "document_id": resume.id if resume else None, "format": format, "template": template, "result": stored_ats if ats_current else None},
+    }
+    ready = all(item["ready"] for item in checks.values())
+    release_status = "applied" if application.status == "applied" else "ready_to_apply" if ready else "artifact_verified" if ats_current else "content_reviewed" if pack_current else "needs_attention" if latest else "draft"
+    return {"schema_version": "1.0", "status": release_status, "ready": ready, "checks": checks, "warnings": warnings}
+
+
+@app.post("/applications/{application_id}/pack-review")
+def pack_review(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    final_check = quality_check(application_id, session, user_id)
+    if not final_check.ready:
+        raise HTTPException(409, detail={
+            "message": "Resolve deterministic Final Check issues before semantic pack review.",
+            "issues": [item.model_dump() for item in final_check.issues if item.blocks_release],
+        })
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    generated = session.exec(
+        select_for_user(GeneratedDocument, user_id)
+        .where(GeneratedDocument.application_id == application_id)
+        .order_by(GeneratedDocument.created_at.desc())
+    ).all()
+    latest: dict[str, GeneratedDocument] = {}
+    for document in generated:
+        latest.setdefault(document.document_type, document)
+    documents = {}
+    for document_type in final_check.checked_documents:
+        document = latest[document_type]
+        try:
+            structured = json.loads(document.structured_content_json or "{}")
+            used = json.loads(document.used_experiences_json or "[]")
+        except (json.JSONDecodeError, TypeError) as error:
+            raise HTTPException(409, "Document evidence metadata is invalid.") from error
+        documents[document_type] = {
+            "content": document.content, "structured": structured, "used_evidence_ids": used,
+        }
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    try:
+        ckb = json.loads((master_resume.ckb_json if master_resume else "[]") or "[]")
+        decision = json.loads(application.application_decision_json or "{}")
+    except json.JSONDecodeError as error:
+        raise HTTPException(409, "Application evidence or decision metadata is invalid.") from error
+    package = build_pack_review_payload(documents, ckb, decision, {
+        "applicant_name": f"{profile.first_name} {profile.last_name}".strip() if profile else "",
+        "company": application.company,
+        "position_title": application.position_title.split(" - ", 1)[0].strip(),
+    })
+    if package is None:
+        result = {
+            "schema_version": "1.0", "status": "pass", "skipped": True,
+            "skip_reason": "No cross-document semantic comparison candidates.",
+            "results": [], "blocks_release": False,
+        }
+    else:
+        try:
+            result = review_application_pack(package)
+        except AIServiceError as error:
+            operations.warning(json.dumps({
+                "event": "pack_review_failed", "application_id": application.id,
+                "provider": settings.ai_provider,
+                "model": settings.deepseek_model if settings.ai_provider == "deepseek" else settings.openai_model,
+                "failure_category": "review_output_invalid",
+            }, separators=(",", ":")))
+            raise HTTPException(502, "The application consistency review could not be completed. Try again.") from error
+    state = load_release_state(application.release_state_json)
+    state["schema_version"] = "1.0"
+    state["pack_review"] = {
+        "fingerprint": pack_fingerprint(application, profile, {key: latest[key] for key in final_check.checked_documents}),
+        "result": result,
+    }
+    application.release_state_json = json.dumps(state, ensure_ascii=False)
+    session.add(application); session.commit()
+    return result
 
 
 @app.patch("/documents/{document_id}", response_model=GeneratedDocument)
@@ -1383,6 +2075,85 @@ def update_generated_document(
     return document
 
 
+def _selection_bundle_with_edited_content(structured: dict, content: str) -> dict:
+    plan_items = (structured.get("selection_plan") or {}).get("items") or []
+    sections = {
+        re.sub(r"\s+", " ", match.group(1)).strip(): match.group(2).strip()
+        for match in re.finditer(r"(?ms)^##\s+(.+?)\s*$\n(.*?)(?=^##\s+|\Z)", content)
+    }
+    if not plan_items or any(str(item.get("criteria_text") or "").strip() not in sections for item in plan_items):
+        raise ValueError("Keep every Selection Criteria heading unchanged before re-reviewing edits.")
+    responses = {str(item.get("criteria_id")): dict(item) for item in structured.get("responses") or []}
+    if any(str(item.get("criteria_id")) not in responses for item in plan_items):
+        raise ValueError("The Selection Criteria review metadata is incomplete. Regenerate the document.")
+    for item in plan_items:
+        response = responses[str(item.get("criteria_id"))]
+        response["final_response"] = sections[str(item.get("criteria_text") or "").strip()]
+        response["word_count"] = actual_word_count(response["final_response"])
+    ordered = [responses[str(item.get("criteria_id"))] for item in plan_items]
+    return {**structured, "content": content, "responses": ordered, "actual_total_word_count": sum(item["word_count"] for item in ordered)}
+
+
+@app.post("/documents/{document_id}/review", response_model=GeneratedDocument)
+def review_edited_document(
+    document_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    document = get_for_user(session, GeneratedDocument, document_id, user_id)
+    if not document:
+        raise HTTPException(404, "Generated document not found.")
+    application = get_for_user(session, JobApplication, document.application_id, user_id)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    if not application or not master_resume or document.document_type not in current_required_documents(session, application, user_id, master_resume, profile):
+        raise HTTPException(409, "This document is historical or no longer required. Regenerate the current application documents.")
+    try:
+        structured = json.loads(document.structured_content_json or "{}")
+        ckb_json = master_resume.ckb_json or "[]"
+        profile_text = applicant_profile_prompt(profile) if profile else None
+        if document.document_type == "tailored_resume":
+            review = review_tailored_resume(ckb_json, application.job_model_json, json.dumps(structured), document.content, profile_text)
+        elif document.document_type == "cover_letter":
+            review = review_cover_letter(ckb_json, application.job_model_json, json.dumps(structured), profile_text, document.content)
+        else:
+            requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+            if not standalone_selection_criteria_required(requirements):
+                raise ValueError("A standalone Selection Criteria document is not required.")
+            structured = _selection_bundle_with_edited_content(structured, document.content)
+            review = review_selection_criteria_batch(ckb_json, json.dumps(structured.get("selection_plan") or {}), structured)
+            document.structured_content_json = json.dumps(structured, ensure_ascii=False)
+        document.reviewer_json = json.dumps(review, ensure_ascii=False)
+        trace = json.loads(document.trace_json or "{}")
+        trace["review"] = {
+            "status": str(review.get("status") or "not_run"),
+            "finding_count": sum(len(item.get("issues") or []) for item in review.get("results") or []),
+        }
+        trace["runtime"] = {**trace.get("runtime", {}), "status": "completed"}
+        document.trace_json = json.dumps(trace, ensure_ascii=False)
+    except (ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(409, str(error)) from error
+    except AIServiceError as error:
+        document.reviewer_json = json.dumps({
+            "status": "provider_failed", "state": "provider_failed",
+            "message": "The automatic review could not be completed.",
+        })
+        session.add(document); session.commit()
+        operations.warning(json.dumps({
+            "event": "document_review_retry_failed", "application_id": application.id,
+            "document_id": document.id, "document_type": document.document_type,
+            "provider": settings.ai_provider,
+            "model": settings.deepseek_model if settings.ai_provider == "deepseek" else settings.openai_model,
+            "failure_category": "review_output_invalid",
+        }, separators=(",", ":")))
+        raise HTTPException(502, detail={
+            "message": "The automatic review could not be completed. Your draft is still saved. Retry Review before continuing.",
+            "document_id": document.id, "document_type": document.document_type,
+        }) from error
+    session.add(document); session.commit(); session.refresh(document)
+    return document
+
+
 @app.get("/documents/{document_id}/export")
 def export_generated_document(
     document_id: int,
@@ -1397,6 +2168,8 @@ def export_generated_document(
     application = get_for_user(session, JobApplication, document.application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    market = profile.country if profile else None
     label = {
         "tailored_resume": "Tailored_Resume",
         "cover_letter": "Cover_Letter",
@@ -1404,12 +2177,75 @@ def export_generated_document(
     }.get(document.document_type, document.document_type)
     filename = safe_filename(f"{application.position_title}_{label}")
     if format == "docx":
-        payload = create_docx(document.content, label.replace("_", " "), template)
+        payload = create_docx(document.content, label.replace("_", " "), template, market)
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
-        payload = create_pdf(document.content, label.replace("_", " "), template)
+        payload = create_pdf(document.content, label.replace("_", " "), template, market)
         media_type = "application/pdf"
     return Response(payload, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'})
+
+
+@app.post("/documents/{document_id}/ats-check")
+def ats_check_generated_resume(
+    document_id: int,
+    payload: AtsCheckRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    document = get_for_user(session, GeneratedDocument, document_id, user_id)
+    if not document:
+        raise HTTPException(404, "Generated document not found.")
+    if document.document_type != "tailored_resume":
+        raise HTTPException(422, "ATS artifact verification is available only for a tailored resume.")
+    application = get_for_user(session, JobApplication, document.application_id, user_id)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    if not application or not master_resume or not profile:
+        raise HTTPException(409, "The Resume, applicant profile, or parent application is unavailable.")
+    try:
+        plan = json.loads(document.structured_content_json or "{}")
+        reviewer = json.loads(document.reviewer_json or "{}")
+        decision = json.loads(application.application_decision_json or "{}")
+        job_model = json.loads(application.job_model_json or "{}")
+        ckb = json.loads(master_resume.ckb_json or "[]")
+    except (json.JSONDecodeError, TypeError) as error:
+        raise HTTPException(409, "Resume verification metadata is invalid.") from error
+    if plan.get("schema_version") not in {"1.0", "1.1"} or not isinstance(plan.get("roles"), list):
+        raise HTTPException(409, "Generate the Resume with a valid current Resume Plan before ATS verification.")
+    if reviewer.get("status") != "pass":
+        raise HTTPException(409, "Review the current Resume before ATS verification.")
+    inputs = decision_inputs(
+        job_model,
+        load_application_requirements(application.application_requirements_json, application.selection_criteria),
+        ckb,
+        profile,
+    )
+    if not decision_is_current(decision, inputs) or decision.get("status") != "ready" or any(
+        item.get("hard_gate_status") in {"fail", "unverified"} for item in decision.get("requirements") or []
+    ):
+        raise HTTPException(409, "The application diagnosis is stale or blocked. Diagnose the application again before ATS verification.")
+    final = quality_check(application.id, session, user_id)
+    if not final.ready:
+        raise HTTPException(409, "Complete Final Check before ATS verification.")
+    latest = latest_application_documents(session, application.id, user_id)
+    state = load_release_state(application.release_state_json)
+    if not pack_review_is_current(
+        state, pack_fingerprint(application, profile, {key: latest[key] for key in final.checked_documents})
+    ):
+        raise HTTPException(409, "Complete the current Pack Review before ATS verification.")
+    result = verify_resume_artifact(document.content, payload.format, payload.template, plan, profile, ckb, job_model, decision, profile.country)
+    result["document_id"] = document.id
+    state["schema_version"] = "1.0"
+    state["ats"] = {
+        "document_id": document.id,
+        "content_sha256": fingerprint(document.content),
+        "format": payload.format,
+        "template": payload.template,
+        "result": result,
+    }
+    application.release_state_json = json.dumps(state, ensure_ascii=False)
+    session.add(application); session.commit()
+    return result
 
 
 @app.get("/documents/{document_id}/trace")
@@ -1441,18 +2277,9 @@ def export_application_pack(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
-    documents = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
-    ).all()
-    latest = {}
-    for document in documents:
-        if document.document_type in {"tailored_resume", "cover_letter", "selection_criteria"}:
-            latest.setdefault(document.document_type, document)
-    required_types = ["tailored_resume", "cover_letter"]
-    if (application.selection_criteria or "").strip():
-        required_types.append("selection_criteria")
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    required_types = list(required_generated_documents(requirements))
+    latest = current_required_documents(session, application, user_id)
     if any(document_type not in latest for document_type in required_types):
         raise HTTPException(400, "Generate all required application documents before downloading the pack.")
 
@@ -1462,11 +2289,13 @@ def export_application_pack(
         "cover_letter": "Cover_Letter",
         "selection_criteria": "Selection_Criteria",
     }
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    market = profile.country if profile else None
     with ZipFile(archive_stream, "w", ZIP_DEFLATED) as archive:
         for document_type in required_types:
             document = latest[document_type]
             label = labels[document_type]
-            payload = create_docx(document.content, label.replace("_", " "), template) if format == "docx" else create_pdf(document.content, label.replace("_", " "), template)
+            payload = create_docx(document.content, label.replace("_", " "), template, market) if format == "docx" else create_pdf(document.content, label.replace("_", " "), template, market)
             archive.writestr(f"{safe_filename(application.position_title)}_{label}.{format}", payload)
     filename = safe_filename(f"{application.position_title}_Application_Pack_{format.upper()}")
     return Response(archive_stream.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}.zip"'})
@@ -1491,25 +2320,9 @@ def generate(
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
     application.company = expand_abbreviated_company(application.company, application.job_description)
-    new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
-    selection_credit_key = (
-        check_selection_criteria_credit(session, user_id, payload.pack_id)
-        if payload.document_type == "selection_criteria"
-        else None
-    )
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     used_experiences = "[]"
     used_closing_styles = "[]"
-    if payload.document_type == "cover_letter":
-        prior_selection = session.exec(
-            select_for_user(GeneratedDocument, user_id)
-            .where(GeneratedDocument.application_id == application.id)
-            .where(GeneratedDocument.document_type == "selection_criteria")
-            .order_by(GeneratedDocument.created_at.desc())
-        ).first()
-        if prior_selection:
-            used_experiences = prior_selection.used_experiences_json or "[]"
-            used_closing_styles = prior_selection.closing_styles_json or "[]"
     profile_text = applicant_profile_prompt(profile) if profile else None
     ckb_source_json = master_resume.ckb_json or "[]"
     if ckb_source_json.strip() in {"", "[]"}:
@@ -1520,6 +2333,10 @@ def generate(
     stored_requirements = load_application_requirements(
         application.application_requirements_json, application.selection_criteria
     )
+    if stored_requirements.get("review_status") == "needs_confirmation" or stored_requirements.get("completeness") == "incomplete" or material_requirements_unknown(stored_requirements):
+        raise HTTPException(409, "Resolve and confirm the employer's application requirements before generating documents.")
+    if payload.document_type == "selection_criteria" and not standalone_selection_criteria_required(stored_requirements):
+        raise HTTPException(409, "A standalone Selection Criteria document is not required for this application.")
     job_model_json = (
         application.job_model_json or "{}"
         if stored_requirements.get("source") == "source_aware_parser"
@@ -1530,10 +2347,25 @@ def generate(
     if job_model_json != (application.job_model_json or "{}"):
         application.job_model_json = job_model_json
         application.evidence_matches_json = "{}"
+        application.application_decision_json = "{}"
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
         session.add(application)
         session.commit()
+    decision = json.loads(application.application_decision_json or "{}")
+    current_inputs = decision_inputs(
+        json.loads(job_model_json), stored_requirements, json.loads(ckb_source_json), profile,
+    )
+    if not decision_is_current(decision, current_inputs) or decision.get("status") == "needs_confirmation":
+        raise HTTPException(409, "Review the current application diagnosis and answer its material questions before generating documents.")
+    if decision.get("status") == "blocked":
+        raise HTTPException(409, "This application has a failed eligibility requirement. Review the diagnosis before proceeding.")
+    new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
+    selection_credit_key = (
+        check_selection_criteria_credit(session, user_id, payload.pack_id)
+        if payload.document_type == "selection_criteria"
+        else None
+    )
     evidence_matches_json = application.evidence_matches_json or "{}"
     try:
         if evidence_matches_json.strip() in {"", "{}"}:
@@ -1541,8 +2373,22 @@ def generate(
             application.evidence_matches_json = evidence_matches_json
             session.add(application)
             session.commit()
+        outcome_learning = (
+            build_outcome_signals(
+                session.exec(select_for_user(JobApplication, user_id)).all(), application.id,
+                profile.country if profile else None, application.position_title, json.loads(ckb_source_json),
+            )
+            if payload.document_type == "tailored_resume" else None
+        )
+        resume_plan = build_resume_curation_plan(
+            json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json),
+            application_decision=decision, outcome_learning=outcome_learning,
+        )
         selection_plan_json = application.selection_plan_json or "{}"
-        if selection_plan_json.strip() in {"", "{}"}:
+        if not selection_criteria_context_required(stored_requirements):
+            selection_plan_json = '{"schema_version":"1.0","items":[]}'
+            application.selection_plan_json = "{}"
+        elif selection_plan_json.strip() in {"", "{}"}:
             selection_plan_json = json.dumps(build_selection_plan(
                 json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json),
                 settings.default_sc_word_target,
@@ -1550,30 +2396,28 @@ def generate(
             application.selection_plan_json = selection_plan_json
             session.add(application)
             session.commit()
+        evidence_allocation = build_evidence_allocation(
+            resume_plan, json.loads(selection_plan_json), json.loads(ckb_source_json), decision,
+        )
+        selection_plan_json = json.dumps(
+            apply_selection_allocation(json.loads(selection_plan_json), evidence_allocation), ensure_ascii=False,
+        )
         selection_bundle = None
         selection_review = None
         cover_letter_plan = None
         cover_letter_review = None
-        resume_plan = None
         resume_review = None
         if payload.document_type == "selection_criteria":
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
-            selection_bundle, selection_review = repair_selection_criteria_bundle(
-                ckb_source_json, selection_plan_json, selection_bundle
+            selection_bundle = persist_selection_contract(
+                selection_bundle, json.loads(selection_plan_json), evidence_allocation
             )
             content = selection_bundle["content"]
         else:
             if payload.document_type == "cover_letter":
-                try:
-                    prior_ids = json.loads(used_experiences or "[]")
-                except json.JSONDecodeError:
-                    prior_ids = []
                 cover_letter_plan = build_cover_letter_plan(
-                    json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json), profile, prior_ids
-                )
-            if payload.document_type == "tailored_resume":
-                resume_plan = build_resume_curation_plan(
-                    json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json)
+                    json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json), profile,
+                    evidence_allocation=evidence_allocation,
                 )
             content = generate_draft(
                 master_resume.source_text,
@@ -1634,6 +2478,52 @@ def generate(
         validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
         if not validation["valid"]:
             raise HTTPException(502, validation["issues"][0]["message"] + " Please regenerate it.")
+    run_id = str(uuid4())
+    provider = settings.ai_provider.strip().lower()
+    model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
+    trace = build_generation_trace(
+        run_id=run_id,
+        document_type=payload.document_type,
+        application_id=application.id,
+        resume_id=master_resume.id,
+        provider=provider,
+        model=model_name,
+        evidence_ids=[str(value) for value in metadata["used_experiences"]],
+        latency_ms=round((perf_counter() - generation_started) * 1000),
+        input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
+    )
+    trace["runtime"]["status"] = "review_pending"
+    document = GeneratedDocument(
+        user_id=user_id,
+        application_id=application.id,
+        document_type=payload.document_type,
+        content=content,
+        structured_content_json=json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False),
+        reviewer_json=json.dumps({"status": "pending", "state": "pending"}),
+        run_id=run_id,
+        trace_json=json.dumps(trace, ensure_ascii=False),
+        used_experiences_json=json.dumps(metadata["used_experiences"]),
+        closing_styles_json=json.dumps(metadata["closing_styles"]),
+    )
+    session.add(document); session.commit(); session.refresh(document)
+
+    def reviewer_failed(error: Exception) -> None:
+        document.reviewer_json = json.dumps({
+            "status": "provider_failed", "state": "provider_failed",
+            "message": "The automatic review could not be completed.",
+        })
+        failed_trace = json.loads(document.trace_json or "{}")
+        failed_trace["runtime"] = {**failed_trace.get("runtime", {}), "status": "review_provider_failed"}
+        failed_trace["review"] = {"status": "provider_failed", "finding_count": 0}
+        document.trace_json = json.dumps(failed_trace, ensure_ascii=False)
+        session.add(document); session.commit()
+        operations.warning(json.dumps({
+            "event": "document_review_failed", "application_id": application.id,
+            "document_id": document.id, "document_type": document.document_type,
+            "provider": provider, "model": model_name, "failure_category": "review_output_invalid",
+        }, separators=(",", ":")))
+
+    if payload.document_type == "tailored_resume":
         try:
             content, resume_review = repair_tailored_resume(
                 content, ckb_source_json, job_model_json,
@@ -1646,7 +2536,11 @@ def generate(
         except ValueError as error:
             raise HTTPException(400, str(error))
         except AIServiceError as error:
-            raise HTTPException(502, str(error))
+            reviewer_failed(error)
+            raise HTTPException(502, detail={
+                "message": "The document was generated, but its automatic review could not be completed. Your draft has been kept. Retry Review before continuing.",
+                "document_id": document.id, "document_type": document.document_type,
+            }) from error
     if payload.document_type == "cover_letter":
         try:
             content, cover_letter_review = repair_cover_letter(
@@ -1656,10 +2550,25 @@ def generate(
         except ValueError as error:
             raise HTTPException(400, str(error))
         except AIServiceError as error:
-            raise HTTPException(502, str(error))
-    run_id = str(uuid4())
-    provider = settings.ai_provider.strip().lower()
-    model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
+            reviewer_failed(error)
+            raise HTTPException(502, detail={
+                "message": "The document was generated, but its automatic review could not be completed. Your draft has been kept. Retry Review before continuing.",
+                "document_id": document.id, "document_type": document.document_type,
+            }) from error
+    if payload.document_type == "selection_criteria":
+        try:
+            selection_bundle, selection_review = repair_selection_criteria_bundle(
+                ckb_source_json, selection_plan_json, selection_bundle or {}
+            )
+            content = selection_bundle["content"]
+        except (ValueError, json.JSONDecodeError) as error:
+            raise HTTPException(400, str(error)) from error
+        except AIServiceError as error:
+            reviewer_failed(error)
+            raise HTTPException(502, detail={
+                "message": "The document was generated, but its automatic review could not be completed. Your draft has been kept. Retry Review before continuing.",
+                "document_id": document.id, "document_type": document.document_type,
+            }) from error
     review_result = selection_review or cover_letter_review or resume_review or {}
     retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
     retry_count += int(review_result.get("telemetry", {}).get("reviewer_retries", 0))
@@ -1674,19 +2583,12 @@ def generate(
         reviewer=review_result,
         latency_ms=round((perf_counter() - generation_started) * 1000),
         retry_count=retry_count,
+        input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
     )
-    document = GeneratedDocument(
-        user_id=user_id,
-        application_id=application.id,
-        document_type=payload.document_type,
-        content=content,
-        structured_content_json=json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False),
-        reviewer_json=json.dumps(selection_review or cover_letter_review or resume_review or {}, ensure_ascii=False),
-        run_id=run_id,
-        trace_json=json.dumps(trace, ensure_ascii=False),
-        used_experiences_json=json.dumps(metadata["used_experiences"]),
-        closing_styles_json=json.dumps(metadata["closing_styles"]),
-    )
+    document.content = content
+    document.structured_content_json = json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False)
+    document.reviewer_json = json.dumps(review_result, ensure_ascii=False)
+    document.trace_json = json.dumps(trace, ensure_ascii=False)
     session.add(document)
     if payload.document_type == "selection_criteria":
         application.selection_confirmations_json = "[]"
@@ -1699,9 +2601,9 @@ def generate(
             reference_id=str(application.id),
             idempotency_key=selection_credit_key,
         ))
-    pack_is_complete = payload.document_type == (
-        "selection_criteria" if (application.selection_criteria or "").strip() else "cover_letter"
-    )
+    pack_is_complete = set(required_generated_documents(stored_requirements)) <= {
+        *current_required_documents(session, application, user_id, master_resume, profile), payload.document_type,
+    }
     usage = None
     if user_id is not None and payload.pack_id is not None:
         usage = session.exec(
@@ -1734,6 +2636,11 @@ def save_selection_confirmations(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    if not standalone_selection_criteria_required(requirements):
+        application.selection_confirmations_json = "[]"
+        session.add(application); session.commit(); session.refresh(application)
+        return application
     try:
         plan = json.loads(application.selection_plan_json or "{}")
     except json.JSONDecodeError as error:
@@ -1751,12 +2658,20 @@ def save_selection_confirmations(
 @app.post("/applications/{application_id}/prepare-submission")
 def prepare_submission(
     application_id: int,
+    format: str = Query(default="docx", pattern="^(docx|pdf)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application or not application.job_url:
         raise HTTPException(400, "A job URL is required before preparing a submission.")
+    release = release_checklist(application_id, format, template, session, user_id)
+    if not release["ready"]:
+        raise HTTPException(409, {"message": "Complete the release checklist before opening the employer application.", "checklist": release})
+    requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
+    if not standalone_selection_criteria_required(requirements):
+        return {"mode": "user_confirmed", "job_url": application.job_url, "message": "Open the job URL, review every field and submit it yourself. CAPTCHA and final submission are never automated."}
     try:
         plan = json.loads(application.selection_plan_json or "{}")
         confirmed = set(json.loads(application.selection_confirmations_json or "[]"))

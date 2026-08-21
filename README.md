@@ -9,7 +9,7 @@
 - JD：粘贴招聘链接后自动读取公司、职位名称和 JD；网站限制读取时，可一次粘贴完整广告并自动拆分字段
 - 混合广告检查：识别重复的 About the Role / Employer Questions，并提醒是否混入之前保存岗位的公司内容
 - 申请记录：公司、岗位、链接、状态、截止日期、平台确认编号和提交时间
-- 生成接口：为简历、Cover Letter、Selection Criteria 和 ATS 分析提供统一接口
+- 生成接口：为简历、Cover Letter 和 Selection Criteria 提供统一接口；另以确定性检查验证实际导出的 Resume 工件是否适合 ATS 读取
 - 文档导出：单份 DOCX/PDF，以及完整申请材料包
 - 上传前质量检查：自动检查材料完整性、职位名称、联系方式、占位符、未经确认的到岗表述和求职信长度风险；电话号码匹配忽略空格、括号、连字符及 `0`/`+61` 格式差异
 - 编辑保存反馈：明确显示 Unsaved changes、Saving、Saved 或 Save failed
@@ -100,5 +100,7 @@ start-app.cmd Windows 一键启动入口
 - 个人资料库不保存密码、OTP、验证码、犯罪记录、纪律处分、健康或多元化声明；这些问题每次申请时仍由用户本人确认。
 - 备份文件不包含 `.env`、API Key 或密码。恢复前系统会自动为当前数据创建安全备份，并要求用户明确确认。
 - 生成内容是草稿，必须由你核对真实性与准确性。
-- **Review & Apply** 会先运行 Final Check；存在严重错误时不会打开申请页面。警告仍需用户自行判断。
+- 发布路径为：Diagnose → Generate → Review → Final Check → Pack Review → 验证所选 Resume 工件（DOCX/PDF + 模板）→ Ready to Apply → Applied。
+- **Review & Apply** 使用统一 Release Checklist；任一阻断项未解决时不会打开申请页面。警告仍会显示，但不会被误当成阻断项。
+- DOCX/PDF 草稿仍可下载用于人工检查；只有明确选择且通过 ATS 工件验证的 Resume 格式与模板组合才属于已验证提交工件。
 - 自动化投递必须遵守招聘平台规则；该项目不规避 CAPTCHA、登录保护或最终确认步骤。

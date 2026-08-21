@@ -76,6 +76,9 @@ class JobApplication(SQLModel, table=True):
     job_model_json: str = "{}"
     application_requirements_json: str = "{}"
     evidence_matches_json: str = "{}"
+    application_decision_json: str = "{}"
+    release_state_json: str = "{}"
+    outcome_json: str = "{}"
     selection_plan_json: str = "{}"
     selection_confirmations_json: str = "[]"
     deadline: date | None = None
@@ -268,6 +271,11 @@ class ApplicationRequirementsUpdate(SQLModel):
     additional_documents: list[str] | None = None
 
 
+class ApplicationDecisionConfirmation(SQLModel):
+    question_id: str
+    answer: bool
+
+
 class JobApplicationSubmissionUpdate(SQLModel):
     submission_reference: str | None = None
     submitted_at: datetime | None = None
@@ -275,6 +283,24 @@ class JobApplicationSubmissionUpdate(SQLModel):
 
 class JobApplicationStatusUpdate(SQLModel):
     status: ApplicationStatus
+
+
+class OutcomeEventCreate(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["submitted", "interview", "progressed", "rejected", "offer", "withdrawn", "no_response", "unknown"]
+    effective_date: date
+    stage_label: str = Field(default="", max_length=120)
+    reason: str = Field(default="", max_length=500)
+    note: str = Field(default="", max_length=2000)
+
+
+class OutcomeEventUpdate(OutcomeEventCreate):
+    pass
+
+
+class OutcomeLearningExclusion(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    excluded_from_learning: bool
 
 
 class GenerateRequest(SQLModel):
@@ -305,11 +331,21 @@ class GeneratedDocumentUpdate(SQLModel):
     content: str
 
 
+class AtsCheckRequest(SQLModel):
+    format: Literal["docx", "pdf"]
+    template: Literal["classic", "modern", "traditional"] = "classic"
+
+
+class AccountDeletionRequest(SQLModel):
+    confirmation: str
+
+
 class QualityCheckIssue(SQLModel):
     severity: str  # error | warning
     code: str
     message: str
     document_type: str | None = None
+    blocks_release: bool = False
 
 
 class QualityCheckResponse(SQLModel):

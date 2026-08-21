@@ -4,6 +4,7 @@ from io import BytesIO
 from docx import Document
 
 from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, parse_job_ad_text, parse_job_page
+from app.job_model import build_job_model
 
 
 class IngestTests(unittest.TestCase):
@@ -250,8 +251,52 @@ class IngestTests(unittest.TestCase):
 
         self.assertEqual(result["position_title"], "Senior Project Administrator")
         self.assertEqual(result["company"], "Horizon Infrastructure")
-        self.assertIn("document control", result["selection_criteria"])
-        self.assertNotIn("Submit your resume", result["selection_criteria"])
+        self.assertEqual(result["selection_criteria"], "")
+        model = build_job_model(result["job_description"], result["selection_criteria"])
+        self.assertTrue(any("document control" in item["criteria_text"].lower() for item in model["criteria"]))
+
+    def test_srg_private_requirements_do_not_become_selection_criteria_or_include_benefits(self):
+        raw_text = """Office Administrator
+SRG Global
+Perth WA
+
+About the Role
+We are looking for an organised and proactive Office Administrator to join our Facades team in Perth CBD.
+This is a varied, project-focused administration role supporting procurement, workforce administration, project mobilisation and the day-to-day operation of the Facades office.
+You'll work closely with the project team, providing essential administrative support as projects ramp up and workforce requirements increase.
+
+What You'll Be Doing
+- Managing office administration systems, processes and documentation.
+- Acting as a key point of contact and liaising with internal stakeholders, vendors and service providers.
+- Coordinating workforce administration including recruitment support, onboarding, inductions, training, timesheets and compliance records.
+- Supporting procurement and project administration including purchase orders, vendor onboarding, PPE procurement and project reporting.
+- Maintaining facilities, equipment, supplies, SharePoint and business records.
+- Supporting the General Manager, Construction Manager and project teams.
+- Contributing to continuous improvement and compliance with systems, safety and quality requirements.
+
+About You
+- Previous administration experience, preferably within construction, mining or similar.
+- Strong attention to detail and ability to manage competing priorities.
+- Excellent written and verbal communication.
+- Good time management and organisational skills.
+- Microsoft Office and Excel.
+- D365 and/or Humanforce highly regarded.
+
+We Offer
+- Competitive salary package.
+- Career development and progression opportunities.
+- Corporate health insurance discounts.
+- Corporate discounts on travel, novated leasing and lifestyle benefits.
+- Supportive and collaborative team environment."""
+        result = parse_job_ad_text(raw_text)
+        model = build_job_model(result["job_description"], result["selection_criteria"])
+        criteria = " ".join(item["criteria_text"] for item in model["criteria"]).lower()
+
+        self.assertEqual(result["selection_criteria"], "")
+        self.assertIn("administration experience", criteria)
+        self.assertIn("d365", criteria)
+        self.assertNotIn("salary", criteria)
+        self.assertNotIn("health insurance", criteria)
 
     def test_expands_short_zoo_heading_to_readable_advertised_name(self):
         raw_text = """

@@ -59,6 +59,8 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+      - name: Run frontend workflow tests
+        run: pnpm test
       - name: Build production frontend
         run: pnpm build 2>&1 | tee frontend-build-results.txt
       - name: Save frontend build evidence

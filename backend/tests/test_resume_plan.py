@@ -1,59 +1,149 @@
-import unittest
-
 import json
+import unittest
 
 from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 
 
+def evidence(evidence_id, section, action="Grounded work", *, period=None, result=""):
+    return {"evidence_id": evidence_id, "evidence_type": "experience", "source_section": section, "source_text": action,
+            "time_period": period or {"start": None, "end": None}, "action": action, "evidence_quality": "medium", "result": result}
+
+
 class ResumeCurationPlanTests(unittest.TestCase):
-    def test_plan_prioritises_relevant_evidence_and_preserves_required_sections(self):
-        job_model = {"criteria": [
-            {"criteria_id": "C1", "criteria_type": "essential"},
-            {"criteria_id": "C2", "criteria_type": "desirable"},
-        ]}
-        matches = {"matches": [
-            {"criteria_id": "C1", "matched_evidence": ["EV1", "EV2"], "match_type": "direct", "coverage": "strong"},
-            {"criteria_id": "C2", "matched_evidence": ["EV2"], "match_type": "direct", "coverage": "partial"},
-        ]}
+    def test_explicit_dates_control_presentation_while_relevance_controls_budget(self):
         ckb = [
-            {"evidence_id": "EV1", "evidence_type": "experience", "source_section": "Work > Agency", "evidence_quality": "high", "result": "Delivered on time"},
-            {"evidence_id": "EV2", "evidence_type": "project", "source_section": "Projects", "evidence_quality": "medium", "result": ""},
-            {"evidence_id": "EV3", "evidence_type": "experience", "source_section": "Unrelated work", "evidence_quality": "high", "result": "Increased sales"},
-            {"evidence_id": "EV4", "evidence_type": "qualification", "source_section": "Qualifications", "evidence_quality": "medium", "result": ""},
+            evidence("OLD", "Work > Older Relevant", "Executive support", period={"start": "2018", "end": "2020"}),
+            evidence("NEW", "Work > Newer Role", "Administration", period={"start": "2023", "end": "2025"}),
         ]
+        plan = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]},
+            {"matches": [{"criteria_id": "C1", "matched_evidence": ["OLD"], "match_type": "direct", "coverage": "strong"}]},
+            ckb,
+        )
+        self.assertEqual([role["source_section"] for role in plan["roles"]], ["Work > Newer Role", "Work > Older Relevant"])
+        self.assertEqual(plan["roles"][1]["curation_action"], "promote")
+        self.assertEqual(plan["roles"][0]["display_period"], "2023 - 2025")
 
-        plan = build_resume_curation_plan(job_model, matches, ckb)
+    def test_unknown_dates_keep_source_fallback_and_reliable_period_is_validated(self):
+        ckb = [evidence("A", "Work > First"), evidence("B", "Work > Second")]
+        plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, ckb)
+        self.assertEqual([role["source_section"] for role in plan["roles"]], ["Work > First", "Work > Second"])
+        dated = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]},
+            {"matches": [{"criteria_id": "C1", "matched_evidence": ["A"], "match_type": "direct", "coverage": "strong"}]},
+            [evidence("A", "Work > Officer", period={"start": "2022", "end": "2024"})],
+        )
+        result = validate_resume_content("## Professional Summary\nX\n## Key Skills\nX\n## Work Experience\nOfficer", dated, ["A"])
+        self.assertIn("missing_role_period", [item["code"] for item in result["issues"]])
 
-        self.assertEqual(RESUME_PLAN_SCHEMA_VERSION, "1.0")
-        self.assertEqual(plan["required_sections"], ["Professional Summary", "Key Skills", "Work Experience"])
-        self.assertEqual(plan["maximum_pages"], 2)
-        self.assertEqual(plan["selected_evidence"][0]["evidence_id"], "EV2")
-        self.assertIn("EV4", selected_resume_evidence_ids(plan))
-        self.assertIn("EV3", plan["omitted_evidence_ids"])
-        pack = resume_evidence_pack(json.dumps(ckb), json.dumps(plan))
-        self.assertEqual({item["evidence_id"] for item in pack}, selected_resume_evidence_ids(plan))
+    def test_relevance_controls_budget_while_source_order_controls_chronology(self):
+        ckb = [
+            evidence("FIN", "Work > Current Finance", "Processed accounts", period={"start": "2024", "end": "Present"}),
+            evidence("EA1", "Work > Executive Assistant", "Managed executive diary", result="Reduced clashes"),
+            evidence("EA2", "Work > Executive Assistant", "Coordinated board papers"),
+            evidence("EA3", "Work > Executive Assistant", "Liaised with senior stakeholders"),
+        ]
+        model = {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": ["EA1", "EA2", "EA3"], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan(model, matches, ckb)
+        self.assertEqual(RESUME_PLAN_SCHEMA_VERSION, "1.1")
+        self.assertEqual([role["source_section"] for role in plan["roles"]], ["Work > Current Finance", "Work > Executive Assistant"])
+        self.assertEqual((plan["roles"][0]["curation_action"], plan["roles"][0]["max_bullets"]), ("compress", 1))
+        self.assertEqual(plan["roles"][0]["selected_evidence_ids"], ["FIN"])
+        self.assertEqual((plan["roles"][1]["curation_action"], plan["roles"][1]["max_bullets"]), ("promote", 3))
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["FIN", "EA1", "EA2", "EA3"])
+        self.assertEqual([item["evidence_id"] for item in resume_evidence_pack(json.dumps(ckb), json.dumps(plan))], ["FIN", "EA1", "EA2", "EA3"])
 
-    def test_plan_never_exceeds_configured_evidence_limit(self):
-        ckb = [{"evidence_id": f"EV{i}", "evidence_type": "qualification", "evidence_quality": "medium"} for i in range(20)]
+    def test_finance_target_promotes_current_finance_role(self):
+        ckb = [evidence("FIN", "Work > Finance", "Prepared reconciliations", period={"start": "2024", "end": "Current"}), evidence("EA", "Work > EA")]
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]},
+            {"matches": [{"criteria_id": "C1", "matched_evidence": ["FIN"], "match_type": "direct", "coverage": "strong"}]}, ckb)
+        self.assertEqual(plan["roles"][0]["curation_action"], "promote")
+        self.assertEqual(plan["roles"][0]["evidence_framing"], "direct")
 
-        plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, ckb, max_evidence=6)
+    def test_current_role_with_no_bullet_content_stays_visible_without_filler(self):
+        current = evidence("NOW", "Work > Current Role", "", period={"start": "2025", "end": "Present"})
+        plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [current])
+        self.assertEqual(plan["roles"][0]["curation_action"], "compress")
+        self.assertEqual(plan["roles"][0]["max_bullets"], 0)
+        self.assertTrue(plan["roles"][0]["include_role_header"])
+        self.assertEqual(plan["roles"][0]["selected_evidence_ids"], [])
+        self.assertNotIn("NOW", selected_resume_evidence_ids(plan))
 
+    def test_omit_role_header_semantics_are_explicit(self):
+        plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [evidence("OLD", "Work > Old Role")])
+        self.assertEqual(plan["roles"][0]["curation_action"], "omit")
+        self.assertFalse(plan["roles"][0]["include_role_header"])
+
+    def test_direct_outranks_adjacent_and_adjacent_stays_explicit(self):
+        model = {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}, {"criteria_id": "C2", "criteria_type": "essential"}]}
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": ["ADJ"], "match_type": "inferred", "coverage": "strong"},
+                               {"criteria_id": "C2", "matched_evidence": ["DIR"], "match_type": "direct", "coverage": "partial"}]}
+        ckb = [evidence("ADJ", "Work > Adjacent", "Transferable coordination"), evidence("DIR", "Work > Direct", "Direct delivery")]
+        plan = build_resume_curation_plan(model, matches, ckb)
+        by_id = {item["evidence_id"]: item for item in plan["selected_evidence"]}
+        self.assertEqual((by_id["ADJ"]["evidence_framing"], by_id["DIR"]["evidence_framing"]), ("adjacent", "direct"))
+        self.assertEqual(next(role for role in plan["roles"] if role["source_section"] == "Work > Direct")["curation_action"], "promote")
+        constrained = build_resume_curation_plan(model, matches, ckb, max_evidence=1)
+        self.assertEqual([item["evidence_id"] for item in constrained["selected_evidence"]], ["DIR"])
+
+    def test_decision_gaps_and_unsupported_requirements_add_no_evidence(self):
+        model = {"criteria": [{"criteria_id": value, "criteria_type": kind} for value, kind in (("G", "essential"), ("U", "essential"), ("D", "desirable"))]}
+        matches = {"matches": [{"criteria_id": value, "matched_evidence": [], "match_type": "insufficient", "coverage": "weak"} for value in ("G", "U", "D")]}
+        decision = {"application_recommendation": "apply", "requirements": [
+            {"criteria_id": "G", "importance": "essential", "evidence_classification": "confirmed_gap", "matched_evidence": []},
+            {"criteria_id": "U", "importance": "essential", "evidence_classification": "unverified_possible", "matched_evidence": []},
+            {"criteria_id": "D", "importance": "desirable", "evidence_classification": None, "matched_evidence": []}]}
+        plan = build_resume_curation_plan(model, matches, [evidence("OTHER", "Work > Other")], application_decision=decision)
+        self.assertEqual(plan["selected_evidence"], [])
+
+    def test_duplicate_grounded_content_is_selected_once(self):
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": ["ONE", "TWO"], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches,
+            [evidence("ONE", "Work > First", "Prepared monthly reports"), evidence("TWO", "Work > Other", "Prepared monthly reports")])
+        self.assertEqual(len(plan["selected_evidence"]), 1)
+
+    def test_page_pressure_caps_evidence_without_reordering_roles(self):
+        ckb = [evidence(f"EV{i}", f"Work > Role {i}", f"Distinct work {i}") for i in range(12)]
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [item["evidence_id"] for item in reversed(ckb)], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb, max_evidence=6)
         self.assertEqual(len(plan["selected_evidence"]), 6)
+        self.assertEqual([role["chronology_order"] for role in plan["roles"]], list(range(12)))
+
+    def test_qualification_is_retained_and_limit_is_respected(self):
+        ckb = [{"evidence_id": f"EV{i}", "evidence_type": "qualification", "source_section": "Qualifications", "source_text": f"Qualification {i}", "evidence_quality": "medium"} for i in range(20)]
+        self.assertEqual(len(build_resume_curation_plan({"criteria": []}, {"matches": []}, ckb, max_evidence=6)["selected_evidence"]), 6)
+
+    def test_fallback_qualifications_do_not_displace_current_continuity(self):
+        ckb = [evidence("NOW", "Work > Current", "Current grounded duty", period={"start": "2025", "end": "Present"})]
+        ckb += [{"evidence_id": f"Q{i}", "evidence_type": "qualification", "source_section": "Qualifications", "source_text": f"Qualification {i}", "evidence_quality": "medium"} for i in range(4)]
+        plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, ckb, max_evidence=2)
+        self.assertIn("NOW", selected_resume_evidence_ids(plan))
+        self.assertEqual(len(plan["selected_evidence"]), 2)
+
+    def test_relevant_qualification_survives(self):
+        ckb = [{"evidence_id": "RQ", "evidence_type": "qualification", "source_section": "Qualifications", "source_text": "Required certificate", "detail": "Required certificate", "evidence_quality": "medium"}]
+        plan = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]},
+            {"matches": [{"criteria_id": "C1", "matched_evidence": ["RQ"], "match_type": "direct", "coverage": "strong"}]}, ckb, max_evidence=1,
+        )
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["RQ"])
+
+    def test_distinct_essential_requirements_receive_coverage_before_depth(self):
+        ckb = [evidence("A1", "Work > A", "A strongest", result="Result"), evidence("A2", "Work > A", "A depth"), evidence("B1", "Work > B", "B coverage")]
+        plan = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "A", "criteria_type": "essential"}, {"criteria_id": "B", "criteria_type": "essential"}]},
+            {"matches": [{"criteria_id": "A", "matched_evidence": ["A1", "A2"], "match_type": "direct", "coverage": "strong"}, {"criteria_id": "B", "matched_evidence": ["B1"], "match_type": "direct", "coverage": "strong"}]},
+            ckb, max_evidence=2,
+        )
+        self.assertEqual(selected_resume_evidence_ids(plan), {"A1", "B1"})
 
     def test_hard_validation_requires_sections_length_and_selected_evidence(self):
-        plan = {
-            "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
-            "selected_evidence": [{"evidence_id": "EV1"}],
-        }
+        plan = {"required_sections": ["Professional Summary", "Key Skills", "Work Experience"], "selected_evidence": [{"evidence_id": "EV1"}]}
         valid = "## Professional Summary\nSummary.\n## Key Skills\nSkills.\n## Work Experience\nExperience."
-
         self.assertTrue(validate_resume_content(valid, plan, ["EV1"])["valid"])
         invalid = validate_resume_content("## Professional Summary\n" + " ".join(["word"] * 751), plan, ["EV2"])
-        self.assertFalse(invalid["valid"])
-        self.assertEqual(
-            {issue["code"] for issue in invalid["issues"]},
-            {"missing_required_section", "resume_too_long", "unselected_evidence_used"},
-        )
+        self.assertEqual({issue["code"] for issue in invalid["issues"]}, {"missing_required_section", "resume_too_long", "unselected_evidence_used"})
 
 
 if __name__ == "__main__":

@@ -50,6 +50,12 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN application_requirements_json TEXT NOT NULL DEFAULT '{}'"))
                 if "evidence_matches_json" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN evidence_matches_json TEXT NOT NULL DEFAULT '{}'"))
+                if "application_decision_json" not in application_columns:
+                    connection.execute(text("ALTER TABLE jobapplication ADD COLUMN application_decision_json TEXT NOT NULL DEFAULT '{}'"))
+                if "release_state_json" not in application_columns:
+                    connection.execute(text("ALTER TABLE jobapplication ADD COLUMN release_state_json TEXT NOT NULL DEFAULT '{}'"))
+                if "outcome_json" not in application_columns:
+                    connection.execute(text("ALTER TABLE jobapplication ADD COLUMN outcome_json TEXT NOT NULL DEFAULT '{}'"))
                 if "selection_plan_json" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_plan_json TEXT NOT NULL DEFAULT '{}'"))
                 if "selection_confirmations_json" not in application_columns:
@@ -86,6 +92,12 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN application_requirements_json TEXT DEFAULT '{}'"))
             if "evidence_matches_json" not in existing:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN evidence_matches_json TEXT DEFAULT '{}'"))
+            if "application_decision_json" not in existing:
+                connection.execute(text("ALTER TABLE jobapplication ADD COLUMN application_decision_json TEXT DEFAULT '{}'"))
+            if "release_state_json" not in existing:
+                connection.execute(text("ALTER TABLE jobapplication ADD COLUMN release_state_json TEXT DEFAULT '{}'"))
+            if "outcome_json" not in existing:
+                connection.execute(text("ALTER TABLE jobapplication ADD COLUMN outcome_json TEXT DEFAULT '{}'"))
             if "selection_plan_json" not in existing:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_plan_json TEXT DEFAULT '{}'"))
             if "selection_confirmations_json" not in existing:

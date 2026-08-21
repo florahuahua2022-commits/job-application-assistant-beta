@@ -8,8 +8,9 @@ from .evidence_matcher import matched_evidence_pack, normalise_match_result, val
 from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
-from .reviewer_core import normalise_document_review
+from .reviewer_core import normalise_document_review, normalise_finding
 from .resume_plan import resume_evidence_pack
+from .cover_letter_plan import cover_letter_evidence_pack
 
 
 EVIDENCE_STOP_WORDS = {
@@ -130,7 +131,7 @@ def _deepseek_draft(prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
         stream=False,
-        max_tokens=2000,
+        max_tokens=4000,
         extra_body={"thinking": {"type": "disabled"}},
     )
     content = response.choices[0].message.content
@@ -235,6 +236,7 @@ Write about {plan_item.get('allocated_word_limit')} words. Return JSON only:
 {{"criteria_id":"{plan_item.get('criteria_id')}","evidence_used":["EV..."],"star":{{"situation":"...","task":"...","action":"...","result":"..."}},"final_response":"natural paragraph text","word_count":0}}
 
 Every evidence_used ID must appear in CRITERION PLAN matched_evidence. Include only IDs materially used in final_response. The STAR fields are audit fields; do not print S/T/A/R labels inside final_response."""
+        base_prompt += "\nEvidence allocation is guidance, not evidence. Keep every matched_evidence ID eligible; prefer primary for criterion depth, use a genuinely comparable alternative when it reduces repetition, and never weaken evidence merely for novelty. Evidence reused from the Resume must be expanded with criterion-specific context rather than copied mechanically. Bridge evidence remains transferable, never direct."
         validation = None
         response: dict = {}
         for attempt in range(2):
@@ -515,6 +517,7 @@ def auto_fix_cover_letter(
     ]
     if not issues:
         return content
+    selected_evidence = resume_evidence_pack(ckb_json, cover_letter_plan_json)
     prompt = f"""You are correcting a Cover Letter after factual validation. Return the full corrected letter only.
 
 PREVIOUS COVER LETTER:
@@ -525,8 +528,8 @@ PREVIOUS COVER LETTER:
 VALIDATOR ERRORS:
 {json.dumps(issues, ensure_ascii=False)}
 
-CKB SOURCE_TEXT (the only ground truth for the applicant's employment, skills, achievements, dates and tools):
-{ckb_json}
+SELECTED CKB SOURCE_TEXT (the only ground truth allowed for the applicant's employment, skills, achievements, dates and tools in this repair):
+{json.dumps(selected_evidence, ensure_ascii=False)}
 
 APPLICANT PROFILE DECLARATIONS (ground truth only for personal declarations; preserve its exact level of specificity):
 {applicant_profile or 'Not provided'}
@@ -552,6 +555,7 @@ Repair every validator error using these rules:
 - Wording used solely to acknowledge an evidence gap may name the relevant JD requirement; it must not imply demonstrated capability.
 - Preserve the letter's contact details, position title, salutation, sign-off and natural readability.
 - Do not add any new factual claim while repairing.
+- Do not import another story or evidence record, even when unused CKB evidence could address an error.
 """
     return _selection_provider_response(prompt).strip()
 
@@ -617,7 +621,9 @@ Check only these issue types:
 - ai_tone
 - style_only
 
-Check that roles, employers, dates, responsibilities, skills and outcomes remain traceable to CKB source_text. Check whether the curation reflects the Resume Plan and the strongest job-relevant evidence. Do not penalise factual compression or reordering. A style_only preference must never cause failure by itself. Do not calculate exact word counts or required headings; application logic already checks them.
+Treat the Resume Plan as authoritative curation. Report evidence_mismatch when role order differs from the plan, a role with include_role_header true is absent, an omit role is expanded, promote/keep/compress is overridden, or max_bullets is exceeded. Report unmatched_evidence_used for omitted or unselected evidence. Evidence framed as adjacent must remain transferable rather than direct ownership, and continuity_only evidence must not become a JD capability claim. A visible role header must remain present even when max_bullets is zero. Check these constraints; do not re-curate the Resume.
+
+Check that roles, employers, dates, responsibilities, skills and outcomes remain traceable to CKB source_text. Check whether the curation reflects the Resume Plan and selected evidence. Factual compression is allowed only within the plan's role action and max_bullets ceiling. A style_only preference must never cause failure by itself. Do not calculate exact word counts or required headings; application logic already checks them.
 
 Treat "currently", "current", "present" and equivalent ongoing-employment wording as unsupported unless the relevant CKB source_text explicitly states an ongoing status or open-ended date range. An organisation being a government agency does not prove current employment.
 
@@ -681,9 +687,21 @@ def classify_resume_review_errors(review: dict) -> list[dict]:
     return errors
 
 
-def auto_fix_tailored_resume(content: str, errors: list[dict], ckb_json: str, applicant_profile: str | None = None) -> str:
+def auto_fix_tailored_resume(
+    content: str,
+    errors: list[dict],
+    ckb_json: str,
+    applicant_profile: str | None = None,
+    resume_plan_json: str = "{}",
+) -> str:
     if not errors:
         return content
+    selected_evidence = resume_evidence_pack(ckb_json, resume_plan_json)
+    if resume_plan_json.strip() in {"", "{}"}:
+        try:
+            selected_evidence = json.loads(ckb_json or "[]")
+        except json.JSONDecodeError:
+            selected_evidence = []
     prompt = f"""You are correcting an ATS-friendly tailored CV after factual validation. Return the full corrected CV only.
 
 PREVIOUS CV:
@@ -694,9 +712,14 @@ PREVIOUS CV:
 UNSUPPORTED CLAIMS:
 {json.dumps(errors, ensure_ascii=False)}
 
-CKB SOURCE_TEXT (the only ground truth):
+AUTHORITATIVE RESUME PLAN:
 ---
-{ckb_json}
+{resume_plan_json}
+---
+
+SELECTED CKB EVIDENCE (the only ground truth allowed for employment claims in this repair):
+---
+{json.dumps(selected_evidence, ensure_ascii=False)}
 ---
 
 APPLICANT PROFILE DECLARATIONS (ground truth only for personal declarations; preserve exact specificity):
@@ -708,6 +731,10 @@ Rules:
 - For fix_type "remove", delete the unsupported claim entirely. Do not replace it with another unverified claim.
 - For fix_type "remove_or_soften", rewrite using only what CKB source_text actually supports.
 - Do not introduce any new claim not present in source_text.
+- Do not re-curate the Resume. Do not reorder roles, change promote/keep/compress/omit, exceed max_bullets, fill unused bullet capacity or introduce omitted/unselected evidence.
+- Preserve a visible role header even when max_bullets is zero wherever include_role_header is true. An omit role may remain omitted.
+- Do not convert adjacent evidence into direct ownership wording.
+- Do not turn continuity_only evidence into a JD capability claim.
 - Remove current/present/ongoing employment wording unless CKB source_text explicitly supports it with status wording or an open-ended date range.
 - Remove policies, procedures, frameworks, government requirements and recordkeeping requirements unless CKB source_text explicitly supports those terms. A government employer alone is not evidence.
 - Personal declarations must preserve exact Applicant Profile specificity; never add a country to a residency declaration that has none.
@@ -740,12 +767,137 @@ def repair_tailored_resume(
             review["generation_status"] = "clean"
             review["remaining_issues"] = []
             return content, review
-        content = auto_fix_tailored_resume(content, errors, ckb_json, applicant_profile)
+        content = auto_fix_tailored_resume(
+            content, errors, ckb_json, applicant_profile, resume_plan_json=resume_plan_json
+        )
     review = review_tailored_resume(ckb_json, job_model_json, resume_plan_json, content, applicant_profile)
     errors = classify_resume_review_errors(review)
     review["generation_status"] = "needs_ckb_update" if errors else "clean"
     review["remaining_issues"] = errors
     return content, review
+
+
+PACK_REVIEW_ISSUE_TYPES = {
+    "unsupported_inference", "evidence_mismatch", "contradiction", "requirement_omission", "unsupported_claim",
+}
+
+
+def review_application_pack(package: dict) -> dict:
+    """Run one evidence-ID-scoped semantic consistency review without repair or re-planning."""
+    prompt = f"""You are a narrowly scoped application-pack factual consistency Reviewer. Do not rewrite, repair, improve, select evidence or offer career advice.
+
+You may report only:
+- responsibility-strength inconsistency for the same declared evidence ID;
+- adjacent/transferable evidence presented as direct experience;
+- explicit contradiction in employer, role/title, employment date/state, scope or result for the same evidence ID;
+- a Selection Criteria response that reuses Resume evidence allocated for criterion_depth but adds no material grounded context, task, action, result or criterion-specific explanation;
+- conflicting treatment of a structured confirmed/possible/adjacent gap;
+- allocation-signalled reuse that materially violates the accepted document purpose.
+
+False-positive rules:
+- Evidence reuse is not itself an issue. A uniquely strongest item may legitimately appear in all three documents.
+- Different wording is not contradiction. Style differences are never pack-consistency failures.
+- Resume compression versus Selection Criteria expansion is expected. Cover Letter summarisation is expected.
+- More detail is allowed when every added detail is grounded. Harmless omission of detail is not contradiction.
+- Necessary repetition of employer, role or task identity is allowed. Different document purposes justify different depth.
+- Similar capabilities attached to different evidence IDs must not be compared as duplication.
+- Adjacent evidence consistently described as transferable is valid.
+- Resume and Cover Letter have document-level evidence declarations only. Do not invent sentence-to-evidence attribution. If multiple candidate records could support wording, return no finding rather than guessing.
+- Gap omission is valid when disclosure_strategy is none. Do not invent a disclosure requirement.
+
+Claim authority is generated wording ↔ declared evidence ID ↔ exact CKB source_text ↔ plan/allocation framing. Material escalation includes supported/assisted/contributed becoming managed/led/owned, partial becoming end-to-end, support becoming decision authority, occasional becoming routine, one project becoming organisation-wide, adjacent becoming direct, activity becoming an achievement, or qualitative evidence becoming an invented result/metric. Judge meaning against exact source text; do not use a strong-verb blacklist.
+
+Every material finding must contain an allowed type, exact generated wording in location, exact CKB source support or structured gap guidance in evidence, evidence_id (or criteria_id for a gap-only finding), affected document_type, material reason in description, and the existing correction owner in recommended_action. Use only these types: unsupported_inference, evidence_mismatch, contradiction, requirement_omission, unsupported_claim.
+
+BOUNDED PACKAGE (contains no unused CKB):
+{json.dumps(package, ensure_ascii=False)}
+
+Return JSON only:
+{{"results":[{{"document_type":"tailored_resume|cover_letter|selection_criteria","criteria_id":null,"status":"pass|fail","issues":[{{"type":"unsupported_inference","evidence_id":"E17","description":"material reason","evidence":"E17 exact source wording","location":"exact generated wording","recommended_action":"Resume|Cover Letter|criterion-specific SC regeneration/repair"}}]}}]}}
+
+Return an empty results list when there is no material inconsistency."""
+    candidate_ids = {str(item.get("evidence_id")) for item in package.get("evidence_groups") or []}
+    candidate_sources = {
+        str(item.get("evidence_id")): str((item.get("source") or {}).get("source_text") or "")
+        for item in package.get("evidence_groups") or []
+    }
+    candidate_routes = {
+        str(item.get("evidence_id")): {str(use.get("document_type")) for use in item.get("uses") or []}
+        for item in package.get("evidence_groups") or []
+    }
+    candidate_criteria = {
+        str(item.get("evidence_id")): {
+            str(criterion.get("criteria_id"))
+            for use in item.get("uses") or [] if use.get("document_type") == "selection_criteria"
+            for criterion in use.get("criteria") or []
+        }
+        for item in package.get("evidence_groups") or []
+    }
+    gap_ids = {str(item.get("criteria_id")) for item in package.get("gap_candidates") or []}
+    gap_routes = {
+        str(item.get("criteria_id")): set(map(str, item.get("comparison_document_types") or []))
+        for item in package.get("gap_candidates") or []
+    }
+    last_error = ""
+    for attempt in range(2):
+        try:
+            raw = _json_object(_selection_provider_response(
+                prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")
+            ))
+            if not isinstance(raw.get("results"), list):
+                raise ValueError("Pack Reviewer must return a results array.")
+            results = []
+            for item in raw["results"]:
+                if not isinstance(item, dict) or item.get("document_type") not in {
+                    "tailored_resume", "cover_letter", "selection_criteria",
+                }:
+                    continue
+                criteria_id = str(item.get("criteria_id") or "") or None
+                findings = []
+                for issue in item.get("issues") or []:
+                    if not isinstance(issue, dict):
+                        continue
+                    issue_type = str(issue.get("type") or "")
+                    evidence_id = str(issue.get("evidence_id") or "")
+                    evidence_text = str(issue.get("evidence") or "").lower()
+                    source_words = candidate_sources.get(evidence_id, "").lower().split()
+                    source_is_quoted = any(
+                        " ".join(source_words[index:index + min(4, len(source_words))]) in evidence_text
+                        for index in range(max(1, len(source_words) - 2))
+                    ) if source_words else False
+                    grounded = all(str(issue.get(field) or "").strip() for field in (
+                        "location", "evidence", "description", "recommended_action",
+                    ))
+                    routed = item["document_type"] in candidate_routes.get(evidence_id, set())
+                    if item["document_type"] == "selection_criteria":
+                        routed = routed and criteria_id in candidate_criteria.get(evidence_id, set())
+                    evidence_scope = evidence_id in candidate_ids and routed and source_is_quoted
+                    gap_scope = (
+                        criteria_id is not None and criteria_id in gap_ids
+                        and item["document_type"] in gap_routes.get(criteria_id, set())
+                    )
+                    in_scope = evidence_scope or gap_scope
+                    finding = normalise_finding(issue)
+                    if not finding or not grounded or not in_scope:
+                        continue
+                    finding["evidence_id"] = evidence_id or None
+                    if issue_type not in PACK_REVIEW_ISSUE_TYPES:
+                        finding.update(severity="advisory", blocks_release=False)
+                    findings.append(finding)
+                status = "fail" if any(value["blocks_release"] for value in findings) else "pass"
+                results.append({
+                    "document_type": item["document_type"], "criteria_id": criteria_id,
+                    "status": status, "issues": findings, "blocks_release": status == "fail",
+                })
+            blocks = any(issue["blocks_release"] for result in results for issue in result["issues"])
+            return {
+                "schema_version": "1.0", "status": "fail" if blocks else "pass",
+                "skipped": False, "skip_reason": "", "results": results, "blocks_release": blocks,
+                "telemetry": {"reviewer_retries": attempt},
+            }
+        except (OpenAIError, ValueError) as error:
+            last_error = str(error)
+    raise AIServiceError(f"Pack Reviewer failed validation: {last_error or 'unknown error'}")
 
 
 def _finalise_date(content: str) -> str:
@@ -775,13 +927,17 @@ def generate_draft(
     if provider not in {"openai", "deepseek"}:
         raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
     task = {
-        "tailored_resume": "Curate a clean ATS-friendly CV according to the deterministic RESUME CURATION PLAN, targeting about 550-750 words and no more than two pages when exported. Use these exact Markdown section headings in this order: '## Professional Summary', '## Key Skills', and '## Work Experience'. Finish with '## References' followed by 'Available upon request'. Treat the selected CKB evidence as the only source for employment bullets. Turn responsibility into concise action-led bullets and include context only where it clarifies scope. Use a supplied exact result or rough range when available; when result is blank or marked unavailable, write a restrained qualitative outcome and never invent a number. Use present tense only when CKB source_text explicitly identifies the role as current/present/ongoing or gives an open-ended date range; otherwise do not claim current employment. Keep original employers, titles and dates truthful. Do not use tables, columns, graphics, first-person pronouns, selection criteria, reviewer notes or match scores. CRITICAL CONSTRAINT: Every factual claim (dates, tenure, tools/software, skills, employer names, policies and frameworks) must be directly traceable to CKB source_text. Never infer duration without explicit dates; never name tools that do not literally appear; never infer policies, procedures, government requirements or recordkeeping requirements from a government employer; never upgrade vague terms into formal ones; never repeat JD wording as a proven skill unless source_text independently supports it; when uncertain, use source_text's own weaker wording. Personal declarations must not exceed the exact Applicant Profile specificity; if it says 'permanent resident' without a country, never add a country name. After the submission-ready CV, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->. Every evidence ID must exist in RESUME CURATION PLAN selected_evidence.",
+        "tailored_resume": "Curate a clean ATS-friendly CV according to the deterministic RESUME CURATION PLAN, targeting about 550-750 words and no more than two pages when exported. Use these exact Markdown section headings in this order: '## Professional Summary', '## Key Skills', and '## Work Experience'. Finish with '## References' followed by 'Available upon request'. The plan's role order, display_period, curation actions, evidence framing, selected IDs and max_bullets ceilings are authoritative. Show each reliable display_period exactly and preserve role order; never reorder roles by relevance, promote a compressed role, fill unused bullet capacity, use omitted evidence, present adjacent evidence as direct experience, or manufacture JD alignment for continuity_only evidence. A role may have zero bullets. Treat the selected CKB evidence as the only source for employment bullets. Turn responsibility into concise action-led bullets and include context only where it clarifies scope. Use a supplied exact result or rough range when available; when result is blank or marked unavailable, write a restrained qualitative outcome and never invent a number. Use present tense only when CKB source_text explicitly identifies the role as current/present/ongoing or gives an open-ended date range; otherwise do not claim current employment. Keep original employers, titles and dates truthful. Do not use tables, columns, graphics, first-person pronouns, selection criteria, reviewer notes or match scores. CRITICAL CONSTRAINT: Every factual claim (dates, tenure, tools/software, skills, employer names, policies and frameworks) must be directly traceable to CKB source_text. Never infer duration without explicit dates; never name tools that do not literally appear; never infer policies, procedures, government requirements or recordkeeping requirements from a government employer; never upgrade vague terms into formal ones; never repeat JD wording as a proven skill unless source_text independently supports it; when uncertain, use source_text's own weaker wording. Personal declarations must not exceed the exact Applicant Profile specificity; if it says 'permanent resident' without a country, never add a country name. After the submission-ready CV, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->. Every evidence ID must exist in RESUME CURATION PLAN selected_evidence.",
         "cover_letter": "Write a concise one-page cover letter of about 300-450 words. Never use 'RE:' or 'Subject:' as a heading; use a natural 'Application for [position]' heading if a heading is helpful. This letter must work as a standalone companion to the CV even when no selection criteria document exists. Select only one or two of the strongest items from MATCHED RESUME EVIDENCE and summarise them briefly instead of retelling the CV. When evidence IDs were detailed in selection criteria, those items may receive at most one brief sentence total; do not repeat their detail or the same skill claims. Follow only the COVER LETTER PLAN priorities; do not turn the letter into a response to every Selection Criteria item. Explain role and organisation alignment using neutral advertised facts. Discuss what the work means to the candidate or claim alignment with values only when the Applicant Profile contains an explicit motivation that supports those statements. If motivation is absent or 'Not provided', do not invent purpose, values, enthusiasm or desired contribution. Use the supplied organisation mission/values as advertised context only, not as the candidate's beliefs. If the JD mentions roster/shift work, medical checks, right to work, police clearance or a licence, add a brief factual confirmation paragraph at the end, confirming only facts present in the evidence. Begin with the supplied date. Use 'Yours sincerely' only for a named addressee; use 'Yours faithfully' after a generic salutation. After the submission-ready letter, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[]} -->.",
         "selection_criteria": "Respond separately to every supplied criterion. Every response must follow a natural Situation–Task–Action–Result flow without printing S/T/A/R labels. Use only MATCHED RESUME EVIDENCE. Never treat the JD as proof of applicant experience. Use only results supplied by the user; never invent a number. When no result metric was supplied, use a truthful, restrained qualitative outcome. If evidence is insufficient, state the transferable evidence conservatively instead of inventing a story. End each criterion with one of four approaches—A value alignment, B next action/willingness, C transferable capability, D personal work style—and never use the same approach more than once in this generation. After the submission-ready text, add exactly one machine-readable line: <!-- GENERATION_META {\"used_experiences\":[\"evidence-id\"],\"closing_styles\":[\"A\"]} -->. Every evidence ID must exist in MATCHED RESUME EVIDENCE.",
         "ats_analysis": "List key JD keywords as Covered, Missing, or Evidence needed, with a transparent qualitative match assessment.",
     }.get(document_type)
     if not task:
         raise ValueError("Unsupported document_type")
+    if document_type == "tailored_resume":
+        task += " Preserve every role whose include_role_header is true, including a visible role header when max_bullets is zero; an omit role with include_role_header false may be absent."
+    if document_type == "cover_letter":
+        task += " Evidence allocation is guidance, not evidence. Prefer a distinct comparable differentiator when available; reuse allowed_if_needed evidence when it is materially strongest, but summarize or reframe it for the letter rather than retelling Resume or Selection Criteria wording. Evidence with bridge purpose remains transferable, never direct."
     if document_type == "selection_criteria":
         mode = selection_input_mode(selection_criteria)
         task += (
@@ -789,10 +945,14 @@ def generate_draft(
         )
     today = date.today()
     written_date = f"{today.day} {today.strftime('%B %Y')}"
-    evidence_pack = resume_evidence_pack(user_experiences_json, resume_plan_json) if document_type == "tailored_resume" else []
-    evidence_pack = evidence_pack or matched_evidence_pack(user_experiences_json, evidence_matches_json) or build_evidence_pack(
-        master_resume, user_experiences_json, job_description, selection_criteria
-    )
+    if document_type == "tailored_resume":
+        evidence_pack = resume_evidence_pack(user_experiences_json, resume_plan_json)
+    elif document_type == "cover_letter":
+        evidence_pack = cover_letter_evidence_pack(user_experiences_json, cover_letter_plan_json)
+    else:
+        evidence_pack = matched_evidence_pack(user_experiences_json, evidence_matches_json) or build_evidence_pack(
+            master_resume, user_experiences_json, job_description, selection_criteria
+        )
     prompt = f"""CURRENT DATE: {written_date}\nTARGET POSITION: {position_title or 'Use the job description'}\nADVERTISED ORGANISATION: {company or 'Use the job description'}\n\nTask: {task}\n\nFor a cover letter, follow the COVER LETTER PLAN as authoritative for priorities, evidence selection and narrative balance. Begin with the written current date exactly as supplied above, never a placeholder. Use the target position and advertised organisation exactly. Do not infer a recruiter/client relationship from wording, industry or company type. Mention such a relationship only when the Job Description explicitly states it, and do not speculate beyond that statement. Never invent or import a named organisation, program, project, framework, policy, system or initiative. Applicant-experience entities must appear in MATCHED RESUME EVIDENCE; advertised-role or organisation entities must appear in the SHARED JOB MODEL or supplied Job Description, and must never be presented as applicant experience.\n\nUse the APPLICANT PROFILE contact details exactly when producing a resume or cover letter. They override any older contact details in the Master Resume.\n\nAPPLICANT PROFILE:\n{applicant_profile or 'Not provided'}\n\nRESUME CURATION PLAN (deterministic selection, order and compression):\n{resume_plan_json}\n\nCOVER LETTER PLAN (deterministic priorities, selected evidence and structure):\n{cover_letter_plan_json}\n\nDETERMINISTIC SELECTION PLAN (word budgets and evidence statuses are authoritative):\n{selection_plan_json}\n\nBATCH EVIDENCE MATCHES:\n{evidence_matches_json}\n\nMATCHED RESUME EVIDENCE (the only factual source for Cover Letter and Selection Criteria):\n{json.dumps(evidence_pack, ensure_ascii=False)}\n\nEVIDENCE IDS ALREADY DETAILED IN SELECTION CRITERIA:\n{used_experiences}\n\nCLOSING APPROACHES ALREADY USED:\n{used_closing_styles}\n\nMASTER RESUME (context only; do not introduce claims outside the matched evidence for Cover Letter or Selection Criteria):\n{master_resume}\n\nSHARED JOB MODEL (parsed employer requirements and limits; never applicant evidence):\n{structured_job_model}\n\nJOB DESCRIPTION AND ORGANISATION MISSION/VALUES (requirements only, never applicant evidence):\n{job_description}\n\nSELECTION CRITERIA:\n{selection_criteria or 'Not provided'}"""
 
     if provider == "deepseek":

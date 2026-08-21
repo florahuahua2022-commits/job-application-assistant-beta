@@ -49,12 +49,14 @@ def build_generation_trace(
     reviewer: dict[str, Any] | None = None,
     latency_ms: int = 0,
     retry_count: int = 0,
+    input_fingerprint: str = "",
 ) -> dict[str, Any]:
     return {
         "schema_version": GENERATION_TRACE_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "document_type": document_type,
+        "input_fingerprint": input_fingerprint,
         "input_refs": {"application_id": application_id, "resume_id": resume_id},
         "versions": {
             "prompt": DOCUMENT_PROMPT_VERSION,

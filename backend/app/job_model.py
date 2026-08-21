@@ -41,12 +41,22 @@ def _meaningful_lines(value: str) -> list[str]:
 
 
 def _infer_requirement_lines(job_description: str) -> list[str]:
-    candidates = _meaningful_lines(job_description)
+    candidate_text = re.split(
+        r"(?im)^\s*(?:we offer|what we offer|benefits|employee benefits|our benefits|perks|rewards and benefits|why join us|what(?:'|’)?s in it for you|what you(?:'|’)?ll get)\s*:?[ \t]*$",
+        job_description,
+        maxsplit=1,
+    )[0]
+    candidates = _meaningful_lines(candidate_text)
+    about = re.search(
+        r"(?ims)^\s*(?:about you|what you(?:'|’)?ll bring|what you will bring|what we(?:'|’)?re looking for|what we are looking for)\s*:?[ \t]*$\n(.+?)(?=^\s*(?:we offer|what we offer|benefits|employee benefits|our benefits|perks|rewards and benefits|why join us|what(?:'|’)?s in it for you|what you(?:'|’)?ll get|how to apply)\s*:?[ \t]*$|\Z)",
+        candidate_text,
+    )
+    candidate_requirements = _meaningful_lines(about.group(1)) if about else []
     signals = re.compile(
         r"(?i)\b(?:demonstrated|experience|ability|knowledge|qualification|capability|skills?|"
         r"manage|coordinate|prepare|develop|deliver|communicat|stakeholder|must|essential|required)\b"
     )
-    selected = [line for line in candidates if signals.search(line)]
+    selected = list(dict.fromkeys([*candidate_requirements, *[line for line in candidates if signals.search(line)]]))
     return (selected or candidates)[:12]
 
 

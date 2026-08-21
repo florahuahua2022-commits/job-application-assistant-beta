@@ -1,6 +1,7 @@
 export type RequirementsReviewStatus = "needs_confirmation" | "confirmed" | "user_overridden";
 export type RequirementValue = "required" | "optional" | "not_required" | "unknown";
 export type DocumentFormat = "standalone" | "embedded_in_cover_letter" | "embedded_in_resume" | "portal_fields" | "not_applicable" | "unknown";
+export type RequirementBasis = "employer_explicit" | "user_confirmed" | "product_default" | "unknown";
 export type LimitUnit = "words" | "characters" | "pages";
 export type LimitScope = "document" | "per_criterion" | "combined_documents";
 export type LimitConstraint = "maximum" | "minimum" | "exact" | "recommended";
@@ -16,6 +17,7 @@ export type SubmissionLimit = {
 export type DocumentRequirement = {
   requirement: RequirementValue;
   format: DocumentFormat;
+  basis: RequirementBasis;
   limit: SubmissionLimit | null;
   criteria_count?: number | null;
 };
@@ -32,6 +34,7 @@ export type ApplicationRequirements = {
   additional_documents: string[];
   source_text: string;
   source_excerpt: string;
+  completeness?: "complete" | "incomplete";
   warnings: string[];
 };
 
@@ -75,6 +78,14 @@ export function formatDocumentFormat(value: DocumentFormat): string {
   return formatLabels[value];
 }
 
+export function documentChoiceLabel(document: DocumentRequirement): string {
+  if (document.requirement === "unknown" || document.basis === "unknown") return "Not determined";
+  if (document.requirement === "not_required") return "Not requested";
+  if (document.basis === "employer_explicit") return document.requirement === "optional" ? "Optional from employer" : "Required by employer";
+  if (document.basis === "user_confirmed") return "Included by you";
+  return "Recommended";
+}
+
 export function getRequirementsStatusLabel(value: RequirementsReviewStatus): string {
   return statusLabels[value];
 }
@@ -88,7 +99,26 @@ export function formatSubmissionLimit(limit: SubmissionLimit | null): string {
 }
 
 export function requirementsHasUnknown(requirements: ApplicationRequirements): boolean {
-  return Object.values(requirements.documents).some((document) => document.requirement === "unknown" || document.format === "unknown");
+  return Object.values(requirements.documents).some((document) => document.requirement === "unknown" || (["required", "optional"].includes(document.requirement) && document.format === "unknown"));
+}
+
+export function unresolvedRequirementLabels(requirements: ApplicationRequirements): string[] {
+  const names = { resume: "Resume", cover_letter: "Cover Letter", selection_criteria: "Selection Criteria" };
+  return (Object.keys(names) as (keyof typeof names)[]).flatMap((name) => {
+    const document = requirements.documents[name];
+    if (document.requirement === "unknown") return [`${names[name]} requirement`];
+    if (["required", "optional"].includes(document.requirement) && document.format === "unknown") return [`${names[name]} format`];
+    return [];
+  });
+}
+
+export function requiredGeneratedDocumentTypes(requirements: ApplicationRequirements | null): ("tailored_resume" | "cover_letter" | "selection_criteria")[] {
+  if (!requirements) return [];
+  const mapping = { resume: "tailored_resume", cover_letter: "cover_letter", selection_criteria: "selection_criteria" } as const;
+  return (Object.keys(mapping) as (keyof typeof mapping)[]).filter((key) => {
+    const document = requirements.documents[key];
+    return document.requirement === "required" && document.format === "standalone";
+  }).map((key) => mapping[key]);
 }
 
 export function createCorrectionDraft(requirements: ApplicationRequirements): ApplicationRequirementsCorrectionDraft {
