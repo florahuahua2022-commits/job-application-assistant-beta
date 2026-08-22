@@ -13,7 +13,7 @@ from app.ai import AIServiceError
 from app.application_requirements import empty_application_requirements
 from app.ckb import build_career_knowledge_base
 from app.database import get_session
-from app.main import app, get_or_refresh_current_ckb
+from app.main import app, get_or_refresh_current_ckb, master_resume_integrity_issue
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, JobSource, Resume
 from app.outcome_learning import build_submission_snapshot
 from app.release_state import details_fingerprint, fingerprint, generation_inputs_fingerprint, pack_fingerprint
@@ -21,6 +21,96 @@ from app.resume_plan import build_resume_curation_plan, validate_resume_content
 
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_pasted_complete_resume_builds_canonical_employment_before_ckb(self):
+        source = """Work Experience
+Project Officer
+Example Agency
+Feb 2020 – Present
+Prepared reports, coordinated meetings and maintained accurate project records.
+"""
+        response = self.client.post("/resumes", json={"title": "Master Resume", "source_text": source, "experiences_json": "[]"})
+        self.assertEqual(response.status_code, 200, response.text)
+        with Session(self.engine) as session:
+            resume = session.exec(select(Resume)).first()
+        experience = json.loads(resume.experiences_json)[0]
+        evidence = json.loads(resume.ckb_json)[0]
+        self.assertEqual(experience["time_period_text"], "Feb 2020 – Present")
+        self.assertEqual(evidence["time_period"], {"start": "Feb 2020", "end": "Present"})
+
+    def test_production_shaped_historical_resume_requires_complete_reupload(self):
+        roles = [
+            ("Finance Administration Officer", "Department of Communities – Disability Services | WA State Government", "Feb 2026", "Present"),
+            ("Executive Assistant to Board Member", "Avaintec", "Nov 2017", "Jan 2019"),
+            ("Project Administration Officer", "China Communications Construction Company – Kenya Branch", "Jan 2016", "Aug 2017"),
+            ("Project Administration Officer", "Chevron CDB Project", "Aug 2012", "Dec 2015"),
+            ("Project Assistant", "Pratt & Whitney", "Oct 2007", "Aug 2012"),
+        ]
+        historical = [{
+            "role_title": role, "organization": employer,
+            "responsibility": f"Grounded responsibility for role {index} with sufficient detail.",
+            "source_section": f"Work Experience > {employer} > {role}",
+        } for index, (role, employer, _, _) in enumerate(roles)]
+        historical[1]["responsibility"] = "Nov 2017 – Jan 2019 Prepared agendas and coordinated executive meetings."
+        historical[2]["organization"] += " Jan 2016 – Aug 2017"
+        stale = build_career_knowledge_base("Professional Summary\nAdministration\nCore Capabilities\nMicrosoft Office Suite", json.dumps(historical))
+
+        with Session(self.engine) as session:
+            resume = Resume(
+                source_text="Professional Summary\nAdministration\nCore Capabilities\nMicrosoft Office Suite (Advanced Excel, Word, Outlook, Teams)",
+                experiences_json=json.dumps(historical), ckb_json=json.dumps(stale),
+            )
+            application = JobApplication(
+                company="Bennco", position_title="Project Administrator", job_description="Project administration",
+                application_decision_json='{"status":"sentinel"}',
+            )
+            session.add_all([resume, application]); session.commit(); session.refresh(resume); session.refresh(application)
+            application_id = application.id
+            refreshed, status = get_or_refresh_current_ckb(session, resume, None)
+            session.refresh(resume)
+
+        self.assertEqual(status, "refreshed_stale")
+        self.assertEqual(
+            [item["time_period_status"] for item in refreshed],
+            ["not_provided", "verified", "verified", "not_provided", "not_provided"],
+        )
+        self.assertIsNotNone(master_resume_integrity_issue(resume))
+        self.assertNotIn("Nov 2017", json.loads(resume.experiences_json)[1]["responsibility"])
+        self.assertNotIn("Jan 2016", json.loads(resume.experiences_json)[2]["organization"])
+        for response in (
+            self.client.post(f"/applications/{application_id}/decision"),
+            self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"}),
+        ):
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("Re-upload the complete Resume", response.json()["detail"])
+
+        complete_source = "Work Experience\n" + "\n".join(
+            f"{role}\n{employer}\n{start} – {end}\nGrounded responsibility for {role} with enough detail."
+            for role, employer, start, end in roles
+        )
+        uploaded = self.client.post(
+            "/resumes/upload", files={"file": ("resume.txt", complete_source.encode(), "text/plain")},
+            data={"title": "Master Resume"},
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        with Session(self.engine) as session:
+            reuploaded = session.exec(select(Resume).order_by(Resume.updated_at.desc())).first()
+            canonical = json.loads(reuploaded.experiences_json)
+            ckb = json.loads(reuploaded.ckb_json)
+            session.refresh(session.get(JobApplication, application_id))
+            self.assertEqual(session.get(JobApplication, application_id).application_decision_json, "{}")
+        self.assertEqual(
+            [item["time_period_text"] for item in canonical],
+            [f"{start} – {end}" for _, _, start, end in roles],
+        )
+        self.assertEqual(
+            [(item["time_period"]["start"], item["time_period"]["end"]) for item in ckb],
+            [(start, end) for _, _, start, end in roles],
+        )
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [item["evidence_id"] for item in ckb], "match_type": "direct", "coverage": "strong"}]}
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb)
+        self.assertEqual([item["display_period"] for item in plan["roles"]], [f"{start} - {end}" for _, _, start, end in roles])
+        self.assertIsNone(master_resume_integrity_issue(reuploaded))
+
     def test_bennco_stale_ckb_refreshes_once_and_enforces_all_five_periods(self):
         roles = [
             ("Finance Administration Officer", "Department of Communities – Disability Services", "Feb 2026", "Present"),

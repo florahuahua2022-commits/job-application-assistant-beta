@@ -1,9 +1,10 @@
+import json
 import unittest
 from io import BytesIO
 
 from docx import Document
 
-from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, parse_job_ad_text, parse_job_page
+from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, normalise_resume_experiences, parse_job_ad_text, parse_job_page
 from app.job_model import build_job_model
 
 
@@ -106,6 +107,61 @@ class IngestTests(unittest.TestCase):
             extract_resume_experiences("Alex Morgan\nProfessional Summary\nExperienced administrator and coordinator."),
             [],
         )
+
+    def test_employment_header_layout_matrix_preserves_identity_and_explicit_period(self):
+        cases = {
+            "role_employer_date": "Project Officer\nExample Agency\nFeb 2020 – Present",
+            "employer_role_date": "Example Agency\nProject Officer\nFeb 2020 - Current",
+            "role_employer_inline_date": "Project Officer\nExample Agency | Feb 2020 – Present",
+            "employer_inline_date_role": "Example Agency | Feb 2020 – Present\nProject Officer",
+            "all_inline": "Project Officer | Example Agency | Feb 2020 – Present",
+            "role_inline_date": "Example Agency\nProject Officer | Feb 2020 – Present",
+        }
+        for name, header in cases.items():
+            with self.subTest(name=name):
+                result = extract_resume_experiences(
+                    f"Work Experience\n{header}\nPrepared reports, coordinated meetings and maintained accurate project records."
+                )
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["role_title"], "Project Officer")
+                self.assertEqual(result[0]["organization"], "Example Agency")
+                self.assertEqual(result[0]["time_period_text"], "Feb 2020 – Present" if "Present" in header else "Feb 2020 - Current")
+                self.assertNotRegex(result[0]["organization"], r"20\d{2}")
+                self.assertNotRegex(result[0]["responsibility"], r"20\d{2}")
+
+    def test_employer_dashes_are_not_treated_as_header_separators(self):
+        for employer in ("Department of Communities – Disability Services", "Department of Communities — Disability Services"):
+            with self.subTest(employer=employer):
+                result = extract_resume_experiences(
+                    f"Work Experience\nFinance Administration Officer\n{employer}\nFeb 2026 – Present\nProvided grounded financial administration and reporting support."
+                )
+                self.assertEqual(result[0]["organization"], employer)
+                self.assertEqual(result[0]["time_period_text"], "Feb 2026 – Present")
+        result = extract_resume_experiences(
+            "Work Experience\nFinance Administration Officer\nDepartment of Communities – Disability Services | WA State Government\nFeb 2026 – Present\nProvided grounded financial administration and reporting support."
+        )
+        self.assertEqual(result[0]["organization"], "Department of Communities – Disability Services | WA State Government")
+
+    def test_historical_embedded_periods_are_normalised_without_inference(self):
+        historical = [{
+            "role_title": "Executive Assistant", "organization": "Avaintec",
+            "responsibility": "Nov 2017 – Jan 2019 Prepared agendas and coordinated executive meetings.",
+        }, {
+            "role_title": "Project Administration Officer",
+            "organization": "CCCC Kenya Branch Jan 2016 – Aug 2017",
+            "responsibility": "Maintained project records and reporting.",
+        }, {
+            "role_title": "Project Assistant", "organization": "Pratt & Whitney",
+            "responsibility": "Maintained project documentation without a supplied employment date.",
+        }]
+        result, changed = normalise_resume_experiences(json.dumps(historical))
+        experiences = json.loads(result)
+        self.assertTrue(changed)
+        self.assertEqual(experiences[0]["time_period_text"], "Nov 2017 – Jan 2019")
+        self.assertFalse(experiences[0]["responsibility"].startswith("Nov 2017"))
+        self.assertEqual(experiences[1]["organization"], "CCCC Kenya Branch")
+        self.assertEqual(experiences[1]["time_period_text"], "Jan 2016 – Aug 2017")
+        self.assertNotIn("time_period_text", experiences[2])
 
     def test_reads_structured_job_posting(self):
         html = """

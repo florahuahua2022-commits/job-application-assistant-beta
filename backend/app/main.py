@@ -29,7 +29,7 @@ from .evidence_allocation import apply_selection_allocation, build_evidence_allo
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, parse_job_ad_text
+from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, normalise_resume_experiences, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
@@ -195,9 +195,11 @@ def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id:
         persisted = json.loads(master_resume.ckb_json or "[]")
     except (TypeError, json.JSONDecodeError):
         persisted = None
+    canonical_experiences, _ = normalise_resume_experiences(master_resume.experiences_json or "[]")
     recovered_experiences, recoveries = _recover_explicit_experience_periods(
-        master_resume.source_text, master_resume.experiences_json or "[]"
+        master_resume.source_text, canonical_experiences
     )
+    experiences_changed = json.loads(recovered_experiences) != json.loads(master_resume.experiences_json or "[]")
     persisted_periods = {
         _normalise_experience_identity(item.get("source_section")): item.get("time_period") or {}
         for item in persisted or [] if isinstance(item, dict) and item.get("evidence_type") == "experience"
@@ -207,10 +209,12 @@ def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id:
         and persisted_periods.get(section, {}).get("end") == end
         for section, start, end in recoveries
     )
-    if career_knowledge_base_is_current(persisted) and source_periods_current:
+    if career_knowledge_base_is_current(persisted) and source_periods_current and not experiences_changed:
         return persisted, "reused_current"
     refreshed = json.loads(serialise_ckb(master_resume.source_text, recovered_experiences))
-    if refreshed != persisted:
+    if experiences_changed:
+        master_resume.experiences_json = recovered_experiences
+    if refreshed != persisted or experiences_changed:
         master_resume.ckb_json = json.dumps(refreshed, ensure_ascii=False)
         session.add(master_resume)
         session.commit()
@@ -274,6 +278,9 @@ def prepare_application_decision(
     session: Session, application: JobApplication, master_resume: Resume,
     profile: ApplicantProfile | None, user_id: UUID | None,
 ) -> dict:
+    integrity_issue = master_resume_integrity_issue(master_resume)
+    if integrity_issue:
+        raise HTTPException(409, integrity_issue)
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     job_model = json.loads(application.job_model_json or "{}")
     ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
@@ -332,6 +339,22 @@ def _resume_value_is_supported(value: str, source_text: str) -> bool:
     return bool(meaningful) and sum(word in source_set for word in meaningful) / len(meaningful) >= 0.8
 
 
+def master_resume_integrity_issue(resume: Resume) -> str | None:
+    try:
+        experiences = json.loads(resume.experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return "The Master Resume employment information is invalid. Re-upload the complete Resume before continuing."
+    unsupported = [
+        item for item in experiences if isinstance(item, dict) and (
+            not _resume_value_is_supported(str(item.get("role_title") or ""), resume.source_text)
+            or not _resume_value_is_supported(str(item.get("organization") or ""), resume.source_text)
+        )
+    ]
+    if experiences and unsupported:
+        return "The saved Master Resume text does not contain all structured employment records. Re-upload the complete Resume before diagnosing or generating documents."
+    return None
+
+
 def build_resume_content_check(
     resume: Resume,
     profile: ApplicantProfile | None,
@@ -364,6 +387,9 @@ def build_resume_content_check(
         prefix = f"experiences.{index}"
         add(f"{prefix}.role_title", f"Experience {index} — role title", str(experience.get("role_title") or ""))
         add(f"{prefix}.organization", f"Experience {index} — organisation", str(experience.get("organization") or ""))
+        period = str(experience.get("time_period_text") or "")
+        if period:
+            add(f"{prefix}.time_period_text", f"Experience {index} — employment period", period)
         add(f"{prefix}.responsibility", f"Experience {index} — responsibilities", str(experience.get("responsibility") or ""))
         result = str(experience.get("result") or "")
         if result:
@@ -901,6 +927,10 @@ def create_resume(
     user_id: UUID | None = Depends(get_current_user),
 ):
     values = payload.model_dump()
+    canonical, _ = normalise_resume_experiences(values.get("experiences_json") or "[]")
+    if not json.loads(canonical):
+        canonical = json.dumps(extract_resume_experiences(values["source_text"]), ensure_ascii=False)
+    values["experiences_json"], _ = _recover_explicit_experience_periods(values["source_text"], canonical)
     values["ckb_json"] = serialise_ckb(values["source_text"], values.get("experiences_json") or "[]")
     resume = Resume.model_validate(values)
     resume.user_id = user_id
@@ -978,6 +1008,11 @@ def update_resume(
     next_source_text = values.get("source_text", resume.source_text)
     next_experiences_json = values.get("experiences_json", resume.experiences_json)
     if "source_text" in values or "experiences_json" in values:
+        canonical, _ = normalise_resume_experiences(next_experiences_json)
+        if not json.loads(canonical):
+            canonical = json.dumps(extract_resume_experiences(next_source_text), ensure_ascii=False)
+        next_experiences_json, _ = _recover_explicit_experience_periods(next_source_text, canonical)
+        values["experiences_json"] = next_experiences_json
         values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
     for key, value in values.items():
         setattr(resume, key, value)
@@ -1225,6 +1260,9 @@ def get_application_decision(
         raise HTTPException(404, "Application not found.")
     if not master_resume:
         raise HTTPException(400, "Create a Master Resume first.")
+    integrity_issue = master_resume_integrity_issue(master_resume)
+    if integrity_issue:
+        raise HTTPException(409, integrity_issue)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
     decision = json.loads(application.application_decision_json or "{}")
@@ -1577,6 +1615,13 @@ def quality_check(
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    if master_resume:
+        integrity_issue = master_resume_integrity_issue(master_resume)
+        if integrity_issue:
+            issues.append(QualityCheckIssue(
+                severity="error", code="master_resume_incomplete", message=integrity_issue,
+                document_type="tailored_resume",
+            ))
     current_ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id) if master_resume else ([], "reused_current")
     current_documents = current_required_documents(session, application, user_id, master_resume, profile)
     decision = json.loads(application.application_decision_json or "{}")
@@ -2405,6 +2450,9 @@ def generate(
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
+    integrity_issue = master_resume_integrity_issue(master_resume)
+    if integrity_issue:
+        raise HTTPException(409, integrity_issue)
     application.company = expand_abbreviated_company(application.company, application.job_description)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     used_experiences = "[]"

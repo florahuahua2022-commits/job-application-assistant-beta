@@ -18,7 +18,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
-type Experience = { id: string; role_title: string; organization: string; responsibility: string; context: string; result: string; no_result_data: boolean };
+type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean };
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
@@ -373,7 +373,7 @@ export default function Home() {
   }
 
   function addExperience() {
-    setExperiences((current) => [...current, { id: crypto.randomUUID(), role_title: "", organization: "", responsibility: "", context: "", result: "", no_result_data: false }]);
+    setExperiences((current) => [...current, { id: crypto.randomUUID(), role_title: "", organization: "", time_period_text: "", responsibility: "", context: "", result: "", no_result_data: false }]);
   }
 
   function updateExperience(id: string, field: keyof Experience, value: string | boolean) {
@@ -1340,6 +1340,7 @@ export default function Home() {
               <div className="compactForm">
                 <label>Role title<input value={experience.role_title} onChange={(event) => updateExperience(experience.id, "role_title", event.target.value)} required /></label>
                 <label>Organisation<input value={experience.organization} onChange={(event) => updateExperience(experience.id, "organization", event.target.value)} required /></label>
+                <label>Employment period <em>optional</em><input value={experience.time_period_text || ""} onChange={(event) => updateExperience(experience.id, "time_period_text", event.target.value)} placeholder="e.g. Feb 2026 – Present" /></label>
                 <label className="full">What did you do? <em>Action</em><textarea rows={3} value={experience.responsibility} onChange={(event) => updateExperience(experience.id, "responsibility", event.target.value)} required /></label>
                 <label className="full">Background or problem <em>Situation · optional</em><textarea rows={2} value={experience.context} onChange={(event) => updateExperience(experience.id, "context", event.target.value)} /></label>
                 <label className="full">Result or outcome <em>exact figure or rough range</em><textarea rows={2} value={experience.result} disabled={experience.no_result_data} onBlur={() => promptForResult(experience)} onChange={(event) => updateExperience(experience.id, "result", event.target.value)} placeholder="e.g. processed about 20–30 cases per week, shortened turnaround time, or improved accuracy" /></label>

@@ -11,7 +11,7 @@ from zipfile import BadZipFile, ZipFile
 
 from docx import Document
 from pypdf import PdfReader
-from .ckb import stable_evidence_id
+from .ckb import EMPLOYMENT_PERIOD_PATTERN, stable_evidence_id
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -78,6 +78,46 @@ def _resume_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+_ROLE_HINT = re.compile(r"(?i)\b(?:officer|assistant|administrator|coordinator|manager|director|advisor|adviser|consultant|analyst|specialist|lead|engineer|accountant|clerk|secretary|executive)\b")
+_COMPANY_HINT = re.compile(r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|council|department|university|college|government|authority|agency|company|corporation|corp|project|branch)\b")
+
+
+def _employment_identity(first: str, second: str) -> tuple[str, str]:
+    first_role, second_role = bool(_ROLE_HINT.search(first)), bool(_ROLE_HINT.search(second))
+    if first_role != second_role:
+        return (first, second) if first_role else (second, first)
+    first_company, second_company = bool(_COMPANY_HINT.search(first)), bool(_COMPANY_HINT.search(second))
+    if first_company != second_company:
+        return (second, first) if first_company else (first, second)
+    return first, second
+
+
+def normalise_resume_experiences(experiences_json: str) -> tuple[str, bool]:
+    try:
+        experiences = json.loads(experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return "[]", False
+    if not isinstance(experiences, list):
+        return "[]", False
+    changed = False
+    for item in experiences:
+        if not isinstance(item, dict) or item.get("time_period_text"):
+            continue
+        period = item.get("time_period") or {}
+        if period.get("start") or period.get("end"):
+            continue
+        for field, beginning_only in (("organization", False), ("responsibility", True)):
+            value = str(item.get(field) or "")
+            match = EMPLOYMENT_PERIOD_PATTERN.search(value)
+            if not match or (beginning_only and value[:match.start()].strip(" |–—-")):
+                continue
+            item["time_period_text"] = match.group(0).strip()
+            item[field] = _resume_line(f"{value[:match.start()]} {value[match.end():]}").strip(" |–—-")
+            changed = True
+            break
+    return json.dumps(experiences, ensure_ascii=False), changed
+
+
 def extract_resume_experiences(source_text: str) -> list[dict]:
     """Extract conservative, user-reviewable work-history records from resume text."""
     lines = [_resume_line(line) for line in source_text.splitlines()]
@@ -97,49 +137,55 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
         len(lines),
     )
     work_lines = lines[section_start:section_end]
-    date_pattern = re.compile(
-        r"(?i)(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}"
-        r"\s*(?:-|–|—|to)\s*(?:(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}|present|current|now)"
-    )
-    date_indexes = [index for index, line in enumerate(work_lines) if date_pattern.search(line)]
+    date_indexes = [index for index, line in enumerate(work_lines) if EMPLOYMENT_PERIOD_PATTERN.search(line)]
     if not date_indexes:
         return []
 
-    company_hint = re.compile(
-        r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|council|department|university|college|"
-        r"government|authority|agency|company|corporation|corp)\b"
-    )
-    headers: list[tuple[int, str, str]] = []
+    headers: list[tuple[int, int, str, str, str]] = []
     for date_index in date_indexes:
+        line = work_lines[date_index]
+        match = EMPLOYMENT_PERIOD_PATTERN.search(line)
+        period = match.group(0).strip()
+        inline = _resume_line(f"{line[:match.start()]} {line[match.end():]}").strip(" |–—-")
         previous = work_lines[max(0, date_index - 2):date_index]
-        if not previous:
-            headers.append((date_index, "", ""))
-            continue
-        combined = previous[-1]
-        parts = [part.strip() for part in re.split(r"\s+(?:\||–|—)\s+", combined, maxsplit=1)]
-        if len(parts) == 2 and ("|" in combined or not (
-            len(previous) >= 2 and company_hint.search(combined) and not company_hint.search(previous[-2])
-        )):
-            role_title, organization = parts
-            header_start = date_index - 1
+        responsibility_start = date_index + 1
+        if "|" in inline:
+            parts = [_resume_line(part) for part in inline.split("|") if _resume_line(part)]
+            role_title, organization = _employment_identity(parts[0], parts[1]) if len(parts) >= 2 else ("", "")
+            header_start = date_index
+        elif inline and _ROLE_HINT.search(inline):
+            role_title, organization = inline, previous[-1] if previous else ""
+            header_start = date_index - 1 if previous else date_index
+        elif inline:
+            next_line = work_lines[date_index + 1] if date_index + 1 < len(work_lines) else ""
+            if _ROLE_HINT.search(next_line):
+                role_title, organization = next_line, inline
+                header_start, responsibility_start = date_index, date_index + 2
+            else:
+                role_title, organization = (previous[-1], inline) if previous else ("", inline)
+                header_start = date_index - 1 if previous else date_index
+        elif previous and "|" in previous[-1]:
+            parts = [_resume_line(part) for part in previous[-1].split("|") if _resume_line(part)]
+            if len(previous) >= 2 and _ROLE_HINT.search(previous[-2]) and not any(_ROLE_HINT.search(part) for part in parts):
+                role_title, organization, header_start = previous[-2], previous[-1], date_index - 2
+            else:
+                role_title, organization = _employment_identity(parts[0], parts[1]) if len(parts) >= 2 else ("", "")
+                header_start = date_index - 1
         elif len(previous) >= 2:
-            role_title, organization = previous[-2], previous[-1]
+            role_title, organization = _employment_identity(previous[-2], previous[-1])
             header_start = date_index - 2
-            if company_hint.search(role_title) and not company_hint.search(organization):
-                role_title, organization = organization, role_title
-        else:
-            role_title, organization = combined, ""
+        elif previous:
+            role_title, organization = previous[-1], ""
             header_start = date_index - 1
-        headers.append((header_start, role_title[:160], organization[:160]))
+        else:
+            role_title, organization, header_start = "", "", date_index
+        headers.append((header_start, responsibility_start, role_title[:160], organization[:160], period))
 
     experiences: list[dict] = []
-    for position, date_index in enumerate(date_indexes):
-        header_start, role_title, organization = headers[position]
+    for position, (header_start, responsibility_start, role_title, organization, period) in enumerate(headers):
         next_header_start = headers[position + 1][0] if position + 1 < len(headers) else len(work_lines)
         responsibility_lines = [
-            line for line in work_lines[date_index + 1:next_header_start]
+            line for line in work_lines[responsibility_start:next_header_start]
             if len(line) > 2 and not re.fullmatch(r"(?i)(?:responsibilities|key achievements|achievements|duties):?", line)
         ]
         responsibility = " ".join(responsibility_lines).strip()
@@ -154,12 +200,12 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
             "role_title": role_title,
             "organization": organization,
             "responsibility": responsibility,
-            "context": f"Employment dates: {work_lines[date_index]}",
+            "context": f"Employment dates: {period}",
             "result": "",
             "no_result_data": False,
             "source_section": f"Work Experience > {organization or 'Unknown organisation'} > {role_title}",
             "source_text": source_block,
-            "time_period_text": work_lines[date_index],
+            "time_period_text": period,
             "competency_tags": [],
             "fact_verification": "explicit",
         })
