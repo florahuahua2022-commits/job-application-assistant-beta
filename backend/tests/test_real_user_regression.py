@@ -4,6 +4,7 @@ from io import BytesIO
 from unittest.mock import patch
 from zipfile import ZipFile
 
+from docx import Document
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -39,11 +40,11 @@ Prepared reports, coordinated meetings and maintained accurate project records.
 
     def test_production_shaped_historical_resume_requires_complete_reupload(self):
         roles = [
-            ("Finance Administration Officer", "Department of Communities – Disability Services | WA State Government", "Feb 2026", "Present"),
+            ("Finance Administration Officer", "Department of Communities – Disability Services | WA State Government", "Feb 2026", "Aug 2026"),
             ("Executive Assistant to Board Member", "Avaintec", "Nov 2017", "Jan 2019"),
             ("Project Administration Officer", "China Communications Construction Company – Kenya Branch", "Jan 2016", "Aug 2017"),
             ("Project Administration Officer", "Chevron CDB Project", "Aug 2012", "Dec 2015"),
-            ("Project Assistant", "Pratt & Whitney", "Oct 2007", "Aug 2012"),
+            ("Project Assistant", "Pratt & Whitney", "July 2007", "June 2012"),
         ]
         historical = [{
             "role_title": role, "organization": employer,
@@ -83,12 +84,16 @@ Prepared reports, coordinated meetings and maintained accurate project records.
             self.assertEqual(response.status_code, 409)
             self.assertIn("Re-upload the complete Resume", response.json()["detail"])
 
-        complete_source = "Work Experience\n" + "\n".join(
+        complete_source = "Professional Summary\nGrounded administration experience.\nCore Capabilities\nMicrosoft Office Suite\nWork Experience\n" + "\n".join(
             f"{role}\n{employer}\n{start} – {end}\nGrounded responsibility for {role} with enough detail."
             for role, employer, start, end in roles
         )
+        document = Document()
+        for line in complete_source.splitlines():
+            document.add_paragraph(line)
+        stream = BytesIO(); document.save(stream)
         uploaded = self.client.post(
-            "/resumes/upload", files={"file": ("resume.txt", complete_source.encode(), "text/plain")},
+            "/resumes/upload", files={"file": ("resume.docx", stream.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
             data={"title": "Master Resume"},
         )
         self.assertEqual(uploaded.status_code, 200, uploaded.text)
@@ -96,8 +101,14 @@ Prepared reports, coordinated meetings and maintained accurate project records.
             reuploaded = session.exec(select(Resume).order_by(Resume.updated_at.desc())).first()
             canonical = json.loads(reuploaded.experiences_json)
             ckb = json.loads(reuploaded.ckb_json)
-            session.refresh(session.get(JobApplication, application_id))
-            self.assertEqual(session.get(JobApplication, application_id).application_decision_json, "{}")
+            application = session.get(JobApplication, application_id)
+            self.assertEqual(application.application_decision_json, "{}")
+            application.application_decision_json = '{"status":"sentinel"}'
+            session.add(application); session.commit()
+            resume_id = reuploaded.id
+            persisted_experiences_json = reuploaded.experiences_json
+            persisted_ckb_json = reuploaded.ckb_json
+            self.assertIsNone(master_resume_integrity_issue(reuploaded))
         self.assertEqual(
             [item["time_period_text"] for item in canonical],
             [f"{start} – {end}" for _, _, start, end in roles],
@@ -109,7 +120,37 @@ Prepared reports, coordinated meetings and maintained accurate project records.
         matches = {"matches": [{"criteria_id": "C1", "matched_evidence": [item["evidence_id"] for item in ckb], "match_type": "direct", "coverage": "strong"}]}
         plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb)
         self.assertEqual([item["display_period"] for item in plan["roles"]], [f"{start} - {end}" for _, _, start, end in roles])
-        self.assertIsNone(master_resume_integrity_issue(reuploaded))
+
+        stale_patch = self.client.patch(f"/resumes/{resume_id}", json={
+            "source_text": "Professional Summary\nAdministration\nCore Capabilities\nMicrosoft Office Suite",
+            "experiences_json": json.dumps(canonical),
+        })
+        self.assertEqual(stale_patch.status_code, 409)
+        self.assertIn("changed after this editor loaded", stale_patch.json()["detail"])
+        with Session(self.engine) as session:
+            unchanged = session.get(Resume, resume_id)
+            self.assertEqual((unchanged.source_text, unchanged.experiences_json, unchanged.ckb_json), (complete_source, persisted_experiences_json, persisted_ckb_json))
+            self.assertEqual(session.get(JobApplication, application_id).application_decision_json, '{"status":"sentinel"}')
+
+        edited_source = complete_source.replace("Grounded administration experience.", "Grounded administration and project experience.")
+        valid_patch = self.client.patch(f"/resumes/{resume_id}", json={
+            "source_text": edited_source, "experiences_json": json.dumps(canonical),
+        })
+        self.assertEqual(valid_patch.status_code, 200, valid_patch.text)
+        reloaded = self.client.get("/resumes").json()[0]
+        unchanged_save = self.client.patch(f"/resumes/{resume_id}", json={
+            "source_text": reloaded["source_text"], "experiences_json": reloaded["experiences_json"],
+        })
+        self.assertEqual(unchanged_save.status_code, 200, unchanged_save.text)
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, application_id)
+            requirements = self.requirements("resume")
+            application.application_requirements_json = json.dumps(requirements)
+            application.job_model_json = '{"schema_version":"1.0","criteria":[],"limit_scope":"unspecified"}'
+            session.add(application); session.commit()
+        with patch("app.main.match_evidence_batch", return_value={"schema_version": "1.0", "matches": [], "unused_evidence": []}):
+            diagnosed = self.client.post(f"/applications/{application_id}/decision")
+        self.assertEqual(diagnosed.status_code, 200, diagnosed.text)
 
     def test_bennco_stale_ckb_refreshes_once_and_enforces_all_five_periods(self):
         roles = [

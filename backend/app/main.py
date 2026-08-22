@@ -1012,6 +1012,15 @@ def update_resume(
         if not json.loads(canonical):
             canonical = json.dumps(extract_resume_experiences(next_source_text), ensure_ascii=False)
         next_experiences_json, _ = _recover_explicit_experience_periods(next_source_text, canonical)
+        proposed = resume.model_copy(update={
+            "source_text": next_source_text,
+            "experiences_json": next_experiences_json,
+        })
+        if master_resume_integrity_issue(proposed):
+            raise HTTPException(
+                409,
+                "The Master Resume changed after this editor loaded. Refresh the page and review the latest complete Resume before saving again.",
+            )
         values["experiences_json"] = next_experiences_json
         values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
     for key, value in values.items():

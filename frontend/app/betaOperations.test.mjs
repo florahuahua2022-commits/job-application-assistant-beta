@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { releaseFailureState, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
+import { releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
 
 test("Pack Review and ATS network failures clear busy state", async () => {
   for (const operation of ["pack", "ats"]) {
@@ -21,4 +21,12 @@ test("failed checklist reload fails closed", () => {
 
 test("only 401 invokes centralized session expiry", () => {
   assert.equal(shouldExpireSession(401), true); assert.equal(shouldExpireSession(429), false); assert.equal(shouldExpireSession(502), false);
+});
+
+test("an in-place Resume upload changes the editor version", () => {
+  assert.notEqual(
+    resumeEditorVersion({ id: 2, updated_at: "2026-08-22T12:00:00Z" }),
+    resumeEditorVersion({ id: 2, updated_at: "2026-08-22T13:05:35Z" }),
+  );
+  assert.equal(resumeEditorVersion(), "new");
 });

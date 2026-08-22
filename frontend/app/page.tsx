@@ -11,7 +11,7 @@ import {
 import { ApplicationDecision, decisionLabel } from "./applicationDecision";
 import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
-import { releaseFailureState, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
+import { releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -20,7 +20,7 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
 type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean };
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
-type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string };
+type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string; updated_at: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
 type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
@@ -1331,7 +1331,7 @@ export default function Home() {
           <button disabled={resumeUploadState === "uploading"}>{resumeUploadState === "uploading" ? "Reading file…" : resumeUploadState === "saved" ? "Uploaded ✓" : "Upload Resume"}</button>
         </form>}
         <div className="orDivider"><span>or paste and edit the text</span></div>
-        <form key={resumes[0]?.id || "new"} onSubmit={saveResume} className="formBody resumeTextForm">
+        <form key={resumeEditorVersion(resumes[0])} onSubmit={saveResume} className="formBody resumeTextForm">
           <label>Resume title<input name="title" defaultValue={resumes[0]?.title || "Master Resume"} required /></label>
           <label>Resume text<textarea name="source_text" defaultValue={resumes[0]?.source_text || ""} rows={14} required /></label>
           <div className="experienceBuilder">

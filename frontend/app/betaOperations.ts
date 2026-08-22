@@ -13,3 +13,7 @@ export function releaseFailureState() {
 export function uploadFailureState() {
   return "error" as const;
 }
+
+export function resumeEditorVersion(resume?: { id: number; updated_at: string }) {
+  return resume ? `${resume.id}:${resume.updated_at}` : "new";
+}
