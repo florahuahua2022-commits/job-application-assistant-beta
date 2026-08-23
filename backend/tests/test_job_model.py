@@ -76,6 +76,39 @@ These should be addressed in no more than two (2) pages in total.
         self.assertTrue(all("Applicants should address" not in item["criteria_text"] for item in model["criteria"]))
         self.assertTrue(all("pages in total" not in item["criteria_text"] for item in model["criteria"]))
 
+    def test_values_prose_and_arbitrary_words_do_not_become_competencies(self):
+        jd = """About You
+Strong planning and organisation skills.
+Previous administration experience within construction or mining is preferred.
+Our Values
+Pride & Commitment – We own our work and get the job done.
+Growth & Improvement – We push ourselves to evolve and excel.
+Family & Loyalty – We look after our people and create a welcoming team culture.
+Trust & Respect – We communicate openly and honour our commitments.
+"""
+
+        model = build_job_model(jd)
+        competencies = [value for item in model["criteria"] for value in item["key_competencies"]]
+        criteria = " ".join(item["criteria_text"] for item in model["criteria"]).lower()
+
+        self.assertEqual(competencies, ["planning and organisation", "construction or mining experience"])
+        self.assertNotIn("pride", criteria)
+        self.assertNotIn("preferred", competencies)
+
+    def test_unmapped_descriptive_sentence_has_no_fallback_competencies(self):
+        model = build_job_model("Applicants must bring curiosity, energy and enthusiasm every day.")
+
+        self.assertEqual(model["criteria"][0]["key_competencies"], [])
+
+    def test_legitimate_technical_and_governance_requirements_remain_mapped(self):
+        model = build_job_model("""Technical capability using relevant project systems is required.
+Demonstrated knowledge of policy and governance requirements.
+""")
+
+        competencies = [value for item in model["criteria"] for value in item["key_competencies"]]
+        self.assertIn("technical capability", competencies)
+        self.assertIn("policy and governance", competencies)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from app.application_requirements import empty_application_requirements
 from app.ats_verification import verify_resume_artifact
 from app.auth import get_current_user
 from app.database import get_session
+from app.job_model import build_job_model
 from app.main import app
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, QualityCheckResponse, Resume
 from app.release_state import pack_fingerprint
@@ -137,6 +138,27 @@ class AtsVerificationUnitTests(unittest.TestCase):
         repeated = self.check(content=CONTENT + " reporting" * 10)
         self.assertTrue(repeated["ready"])
         self.assertEqual(next(x for x in repeated["checks"] if x["code"] == "keyword_repetition")["state"], "warning")
+
+    def test_values_prose_does_not_create_ats_advisories(self):
+        job = build_job_model("""About You
+Strong planning and organisation skills.
+Previous administration experience within construction or mining is preferred.
+Our Values
+Pride & Commitment – We own our work and get the job done.
+Growth & Improvement – We push ourselves to evolve and excel.
+Family & Loyalty – We look after our people and create a welcoming team culture.
+Trust & Respect – We communicate openly and honour our commitments.
+""")
+        decision = {"requirements": [{
+            "criteria_id": item["criteria_id"], "evidence_classification": "verified_match", "matched_evidence": ["E1"],
+        } for item in job["criteria"]]}
+
+        result = self.check(job=job, decision=decision)
+        terms = [item["term"] for item in result["keywords"]]
+
+        self.assertEqual(terms, ["planning and organisation", "construction or mining experience"])
+        self.assertEqual(result["keywords"][0]["status"], "missing_but_supported")
+        self.assertTrue(result["ready"])
 
     def test_unicode_lost_in_pdf_blocks(self):
         profile = SimpleNamespace(first_name="李", last_name="雷", email="alex@example.com", phone="0400000000")
