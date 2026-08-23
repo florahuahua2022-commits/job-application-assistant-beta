@@ -296,6 +296,8 @@ def prepare_application_decision(
             application.selection_plan_json = "{}"
             application.selection_confirmations_json = "[]"
             require_current_generation_contract(application)
+            session.add(application)
+            session.commit()
     ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
     if not matches:

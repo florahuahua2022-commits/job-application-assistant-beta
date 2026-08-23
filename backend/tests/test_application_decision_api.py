@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from app.ai import AIServiceError
 from app.database import get_session
 from app.main import app
 from app.job_model import build_job_model
@@ -168,6 +169,36 @@ Trust & Respect – We communicate openly and honour our commitments.
             self.assertTrue(release["generation_contract_required"])
             self.assertNotIn("pack_review", release)
             self.assertNotIn("ats", release)
+
+            stored.job_model_json = json.dumps(stale, ensure_ascii=False)
+            stored.evidence_matches_json = '{"matches":[{"criteria_id":"NOISE0"}]}'
+            stored.application_decision_json = '{"status":"stale"}'
+            stored.selection_plan_json = '{"items":[{"criteria_id":"NOISE0"}]}'
+            stored.selection_confirmations_json = '["NOISE0"]'
+            stored.release_state_json = '{"pack_review":{"status":"pass"},"ats":{"ready":true}}'
+            session.add(stored); session.commit()
+
+        with patch("app.main.match_evidence_batch", side_effect=AIServiceError("Evidence matching failed. Please try again.")):
+            failed = self.client.post(f"/applications/{application['id']}/decision")
+        self.assertEqual(failed.status_code, 502)
+        self.assertEqual(failed.json(), {"detail": "Evidence matching failed. Please try again."})
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            self.assertEqual(json.loads(stored.job_model_json), legitimate)
+            self.assertEqual((stored.evidence_matches_json, stored.application_decision_json), ("{}", "{}"))
+            self.assertEqual((stored.selection_plan_json, stored.selection_confirmations_json), ("{}", "[]"))
+            release = json.loads(stored.release_state_json)
+            self.assertTrue(release["generation_contract_required"])
+            self.assertNotIn("pack_review", release)
+            self.assertNotIn("ats", release)
+
+        with patch("app.main.match_evidence_batch", side_effect=self.no_match):
+            retried = self.client.post(f"/applications/{application['id']}/decision")
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(
+            [item["requirement_text"] for item in retried.json()["requirements"]],
+            [item["criteria_text"] for item in legitimate["criteria"]],
+        )
 
     def test_identical_inferred_model_diagnosis_preserves_dependent_state(self):
         jd = """About You
