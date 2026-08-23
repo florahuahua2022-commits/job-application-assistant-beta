@@ -109,6 +109,32 @@ Demonstrated knowledge of policy and governance requirements.
         self.assertIn("technical capability", competencies)
         self.assertIn("policy and governance", competencies)
 
+    def test_bennco_company_profile_and_values_are_not_applicant_requirements(self):
+        jd = """About Bennco Group
+Bennco Group is a multi-disciplinary building and construction contractor supporting Tier 1 clients across the Pilbara and wider WA. From our beginnings in Tom Price, we’ve grown into a trusted provider delivering high-quality building, plumbing, and electrical projects across regional WA.
+About the Role
+Project and site administration experience across capital projects.
+About You
+Strong planning and organisation skills.
+Microsoft Office and relevant project systems experience.
+Experience in construction or mining (preferred).
+Our Values
+Pride & Commitment – We own our work and get the job done.
+Growth & Improvement – We push ourselves to evolve and excel.
+Family & Loyalty – We look after our people and create a welcoming team culture.
+Trust & Respect – We communicate openly and honour our commitments.
+"""
+
+        model = build_job_model(jd)
+        criteria = [item["criteria_text"] for item in model["criteria"]]
+
+        self.assertEqual(criteria, [
+            "Strong planning and organisation skills.",
+            "Microsoft Office and relevant project systems experience.",
+            "Experience in construction or mining (preferred).",
+            "Project and site administration experience across capital projects.",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

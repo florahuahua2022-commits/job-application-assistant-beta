@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.database import get_session
 from app.main import app
+from app.job_model import build_job_model
 from app.models import JobApplication
 
 
@@ -107,6 +109,100 @@ class ApplicationDecisionApiTests(unittest.TestCase):
             "application_id": application["id"], "document_type": "cover_letter",
         })
         self.assertEqual(response.status_code, 409)
+
+    def test_diagnosis_rebuilds_stale_inferred_bennco_requirements(self):
+        jd = """About Bennco Group
+Bennco Group is a multi-disciplinary building and construction contractor supporting Tier 1 clients across the Pilbara and wider WA. From our beginnings in Tom Price, we’ve grown into a trusted provider delivering high-quality building, plumbing, and electrical projects across regional WA.
+About You
+Project and site administration experience.
+Strong planning and organisation skills.
+Microsoft Office and relevant project systems experience.
+Experience in construction or mining (preferred).
+Our Values
+Pride & Commitment – We own our work and get the job done.
+Growth & Improvement – We push ourselves to evolve and excel.
+Family & Loyalty – We look after our people and create a welcoming team culture.
+Trust & Respect – We communicate openly and honour our commitments.
+"""
+        application = self.client.post("/applications", json={
+            "company": "Bennco Group", "position_title": "Project Administrator - Capital Projects",
+            "job_description": jd,
+        }).json()
+        legitimate = build_job_model(jd, None, "Project Administrator - Capital Projects", "Bennco Group")
+        stale = {**legitimate, "criteria": [
+            *legitimate["criteria"],
+            *[{"criteria_id": f"NOISE{index}", "criteria_text": text, "criteria_type": "inferred",
+               "criterion_categories": ["behaviour"], "primary_category": "behaviour",
+               "key_competencies": [], "source": "job_description"}
+              for index, text in enumerate([
+                  "Bennco Group is a multi-disciplinary building and construction contractor supporting Tier 1 clients across the Pilbara and wider WA. From our beginnings in Tom Price, we’ve grown into a trusted provider delivering high-quality building, plumbing, and electrical projects across regional WA.",
+                  "Pride & Commitment – We own our work and get the job done.",
+                  "Growth & Improvement – We push ourselves to evolve and excel.",
+                  "Family & Loyalty – We look after our people and create a welcoming team culture.",
+                  "Trust & Respect – We communicate openly and honour our commitments.",
+              ])],
+        ]}
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            stored.job_model_json = json.dumps(stale, ensure_ascii=False)
+            stored.evidence_matches_json = '{"matches":[{"criteria_id":"NOISE0"}]}'
+            stored.application_decision_json = '{"status":"stale"}'
+            stored.selection_plan_json = '{"items":[{"criteria_id":"NOISE0"}]}'
+            stored.selection_confirmations_json = '["NOISE0"]'
+            stored.release_state_json = '{"pack_review":{"status":"pass"},"ats":{"ready":true}}'
+            session.add(stored); session.commit()
+
+        with patch("app.main.match_evidence_batch", side_effect=self.no_match):
+            decision = self.client.post(f"/applications/{application['id']}/decision")
+
+        self.assertEqual(decision.status_code, 200, decision.text)
+        cards = [item["requirement_text"] for item in decision.json()["requirements"]]
+        self.assertEqual(cards, [item["criteria_text"] for item in legitimate["criteria"]])
+        self.assertIn("Experience in construction or mining (preferred).", cards)
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            self.assertEqual(json.loads(stored.job_model_json), legitimate)
+            self.assertNotIn("NOISE0", stored.evidence_matches_json)
+            self.assertEqual((stored.selection_plan_json, stored.selection_confirmations_json), ("{}", "[]"))
+            release = json.loads(stored.release_state_json)
+            self.assertTrue(release["generation_contract_required"])
+            self.assertNotIn("pack_review", release)
+            self.assertNotIn("ats", release)
+
+    def test_identical_inferred_model_diagnosis_preserves_dependent_state(self):
+        jd = """About You
+Project and site administration experience.
+Strong planning and organisation skills.
+Experience in construction or mining (preferred).
+"""
+        application = self.client.post("/applications", json={
+            "company": "Example Contractor", "position_title": "Project Administrator",
+            "job_description": jd,
+        }).json()
+        with patch("app.main.match_evidence_batch", side_effect=self.no_match):
+            first = self.client.post(f"/applications/{application['id']}/decision")
+        self.assertEqual(first.status_code, 200, first.text)
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            stored.selection_plan_json = '{"items":[{"criteria_id":"CURRENT"}]}'
+            stored.selection_confirmations_json = '["CURRENT"]'
+            stored.release_state_json = '{"pack_review":{"status":"pass"},"ats":{"ready":true}}'
+            expected = (
+                stored.job_model_json, stored.evidence_matches_json, stored.application_decision_json,
+                stored.selection_plan_json, stored.selection_confirmations_json, stored.release_state_json,
+            )
+            session.add(stored); session.commit()
+
+        with patch("app.main.match_evidence_batch", side_effect=AssertionError("current matches must be reused")):
+            second = self.client.post(f"/applications/{application['id']}/decision")
+        self.assertEqual(second.status_code, 200, second.text)
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            actual = (
+                stored.job_model_json, stored.evidence_matches_json, stored.application_decision_json,
+                stored.selection_plan_json, stored.selection_confirmations_json, stored.release_state_json,
+            )
+        self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":

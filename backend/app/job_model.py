@@ -56,7 +56,14 @@ def _infer_requirement_lines(job_description: str) -> list[str]:
         r"(?i)\b(?:demonstrated|experience|ability|knowledge|qualification|capability|skills?|"
         r"manage|coordinate|prepare|develop|deliver|communicat|stakeholder|must|essential|required)\b"
     )
-    selected = list(dict.fromkeys([*candidate_requirements, *[line for line in candidates if signals.search(line)]]))
+    employer_context = re.compile(
+        r"(?i)(?:\b(?:is|are)\s+(?:a|an|the)\b.{0,100}\b(?:company|contractor|provider|business|organisation|organization)\b|"
+        r"^[^–—]{2,60}\s*[–—]\s*(?:we|our)\b)"
+    )
+    candidate_requirements = [line for line in candidate_requirements if not employer_context.search(line)]
+    selected = list(dict.fromkeys([*candidate_requirements, *[
+        line for line in candidates if signals.search(line) and not employer_context.search(line)
+    ]]))
     return (selected or candidates)[:12]
 
 

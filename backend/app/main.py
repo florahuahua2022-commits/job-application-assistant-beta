@@ -283,6 +283,19 @@ def prepare_application_decision(
         raise HTTPException(409, integrity_issue)
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     job_model = json.loads(application.job_model_json or "{}")
+    if job_model.get("requirement_mode") == "inferred_requirements":
+        current_job_model = build_job_model(
+            application.job_description, application.selection_criteria,
+            application.position_title, application.company,
+        )
+        if current_job_model != job_model:
+            job_model = current_job_model
+            application.job_model_json = json.dumps(job_model, ensure_ascii=False)
+            application.evidence_matches_json = "{}"
+            application.application_decision_json = "{}"
+            application.selection_plan_json = "{}"
+            application.selection_confirmations_json = "[]"
+            require_current_generation_contract(application)
     ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
     if not matches:
