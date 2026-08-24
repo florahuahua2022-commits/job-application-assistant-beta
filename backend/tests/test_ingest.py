@@ -354,6 +354,77 @@ We Offer
         self.assertNotIn("salary", criteria)
         self.assertNotIn("health insurance", criteria)
 
+    def test_bennco_selection_criteria_stops_before_employer_narrative(self):
+        raw_text = """Project Administrator
+Bennco Group
+Selection Criteria
+Experience in construction or mining (preferred)
+
+Who We Are
+Bennco Group is a multi-disciplinary building and construction contractor supporting Tier 1 clients across the Pilbara and wider WA.
+
+Pride & Commitment – We own our work and get the job done.
+Growth & Improvement – We push ourselves to evolve and excel.
+Family & Loyalty – We look after our people and create a welcoming team culture.
+Trust & Respect – We communicate openly and honour our commitments.
+"""
+        result = parse_job_ad_text(raw_text)
+
+        self.assertEqual(result["selection_criteria"], "Experience in construction or mining (preferred)")
+        for excluded in ("Who We Are", "Bennco Group is", "Pride & Commitment", "Growth & Improvement", "Family & Loyalty", "Trust & Respect"):
+            self.assertNotIn(excluded, result["selection_criteria"])
+
+    def test_selection_criteria_stops_at_employer_narrative_heading_variants(self):
+        headings = (
+            "Our Values", "Company Values", "Our Culture", "Company Culture", "About Us", "About the Company",
+            "About Our Company", "About the Organisation", "About the Organization", "What We Offer",
+            "We Offer", "Benefits", "Employee Benefits", "Our Benefits", "Perks", "Rewards and Benefits", "Why Join Us",
+            "What's in it for you", "What you'll get", "How to Apply", "Employer Questions",
+        )
+        for heading in headings:
+            with self.subTest(heading=heading):
+                result = parse_job_ad_text(
+                    f"Project Officer\nExample Employer\nSelection Criteria\nStrong written communication skills.\n{heading}\nEmployer narrative and offers."
+                )
+                self.assertEqual(result["selection_criteria"], "Strong written communication skills.")
+
+    def test_selection_criteria_keeps_genuine_multiline_and_values_related_criteria(self):
+        result = parse_job_ad_text("""Project Officer
+Example Employer
+Essential Criteria
+Demonstrated ability to work in accordance with organisational values.
+Strong written communication skills.
+Planning and organisation skills.
+Demonstrated stakeholder engagement skills.
+Our Values
+We support our community.
+""")
+
+        self.assertEqual(result["selection_criteria"].splitlines(), [
+            "Demonstrated ability to work in accordance with organisational values.",
+            "Strong written communication skills.",
+            "Planning and organisation skills.",
+            "Demonstrated stakeholder engagement skills.",
+        ])
+        model = build_job_model(result["job_description"], result["selection_criteria"])
+        self.assertEqual(model["requirement_mode"], "explicit_selection_criteria")
+        self.assertEqual(len(model["criteria"]), 4)
+
+    def test_private_requirements_without_formal_heading_remain_inferred(self):
+        raw_text = """Office Administrator
+Example Contractor
+About You
+Project and site administration experience.
+Experience in construction or mining (preferred).
+Who We Are
+We deliver construction projects across Western Australia.
+"""
+        result = parse_job_ad_text(raw_text)
+        model = build_job_model(result["job_description"], result["selection_criteria"])
+
+        self.assertEqual(result["selection_criteria"], "")
+        self.assertEqual(model["requirement_mode"], "inferred_requirements")
+
     def test_expands_short_zoo_heading_to_readable_advertised_name(self):
         raw_text = """
         Project Coordinator

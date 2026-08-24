@@ -19,9 +19,36 @@ from app.models import ApplicantProfile, GeneratedDocument, JobApplication, JobS
 from app.outcome_learning import build_submission_snapshot
 from app.release_state import details_fingerprint, fingerprint, generation_inputs_fingerprint, pack_fingerprint
 from app.resume_plan import build_resume_curation_plan, validate_resume_content
+from app.ingest import parse_job_ad_text
 
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_bennco_pasted_ad_persists_only_formal_criteria_in_job_model(self):
+        raw_text = """Project Administrator
+Bennco Group
+Selection Criteria
+Experience in construction or mining (preferred)
+Who We Are
+Bennco Group is a multi-disciplinary building and construction contractor supporting Tier 1 clients across the Pilbara and wider WA.
+Our Values
+Pride & Commitment – We own our work and get the job done.
+Growth & Improvement – We push ourselves to evolve and excel.
+Family & Loyalty – We look after our people and create a welcoming team culture.
+Trust & Respect – We communicate openly and honour our commitments.
+"""
+        parsed = parse_job_ad_text(raw_text)
+        created = self.client.post("/applications", json={
+            "company": "Bennco Group", "position_title": "Project Administrator",
+            "job_description": parsed["job_description"], "selection_criteria": parsed["selection_criteria"],
+        })
+
+        self.assertEqual(created.status_code, 200, created.text)
+        application = created.json()
+        model = json.loads(application["job_model_json"])
+        self.assertEqual(application["selection_criteria"], "Experience in construction or mining (preferred)")
+        self.assertEqual(model["requirement_mode"], "inferred_requirements")
+        self.assertEqual([item["criteria_text"] for item in model["criteria"]], ["Experience in construction or mining (preferred)"])
+
     def test_pasted_complete_resume_builds_canonical_employment_before_ckb(self):
         source = """Work Experience
 Project Officer

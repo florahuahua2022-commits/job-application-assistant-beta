@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
+import { parsedSelectionCriteria, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
 
 test("Pack Review and ATS network failures clear busy state", async () => {
   for (const operation of ["pack", "ats"]) {
@@ -29,4 +29,10 @@ test("an in-place Resume upload changes the editor version", () => {
     resumeEditorVersion({ id: 2, updated_at: "2026-08-22T13:05:35Z" }),
   );
   assert.equal(resumeEditorVersion(), "new");
+});
+
+test("a successful JD parse replaces rather than retains Selection Criteria", () => {
+  assert.equal(parsedSelectionCriteria(""), "");
+  assert.equal(parsedSelectionCriteria("NEW CRITERIA"), "NEW CRITERIA");
+  assert.equal(parsedSelectionCriteria(undefined), "");
 });

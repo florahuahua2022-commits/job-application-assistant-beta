@@ -11,7 +11,7 @@ import {
 import { ApplicationDecision, decisionLabel } from "./applicationDecision";
 import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
-import { releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
+import { parsedSelectionCriteria, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -459,7 +459,7 @@ export default function Home() {
         company: result.company || current.company,
         position_title: result.position_title || current.position_title,
         job_description: result.job_description,
-        selection_criteria: result.selection_criteria || current.selection_criteria,
+        selection_criteria: parsedSelectionCriteria(result.selection_criteria),
         discovered_sources: [],
       }));
       setAdWarnings(result.warnings || []);
