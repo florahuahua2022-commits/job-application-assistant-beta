@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsedSelectionCriteria, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
+import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
 
 test("Pack Review and ATS network failures clear busy state", async () => {
   for (const operation of ["pack", "ats"]) {
@@ -35,4 +35,9 @@ test("a successful JD parse replaces rather than retains Selection Criteria", ()
   assert.equal(parsedSelectionCriteria(""), "");
   assert.equal(parsedSelectionCriteria("NEW CRITERIA"), "NEW CRITERIA");
   assert.equal(parsedSelectionCriteria(undefined), "");
+});
+
+test("job extraction preserves an existing organisation", () => {
+  assert.equal(preservedOrganisation("Private", "Guessed Company"), "Private");
+  assert.equal(preservedOrganisation("", "Explicit Company"), "Explicit Company");
 });

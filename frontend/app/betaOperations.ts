@@ -21,3 +21,7 @@ export function resumeEditorVersion(resume?: { id: number; updated_at: string })
 export function parsedSelectionCriteria(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
+
+export function preservedOrganisation(current: string, extracted: string): string {
+  return current || extracted;
+}

@@ -11,7 +11,7 @@ import {
 import { ApplicationDecision, decisionLabel } from "./applicationDecision";
 import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
-import { parsedSelectionCriteria, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
+import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -424,7 +424,7 @@ export default function Home() {
       }
       setJobFields((current) => ({
         ...current,
-        company: result.company || current.company,
+        company: preservedOrganisation(current.company, result.company),
         position_title: result.position_title || current.position_title,
         job_description: result.job_description || current.job_description,
         job_url: result.job_url || current.job_url,
@@ -456,7 +456,7 @@ export default function Home() {
       }
       setJobFields((current) => ({
         ...current,
-        company: result.company || current.company,
+        company: preservedOrganisation(current.company, result.company),
         position_title: result.position_title || current.position_title,
         job_description: result.job_description,
         selection_criteria: parsedSelectionCriteria(result.selection_criteria),
@@ -477,10 +477,11 @@ export default function Home() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const payload = jobFields;
-    const response = await authenticatedFetch(`${api}/applications`, {
-      method: "POST",
+    const { discovered_sources: _, ...updatePayload } = payload;
+    const response = await authenticatedFetch(`${api}/applications${selectedApplication ? `/${selectedApplication}` : ""}`, {
+      method: selectedApplication ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(selectedApplication ? updatePayload : payload),
     });
     if (!response.ok) return setNotice("Could not save this job. Check the required fields and try again.");
     const application = await response.json();
