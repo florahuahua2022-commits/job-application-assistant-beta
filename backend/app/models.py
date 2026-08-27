@@ -85,6 +85,7 @@ class JobApplication(SQLModel, table=True):
     status: ApplicationStatus = ApplicationStatus.draft
     submission_reference: str | None = None
     submitted_at: datetime | None = None
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -283,6 +284,11 @@ class JobApplicationSubmissionUpdate(SQLModel):
 
 class JobApplicationStatusUpdate(SQLModel):
     status: ApplicationStatus
+
+
+class JobApplicationArchiveUpdate(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["archive", "restore"]
 
 
 class OutcomeEventCreate(SQLModel):

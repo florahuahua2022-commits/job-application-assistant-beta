@@ -12,6 +12,7 @@ import { ApplicationDecision, decisionLabel } from "./applicationDecision";
 import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
 import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
+import { activeApplications, archivedApplications } from "./applicationArchive";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -22,7 +23,7 @@ type Experience = { id: string; role_title: string; organization: string; time_p
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string; updated_at: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
-type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string };
+type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string; archived_at?: string | null };
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
 type ReviewerResult = { status: "pass" | "fail" | "pending" | "provider_failed"; state?: string; message?: string; results?: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; severity?: "critical" | "major" | "advisory"; description: string; recommended_action?: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
@@ -1089,6 +1090,17 @@ export default function Home() {
     setNotice(`${result.position_title} moved to ${statusLabels[result.status]}.`);
   }
 
+  async function updateApplicationArchive(application: Application, action: "archive" | "restore") {
+    const response = await authenticatedFetch(`${api}/applications/${application.id}/archive`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || `Could not ${action} the application.`);
+    setApplications((current) => current.map((item) => item.id === result.id ? result : item));
+    setStatusFilter(action === "archive" ? "archived" : "all");
+    setNotice(`${result.position_title} ${action === "archive" ? "archived" : "restored"}.`);
+  }
+
   async function createLocalBackup() {
     const response = await authenticatedFetch(`${api}/backups`, { method: "POST" });
     const result = await response.json();
@@ -1205,8 +1217,10 @@ export default function Home() {
     : "Choose documents first";
   const requirementsReady = Boolean(applicationRequirements && applicationRequirements.review_status !== "needs_confirmation" && !requirementsHasUnknown(applicationRequirements) && applicationRequirements.completeness !== "incomplete");
   const packReady = requiredPackTypes.length > 0 && requiredPackTypes.every((type) => latestDocuments[type]);
-  const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, applications.filter((application) => application.status === status).length])), [applications]);
-  const filteredApplications = statusFilter === "all" ? applications : applications.filter((application) => application.status === statusFilter);
+  const active = activeApplications(applications);
+  const archived = archivedApplications(applications);
+  const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, activeApplications(applications).filter((application) => application.status === status).length])), [applications]);
+  const filteredApplications = statusFilter === "archived" ? archived : statusFilter === "all" ? active : active.filter((application) => application.status === statusFilter);
   const privacyNotice = showPrivacy && <div className="modalBackdrop" role="presentation" onClick={() => setShowPrivacy(false)}><section className="privacyModal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="requirementsHeading"><h2 id="privacy-title">Private Beta Privacy Notice</h2><button type="button" className="secondary" onClick={() => setShowPrivacy(false)}>Close</button></div><p>This service stores your profile, Resume, job descriptions, application records and generated documents. These materials may contain personal information.</p><p>Relevant Resume, job and application content is sent to the configured AI provider when the service generates or reviews documents. This is a beta service, so errors and interruptions may occur. Review every document yourself before submitting it.</p><p>Avoid uploading unnecessary highly sensitive information such as passwords, identity documents, health information or criminal-history details.</p><p>Use <strong>Export my data</strong> to download your account data. Use <strong>Delete my account</strong> to permanently remove your account and saved data.</p><p>For access, privacy or support questions, contact {betaSupportContact}.</p></section></div>;
 
   if (!authReady) return <main><section className="panel"><p>Preparing secure sign-in…</p></section></main>;
@@ -1249,8 +1263,8 @@ export default function Home() {
     <p className="notice">{notice}</p>
 
     <section className="workspaceOverview" aria-label="Application overview">
-      <div className="overviewStats"><div><strong>{applications.length}</strong><small>All applications</small></div><div><strong>{statusCounts.ready_to_apply || 0}</strong><small>Ready</small></div><div><strong>{statusCounts.applied || 0}</strong><small>Applied</small></div></div>
-      <div className="overviewRecent"><strong>Recent applications</strong>{applications.length ? applications.slice(0, 3).map((application) => <button type="button" key={application.id} onClick={() => { openApplication(application.id); document.getElementById("application-workspace")?.scrollIntoView({ behavior: "smooth" }); }}><span>{application.position_title}</span><small>{application.company} · {statusLabels[application.status] || application.status}</small></button>) : <small>No saved jobs yet.</small>}</div>
+      <div className="overviewStats"><div><strong>{active.length}</strong><small>All applications</small></div><div><strong>{statusCounts.ready_to_apply || 0}</strong><small>Ready</small></div><div><strong>{statusCounts.applied || 0}</strong><small>Applied</small></div></div>
+      <div className="overviewRecent"><strong>Recent applications</strong>{active.length ? active.slice(0, 3).map((application) => <button type="button" key={application.id} onClick={() => { openApplication(application.id); document.getElementById("application-workspace")?.scrollIntoView({ behavior: "smooth" }); }}><span>{application.position_title}</span><small>{application.company} · {statusLabels[application.status] || application.status}</small></button>) : <small>No saved jobs yet.</small>}</div>
       <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><button type="button" className="secondary" onClick={() => document.getElementById("application-tracker")?.scrollIntoView({ behavior: "smooth" })}>Open Tracker</button></div>
     </section>
 
@@ -1385,8 +1399,9 @@ export default function Home() {
       <section className="panel" id="application-tracker">
         <div className="stepHeading"><span>3</span><div><strong>Application Tracker</strong><small>Review and update every application in one place</small></div></div>
         <div className="statusFilters">
-          <button type="button" className={statusFilter === "all" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("all")}><strong>{applications.length}</strong><small>All jobs</small></button>
+          <button type="button" className={statusFilter === "all" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("all")}><strong>{active.length}</strong><small>All jobs</small></button>
           {applicationStatuses.map((status) => <button type="button" key={status} className={statusFilter === status ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter(status)}><strong>{statusCounts[status] || 0}</strong><small>{statusLabels[status]}</small></button>)}
+          <button type="button" className={statusFilter === "archived" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("archived")}><strong>{archived.length}</strong><small>Archived</small></button>
         </div>
         <div className="trackerList">
           {filteredApplications.length ? filteredApplications.map((application) => <div className="trackerRow" key={application.id}>
@@ -1400,13 +1415,13 @@ export default function Home() {
         <div className="stepHeading"><span>4</span><div><strong>Create and check your application</strong><small>Choose documents, generate drafts, review them, then check and download</small></div></div>
         <div className="applicationLayout">
           <aside className="jobList">
-            {applications.length ? applications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
+            {filteredApplications.length ? filteredApplications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
               <strong>{application.position_title}</strong><small>{application.company} · {statusLabels[application.status] || application.status}</small>
             </button>) : <p className="helper">Save a job to get started.</p>}
           </aside>
           <div className="reviewArea">
             {selected ? <>
-              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || !requirementsReady || !canGenerate(applicationDecision?.status, confirmedApplication === selected.id)} title={!requirementsReady ? "Choose and confirm the documents for this application first." : confirmedApplication !== selected.id ? "Confirm the applicant and contact details first." : applicationDecision?.status !== "ready" ? "Complete the application match check first." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div></div>
+              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || !requirementsReady || !canGenerate(applicationDecision?.status, confirmedApplication === selected.id)} title={!requirementsReady ? "Choose and confirm the documents for this application first." : confirmedApplication !== selected.id ? "Confirm the applicant and contact details first." : applicationDecision?.status !== "ready" ? "Complete the application match check first." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div></div>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>

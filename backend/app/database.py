@@ -60,6 +60,8 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_plan_json TEXT NOT NULL DEFAULT '{}'"))
                 if "selection_confirmations_json" not in application_columns:
                     connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_confirmations_json TEXT NOT NULL DEFAULT '[]'"))
+                if "archived_at" not in application_columns:
+                    connection.execute(text("ALTER TABLE jobapplication ADD COLUMN archived_at TIMESTAMP"))
             if "jobsource" in table_names:
                 source_columns = {column["name"] for column in inspector.get_columns("jobsource")}
                 if "discovery_context" not in source_columns:
@@ -102,6 +104,8 @@ def create_db_and_tables() -> None:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_plan_json TEXT DEFAULT '{}'"))
             if "selection_confirmations_json" not in existing:
                 connection.execute(text("ALTER TABLE jobapplication ADD COLUMN selection_confirmations_json TEXT DEFAULT '[]'"))
+            if "archived_at" not in existing:
+                connection.execute(text("ALTER TABLE jobapplication ADD COLUMN archived_at DATETIME"))
             resume_columns = {column["name"] for column in inspector.get_columns("resume")}
             if "experiences_json" not in resume_columns:
                 connection.execute(text("ALTER TABLE resume ADD COLUMN experiences_json TEXT DEFAULT '[]'"))

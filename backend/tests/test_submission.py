@@ -285,6 +285,36 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["message"], "Complete the release checklist before marking this application Ready.")
 
+    def test_archives_own_application(self):
+        response = self.client.patch(f"/applications/{self.application_id}/archive", json={"action": "archive"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.json()["archived_at"])
+
+    def test_restores_own_application(self):
+        self.client.patch(f"/applications/{self.application_id}/archive", json={"action": "archive"})
+        response = self.client.patch(f"/applications/{self.application_id}/archive", json={"action": "restore"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["archived_at"])
+
+    def test_archive_preserves_workflow_status(self):
+        with Session(self.engine) as session:
+            session.get(JobApplication, self.application_id).status = "applied"
+            session.commit()
+
+        response = self.client.patch(f"/applications/{self.application_id}/archive", json={"action": "archive"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "applied")
+
+    def test_cannot_archive_another_users_application(self):
+        app.dependency_overrides[get_current_user] = lambda: uuid4()
+
+        response = self.client.patch(f"/applications/{self.application_id}/archive", json={"action": "archive"})
+
+        self.assertEqual(response.status_code, 404)
+
     def test_updates_saved_job_details_without_losing_jd(self):
         response = self.client.patch(
             f"/applications/{self.application_id}",
