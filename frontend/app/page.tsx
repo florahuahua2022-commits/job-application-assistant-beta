@@ -85,7 +85,7 @@ function RequirementLimitEditor({ limit, onToggle, onChange }: {
   </div>;
 }
 
-export default function Home() {
+export function Workspace({ applicationsPage = false }: { applicationsPage?: boolean }) {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const [authNotice, setAuthNotice] = useState("");
@@ -99,6 +99,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [selectedApplication, setSelectedApplication] = useState<number | null>(null);
   const [documents, setDocuments] = useState<GeneratedDocument[]>([]);
+  const [generationFailure, setGenerationFailure] = useState<{ documentType: typeof packTypes[number]; message: string } | null>(null);
   const [activeType, setActiveType] = useState<string>("tailored_resume");
   const [draftText, setDraftText] = useState("");
   const [qualityResult, setQualityResult] = useState<QualityResult | null>(null);
@@ -221,6 +222,13 @@ export default function Home() {
     if (!resumes[0]) return;
     try { setExperiences(JSON.parse(resumes[0].experiences_json || "[]")); } catch { setExperiences([]); }
   }, [resumes]);
+
+  useEffect(() => {
+    if (!applicationsPage || selectedApplication || !applications.length) return;
+    const requestedId = Number(new URLSearchParams(window.location.search).get("application"));
+    const application = applications.find((item) => item.id === requestedId) || applications.find((item) => !item.archived_at);
+    if (application) void openApplication(application.id);
+  }, [applicationsPage, applications, selectedApplication]);
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -853,14 +861,17 @@ export default function Home() {
     }
     const packId = crypto.randomUUID();
     setBusy(true);
+    setGenerationFailure(null);
     showPackNotice("Preparing your complete application pack…");
     setDocuments([]);
     setQualityResult(null);
     setActiveType("tailored_resume");
     const created: GeneratedDocument[] = [];
+    let generatingType: typeof packTypes[number] = "tailored_resume";
     try {
       for (let index = 0; index < generationTypes.length; index += 1) {
         const documentType = generationTypes[index];
+        generatingType = documentType;
         showPackNotice(`Creating application pack: ${index + 1} of ${generationTypes.length} — ${labels[documentType]}…`);
         const response = await authenticatedFetch(`${api}/generate`, {
           method: "POST",
@@ -905,7 +916,35 @@ export default function Home() {
       if (documentsResponse.ok) setDocuments(await documentsResponse.json());
       else if (created.length) setDocuments([...created].reverse());
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
+      setGenerationFailure({ documentType: generatingType, message: detail });
       showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. The failed attempt has not used today's completed-pack allowance.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryFailedDocument() {
+    if (!selectedApplication || !generationFailure || busy) return;
+    const { documentType } = generationFailure;
+    setBusy(true);
+    setPackNotice(`Retrying ${labels[documentType]}…`);
+    try {
+      const response = await authenticatedFetch(`${api}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ application_id: selectedApplication, document_type: documentType, pack_id: crypto.randomUUID() }),
+        signal: AbortSignal.timeout(360_000),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`);
+      setDocuments((current) => [result, ...current]);
+      setGenerationFailure(null);
+      setPackNotice(`${labels[documentType]} created. You can now continue with application checks.`);
+      await loadReleaseChecklist();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${labels[documentType]} could not be generated.`;
+      setGenerationFailure({ documentType, message });
+      setPackNotice(message);
     } finally {
       setBusy(false);
     }
@@ -1312,16 +1351,20 @@ export default function Home() {
   return <main>
     <header>
       <p className="eyebrow">JOB APPLICATION ASSISTANT</p>
-      <h1>From job description to a tailored CV and cover letter.</h1>
-      <p>Keep one truthful Master CV, add a job, and prepare the two documents most applications need. Selection Criteria is added only when the employer asks for it.</p>
+      <h1>{applicationsPage ? "Your applications." : "From job description to a tailored CV and cover letter."}</h1>
+      <p>{applicationsPage ? "Review, continue or organise each saved application." : "Keep one truthful Master CV, add a job, and prepare the two documents most applications need. Selection Criteria is added only when the employer asks for it."}</p>
+      {applicationsPage && <p><a className="secondary pageLink" href="/">Back to dashboard</a> <a className="pageLink" href="/#add-job">Add a job</a></p>}
       {supabase && <div className="accountActions"><button type="button" className="secondary" onClick={exportAccountData}>Export my data</button><button type="button" className="secondary dangerButton" onClick={deleteMyAccount}>Delete my account</button><button type="button" className="secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     <p className="notice">{notice}</p>
 
+    <section className="steps">
+    {!applicationsPage && (
+    <>
     <section className="workspaceOverview" aria-label="Application overview">
       <div className="overviewStats"><div><strong>{active.length}</strong><small>All applications</small></div><div><strong>{statusCounts.ready_to_apply || 0}</strong><small>Ready</small></div><div><strong>{statusCounts.applied || 0}</strong><small>Applied</small></div></div>
-      <div className="overviewRecent"><strong>Recent applications</strong>{active.length ? active.slice(0, 3).map((application) => <button type="button" key={application.id} onClick={() => { openApplication(application.id); document.getElementById("application-workspace")?.scrollIntoView({ behavior: "smooth" }); }}><span>{application.position_title}</span><small>{application.company} · {statusLabels[application.status] || application.status}</small></button>) : <small>No saved jobs yet.</small>}</div>
-      <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><button type="button" className="secondary" onClick={() => document.getElementById("application-tracker")?.scrollIntoView({ behavior: "smooth" })}>Open Tracker</button></div>
+      <div className="overviewRecent"><strong>Recent applications</strong>{active.length ? active.slice(0, 3).map((application) => <a href={`/applications?application=${application.id}`} key={application.id}><span>{application.position_title}</span><small>{application.company} · {statusLabels[application.status] || application.status}</small></a>) : <small>No saved jobs yet.</small>}</div>
+      <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><a className="secondary pageLink" href="/applications">View all applications</a></div>
     </section>
 
     {selectionAccess && !selectionAccess.unlimited && <section className="selectionAccessCard">
@@ -1338,7 +1381,6 @@ export default function Home() {
       </div>
     </section>}
 
-    <section className="steps">
       <details className="panel" open={!profile}>
         <summary><span>0</span><div><strong>Contact check</strong><small>{profile ? "Detected and saved — check once" : "Upload your CV and skip manual entry"}</small></div></summary>
         {!resumes.length && <form onSubmit={uploadResume} className="formBody quickStartUpload">
@@ -1451,7 +1493,8 @@ export default function Home() {
           <button className="full">Save Job</button>
         </form>
       </section>
-
+    </>
+    )}
       <section className="panel" id="application-tracker">
         <div className="stepHeading"><span>3</span><div><strong>Application Tracker</strong><small>Review and update every application in one place</small></div></div>
         <div className="statusFilters">
@@ -1528,6 +1571,7 @@ export default function Home() {
                   <div className="requirementsActions"><button type="button" disabled={busy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div>
                 </>}
               </section>
+              {generationFailure && <section className="requirementsError generationFailure" role="alert"><strong>{labels[generationFailure.documentType]} was not created</strong><p>{generationFailure.message}</p><button type="button" onClick={retryFailedDocument} disabled={busy}>{busy ? "Retrying…" : `Retry ${labels[generationFailure.documentType]}`}</button></section>}
               <section className="sourcesCard" aria-live="polite">
                 <div className="requirementsHeading"><div><strong>Application Sources</strong><small>Documents found or referenced for this application.</small></div></div>
                 {sourcesLoadState === "loading" && <p className="helper">Loading application sources…</p>}
@@ -1561,11 +1605,11 @@ export default function Home() {
                     <li data-ready={releaseChecklist.checks.documents.ready}>Required documents {releaseChecklist.checks.documents.ready ? "present" : "missing"}</li>
                     <li data-ready={releaseChecklist.checks.details_confirmation.ready}>Applicant, job and contact details {releaseChecklist.checks.details_confirmation.ready ? "confirmed" : "need confirmation"}</li>
                     <li data-ready={releaseChecklist.checks.selection_confirmations.ready}>Selection Criteria confirmations {releaseChecklist.checks.selection_confirmations.ready ? "complete" : "incomplete"}</li>
-                    <li data-ready={releaseChecklist.checks.final_check.ready}>Final Check {releaseChecklist.checks.final_check.ready ? "passed" : "not passed"}</li>
-                    <li data-ready={releaseChecklist.checks.pack_review.ready}>Pack Review {releaseChecklist.checks.pack_review.ready ? (packReviewResult?.skipped ? `not required — ${packReviewResult.skip_reason}` : "passed") : "not passed or stale"}</li>
-                    <li data-ready={releaseChecklist.checks.ats.ready}>Resume #{releaseChecklist.checks.ats.document_id || "—"} · {submissionFormat.toUpperCase()} · {exportTemplate}: {releaseChecklist.checks.ats.ready ? "ATS verified" : "not verified"}</li>
+                    <li data-ready={releaseChecklist.checks.final_check.ready}>Content check {releaseChecklist.checks.final_check.ready ? "passed" : "not started"}</li>
+                    <li data-ready={releaseChecklist.checks.pack_review.ready}>Consistency check {releaseChecklist.checks.pack_review.ready ? (packReviewResult?.skipped ? `not required — ${packReviewResult.skip_reason}` : "passed") : "not started"}</li>
+                    <li data-ready={releaseChecklist.checks.ats.ready}>Resume compatibility · {submissionFormat.toUpperCase()} · {exportTemplate}: {releaseChecklist.checks.ats.ready ? "passed" : "not started"}</li>
                   </ul>
-                  <div className="selectedActions"><button type="button" onClick={checkApplication} disabled={!packReady || releaseBusy !== "idle"} title={!packReady ? "Generate and review every selected document first." : ""}>{releaseBusy !== "idle" ? "Checking application…" : "Check my application"}</button></div>
+                  <div className="selectedActions"><button type="button" onClick={checkApplication} disabled={!packReady || releaseBusy !== "idle"} title={!packReady ? "Generate and review every selected document first." : ""}>{releaseBusy !== "idle" ? "Checking application…" : "Start application checks"}</button></div>
                   <details className="requirementsSource"><summary>View check details</summary><p className="helper">Checks run in order: document content, pack consistency, then Resume compatibility.</p><div className="selectedActions"><button type="button" className="secondary" onClick={runFinalCheck} disabled={finalCheckState === "checking"}>{finalCheckState === "checking" ? "Checking…" : "Run content check"}</button><button type="button" className="secondary" onClick={runPackReview} disabled={!releaseChecklist.checks.final_check.ready || releaseBusy !== "idle"}>{releaseBusy === "pack" ? "Reviewing…" : "Run consistency check"}</button><button type="button" className="secondary" onClick={runAtsVerification} disabled={!releaseChecklist.checks.pack_review.ready || releaseBusy !== "idle"}>{releaseBusy === "ats" ? "Verifying…" : "Check Resume compatibility"}</button></div></details>
                   {packReviewResult?.results?.some((result) => result.issues?.length) && <div className={packReviewResult.blocks_release ? "requirementsError" : "requirementsWarnings"}><strong>Pack Review findings</strong><ul>{packReviewResult.results.flatMap((result) => result.issues.map((issue, index) => <li key={`${result.document_type}-${index}`}>{labels[result.document_type] || result.document_type}: {issue.description}{issue.blocks_release ? " (blocking)" : " (advisory)"}</li>))}</ul></div>}
                   {atsResult && !atsResult.ready && <div className="requirementsError"><strong>ATS blockers</strong><ul>{atsResult.checks.filter((item) => item.blocking && item.state !== "pass").map((item) => <li key={item.code}>{item.message}</li>)}</ul></div>}
@@ -1585,4 +1629,8 @@ export default function Home() {
     <footer className="safety">AI prepares drafts from your Master Resume only. You review the facts and make the final submission. Login and CAPTCHA are never bypassed. <button type="button" className="privacyLink" onClick={() => setShowPrivacy(true)}>Privacy / Beta Notice</button></footer>
     {privacyNotice}
   </main>;
+}
+
+export default function Home() {
+  return <Workspace />;
 }

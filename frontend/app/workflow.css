@@ -69,6 +69,7 @@
 .sourceUploadButton input { margin-top: 5px; padding: 7px; font-size: .76rem; }
 .requirementsError { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: #fff0ef; color: #9f241d; font-size: .85rem; }
 .requirementsError p { margin: 5px 0 10px; }
+.pageLink { display: inline-flex; align-items: center; min-height: 38px; padding: 0 13px; border-radius: 8px; text-decoration: none; }
 .requirementsEditor { display: grid; gap: 12px; margin-top: 14px; }
 .requirementsEditor fieldset { margin: 0; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .requirementsEditor legend { padding: 0 7px; color: var(--accent-dark); font-weight: 800; }
