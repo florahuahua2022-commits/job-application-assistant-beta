@@ -56,6 +56,7 @@ class ApplicationDecisionApiTests(unittest.TestCase):
             decision = self.client.post(f"/applications/{application['id']}/decision").json()
             self.assertEqual(decision["status"], "needs_confirmation")
             self.assertTrue(decision["questions"][0]["material"])
+            self.assertTrue(decision["diagnosed_at"])
 
             confirmed = self.client.post(
                 f"/applications/{application['id']}/decision/confirm",
@@ -70,10 +71,18 @@ class ApplicationDecisionApiTests(unittest.TestCase):
             stored = session.get(JobApplication, application["id"])
             self.assertIn('"provenance": "user_confirmed"', stored.application_decision_json)
 
-    def test_negative_confirmation_blocks_and_generation_requires_ready_decision(self):
+    def test_new_application_keeps_a_resume_snapshot(self):
+        application = self.create_application()
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            snapshot = json.loads(stored.resume_snapshot_json)
+        self.assertEqual(snapshot["source_text"], "Project Officer\nPrepared monthly reports.")
+        self.assertTrue(snapshot["ckb_json"])
+
+    def test_negative_confirmation_does_not_gate_generation(self):
         application = self.create_application("Current professional registration is required.")
         before = self.client.post("/generate", json={"application_id": application["id"], "document_type": "cover_letter"})
-        self.assertEqual(before.status_code, 409)
+        self.assertNotEqual(before.status_code, 409)
         with patch("app.main.match_evidence_batch", side_effect=self.no_match):
             decision = self.client.post(f"/applications/{application['id']}/decision").json()
             blocked = self.client.post(
@@ -83,7 +92,7 @@ class ApplicationDecisionApiTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["application_recommendation"], "do_not_apply")
         after = self.client.post("/generate", json={"application_id": application["id"], "document_type": "cover_letter"})
-        self.assertEqual(after.status_code, 409)
+        self.assertNotEqual(after.status_code, 409)
 
     def test_job_change_invalidates_decision(self):
         application = self.create_application("Project reporting experience.")
@@ -92,7 +101,7 @@ class ApplicationDecisionApiTests(unittest.TestCase):
         updated = self.client.patch(f"/applications/{application['id']}", json={"position_title": "Senior Project Officer"}).json()
         self.assertEqual(updated["application_decision_json"], "{}")
 
-    def test_missing_jdf_keeps_diagnosis_incomplete_and_generation_blocked(self):
+    def test_missing_jdf_keeps_diagnosis_incomplete_without_gating_generation(self):
         application = self.client.post("/applications", json={
             "company": "Transwa",
             "position_title": "Project Officer",
@@ -109,7 +118,7 @@ class ApplicationDecisionApiTests(unittest.TestCase):
         response = self.client.post("/generate", json={
             "application_id": application["id"], "document_type": "cover_letter",
         })
-        self.assertEqual(response.status_code, 409)
+        self.assertNotEqual(response.status_code, 409)
 
     def test_diagnosis_rebuilds_stale_inferred_bennco_requirements(self):
         jd = """About Bennco Group

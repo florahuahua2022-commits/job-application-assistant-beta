@@ -32,7 +32,7 @@ from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, normalise_resume_experiences, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -119,6 +119,31 @@ def latest_application_documents(session: Session, application_id: int, user_id:
     return latest
 
 
+def application_master_resume(session: Session, application: JobApplication, user_id: UUID | None) -> Resume | None:
+    try:
+        snapshot = json.loads(application.resume_snapshot_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        snapshot = {}
+    if snapshot.get("source_text"):
+        return Resume(
+            id=snapshot.get("resume_id"), title=snapshot.get("title") or "Master Resume",
+            source_text=snapshot["source_text"], experiences_json=snapshot.get("experiences_json") or "[]",
+            ckb_json=snapshot.get("ckb_json") or "[]",
+        )
+    return session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+
+
+def application_ckb(session: Session, application: JobApplication, resume: Resume, user_id: UUID | None) -> tuple[list[dict], str]:
+    if application.resume_snapshot_json not in {"", "{}", None}:
+        try:
+            snapshot_ckb = json.loads(resume.ckb_json or "[]")
+            if isinstance(snapshot_ckb, list):
+                return snapshot_ckb, "reused_snapshot"
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return get_or_refresh_current_ckb(session, resume, user_id)
+
+
 def require_current_generation_contract(application: JobApplication) -> None:
     state = load_release_state(application.release_state_json)
     state.update(schema_version="1.0", generation_contract_required=True)
@@ -136,7 +161,7 @@ def current_required_documents(
 ) -> dict[str, GeneratedDocument]:
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     required = set(required_generated_documents(requirements))
-    master_resume = master_resume or session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = master_resume or application_master_resume(session, application, user_id)
     profile = profile or session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     latest = latest_application_documents(session, application.id, user_id)
     require_contract = bool(load_release_state(application.release_state_json).get("generation_contract_required"))
@@ -298,7 +323,7 @@ def prepare_application_decision(
             require_current_generation_contract(application)
             session.add(application)
             session.commit()
-    ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
+    ckb, _ = application_ckb(session, application, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
     if not matches:
         matches = match_evidence_batch(json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False))
@@ -308,6 +333,12 @@ def prepare_application_decision(
     errors = validate_application_decision(decision)
     if errors:
         raise HTTPException(500, errors[0])
+    if previous.get("diagnosed_at") and {
+        key: value for key, value in previous.items() if key != "diagnosed_at"
+    } == decision:
+        decision["diagnosed_at"] = previous["diagnosed_at"]
+    else:
+        decision["diagnosed_at"] = datetime.utcnow().isoformat()
     application.application_decision_json = json.dumps(decision, ensure_ascii=False)
     return decision
 
@@ -316,7 +347,7 @@ def capture_first_submission(session: Session, application: JobApplication, user
     outcome = load_outcome(application.outcome_json)
     if outcome.get("submission_snapshot_status") in {"captured", "unavailable"}:
         return
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     current = current_required_documents(session, application, user_id, master_resume, profile)
@@ -1057,9 +1088,20 @@ def create_application(
     values["job_model_json"] = serialise_job_model(
         values["job_description"], values.get("selection_criteria"), values["position_title"], values["company"]
     )
-    values["application_requirements_json"] = json.dumps(parse_application_requirements(
-        "\n".join(filter(None, (values["job_description"], values.get("selection_criteria"))))
-    ), ensure_ascii=False)
+    requirements = parse_application_requirements("\n".join(filter(None, (values["job_description"], values.get("selection_criteria")))))
+    for name in ("resume", "cover_letter"):
+        requirements["documents"][name].update(requirement="required", format="standalone", basis="product_default")
+    requirements["documents"]["selection_criteria"].update(requirement="not_required", format="not_applicable", basis="product_default")
+    requirements["review_status"] = "user_overridden"
+    values["application_requirements_json"] = json.dumps(requirements, ensure_ascii=False)
+    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    if master_resume:
+        current_ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
+        values["resume_snapshot_json"] = json.dumps({
+            "resume_id": master_resume.id, "title": master_resume.title,
+            "source_text": master_resume.source_text, "experiences_json": master_resume.experiences_json,
+            "ckb_json": json.dumps(current_ckb, ensure_ascii=False),
+        }, ensure_ascii=False)
     application = JobApplication.model_validate(values)
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)
@@ -1279,16 +1321,16 @@ def get_application_decision(
     user_id: UUID | None = Depends(get_current_user),
 ):
     application = get_for_user(session, JobApplication, application_id, user_id)
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if not application:
         raise HTTPException(404, "Application not found.")
+    master_resume = application_master_resume(session, application, user_id)
     if not master_resume:
         raise HTTPException(400, "Create a Master Resume first.")
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
         raise HTTPException(409, integrity_issue)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
-    ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
+    ckb, _ = application_ckb(session, application, master_resume, user_id)
     decision = json.loads(application.application_decision_json or "{}")
     inputs = decision_inputs(
         json.loads(application.job_model_json or "{}"),
@@ -1306,7 +1348,7 @@ def diagnose_application(
     user_id: UUID | None = Depends(get_current_user),
 ):
     application = get_for_user(session, JobApplication, application_id, user_id)
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id) if application else None
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
@@ -1316,7 +1358,7 @@ def diagnose_application(
         raise HTTPException(400, str(error)) from error
     except AIServiceError as error:
         raise HTTPException(502, str(error)) from error
-    session.add(master_resume); session.add(application); session.commit()
+    session.add(application); session.commit()
     return decision
 
 
@@ -1328,10 +1370,10 @@ def confirm_application_decision(
     user_id: UUID | None = Depends(get_current_user),
 ):
     application = get_for_user(session, JobApplication, application_id, user_id)
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id) if application else None
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
-    get_or_refresh_current_ckb(session, master_resume, user_id)
+    application_ckb(session, application, master_resume, user_id)
     current = json.loads(application.application_decision_json or "{}")
     question = next((item for item in current.get("questions") or [] if item.get("question_id") == payload.question_id), None)
     if not question:
@@ -1482,6 +1524,44 @@ def update_application_archive(
     session.commit()
     session.refresh(application)
     return application
+
+
+@app.delete("/applications/{application_id}", status_code=204)
+def delete_draft_application(
+    application_id: int,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if application.status != "draft":
+        raise HTTPException(409, "Only Draft applications can be deleted. Archive Ready or Applied applications instead.")
+    delete_application_records(session, application)
+
+
+def delete_application_records(session: Session, application: JobApplication) -> None:
+    for model in (JobSource, GeneratedDocument, GenerationUsage):
+        session.exec(delete(model).where(model.application_id == application.id))
+    session.delete(application)
+    session.commit()
+
+
+@app.delete("/applications/{application_id}/permanent", status_code=204)
+def permanently_delete_archived_application(
+    application_id: int,
+    payload: JobApplicationPermanentDelete,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if not application.archived_at:
+        raise HTTPException(409, "Archive this application before permanently deleting it.")
+    if payload.position_title.strip() != application.position_title.strip():
+        raise HTTPException(422, "Enter the exact position title to permanently delete this application.")
+    delete_application_records(session, application)
 
 
 @app.get("/applications/{application_id}/outcome")
@@ -1656,7 +1736,7 @@ def quality_check(
         ))
 
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id)
     if master_resume:
         integrity_issue = master_resume_integrity_issue(master_resume)
         if integrity_issue:
@@ -1664,7 +1744,7 @@ def quality_check(
                 severity="error", code="master_resume_incomplete", message=integrity_issue,
                 document_type="tailored_resume",
             ))
-    current_ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id) if master_resume else ([], "reused_current")
+    current_ckb, _ = application_ckb(session, application, master_resume, user_id) if master_resume else ([], "reused_current")
     current_documents = current_required_documents(session, application, user_id, master_resume, profile)
     decision = json.loads(application.application_decision_json or "{}")
     decision_current = False
@@ -2183,7 +2263,7 @@ def pack_review(
             "content": document.content, "structured": structured, "used_evidence_ids": used,
         }
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id)
     try:
         ckb = json.loads((master_resume.ckb_json if master_resume else "[]") or "[]")
         decision = json.loads(application.application_decision_json or "{}")
@@ -2277,7 +2357,7 @@ def review_edited_document(
     if not document:
         raise HTTPException(404, "Generated document not found.")
     application = get_for_user(session, JobApplication, document.application_id, user_id)
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id) if application else None
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     if not application or not master_resume or document.document_type not in current_required_documents(session, application, user_id, master_resume, profile):
         raise HTTPException(409, "This document is historical or no longer required. Regenerate the current application documents.")
@@ -2371,7 +2451,7 @@ def ats_check_generated_resume(
     if document.document_type != "tailored_resume":
         raise HTTPException(422, "ATS artifact verification is available only for a tailored resume.")
     application = get_for_user(session, JobApplication, document.application_id, user_id)
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id) if application else None
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     if not application or not master_resume or not profile:
         raise HTTPException(409, "The Resume, applicant profile, or parent application is unavailable.")
@@ -2489,9 +2569,11 @@ def generate(
         raise HTTPException(503, f"{payload.document_type.replace('_', ' ').title()} generation is temporarily unavailable. Existing documents remain available.")
     generation_started = perf_counter()
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
-    master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    master_resume = application_master_resume(session, application, user_id) if application else None
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
+    if not application.job_description.strip():
+        raise HTTPException(400, "Add a job description before generating documents.")
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
         raise HTTPException(409, integrity_issue)
@@ -2500,13 +2582,11 @@ def generate(
     used_experiences = "[]"
     used_closing_styles = "[]"
     profile_text = applicant_profile_prompt(profile) if profile else None
-    current_ckb, ckb_status = get_or_refresh_current_ckb(session, master_resume, user_id)
+    current_ckb, ckb_status = application_ckb(session, application, master_resume, user_id)
     ckb_source_json = json.dumps(current_ckb, ensure_ascii=False)
     stored_requirements = load_application_requirements(
         application.application_requirements_json, application.selection_criteria
     )
-    if stored_requirements.get("review_status") == "needs_confirmation" or stored_requirements.get("completeness") == "incomplete" or material_requirements_unknown(stored_requirements):
-        raise HTTPException(409, "Resolve and confirm the employer's application requirements before generating documents.")
     if payload.document_type == "selection_criteria" and not standalone_selection_criteria_required(stored_requirements):
         raise HTTPException(409, "A standalone Selection Criteria document is not required for this application.")
     job_model_json = (
@@ -2528,10 +2608,6 @@ def generate(
     current_inputs = decision_inputs(
         json.loads(job_model_json), stored_requirements, json.loads(ckb_source_json), profile,
     )
-    if not decision_is_current(decision, current_inputs) or decision.get("status") == "needs_confirmation":
-        raise HTTPException(409, "Review the current application diagnosis and answer its material questions before generating documents.")
-    if decision.get("status") == "blocked":
-        raise HTTPException(409, "This application has a failed eligibility requirement. Review the diagnosis before proceeding.")
     new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
     selection_credit_key = (
         check_selection_criteria_credit(session, user_id, payload.pack_id)

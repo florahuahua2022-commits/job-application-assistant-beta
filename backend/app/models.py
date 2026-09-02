@@ -75,6 +75,7 @@ class JobApplication(SQLModel, table=True):
     selection_criteria: str | None = None
     job_model_json: str = "{}"
     application_requirements_json: str = "{}"
+    resume_snapshot_json: str = "{}"
     evidence_matches_json: str = "{}"
     application_decision_json: str = "{}"
     release_state_json: str = "{}"
@@ -289,6 +290,11 @@ class JobApplicationStatusUpdate(SQLModel):
 class JobApplicationArchiveUpdate(SQLModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["archive", "restore"]
+
+
+class JobApplicationPermanentDelete(SQLModel):
+    model_config = ConfigDict(extra="forbid")
+    position_title: str
 
 
 class OutcomeEventCreate(SQLModel):

@@ -25,6 +25,7 @@ export type ApplicationDecision = {
   requirements: DecisionRequirement[];
   questions: DecisionQuestion[];
   blocking_issues: { criteria_id: string; code: string; message: string }[];
+  diagnosed_at?: string;
 };
 
 export function decisionLabel(value: string): string {

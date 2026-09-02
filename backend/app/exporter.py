@@ -118,6 +118,7 @@ def create_docx(content: str, title: str, template: str = "classic", market: str
     document = Document()
     _configure_docx(document, theme, resolve_page_size(market, page_size)["dimensions"])
     lines = _ascii_punctuation(content).splitlines()
+    is_cover_letter = title.casefold() == "cover letter"
 
     for index, raw in enumerate(lines):
         line = raw.strip()
@@ -145,7 +146,7 @@ def create_docx(content: str, title: str, template: str = "classic", market: str
         elif line.startswith("**") and line.endswith("**") and len(line) < 100:
             paragraph = document.add_paragraph(style="Heading 2")
             paragraph.add_run(line[2:-2])
-        elif index == 0 and len(line) < 100:
+        elif index == 0 and len(line) < 100 and not is_cover_letter:
             paragraph = document.add_paragraph()
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             paragraph.paragraph_format.space_after = Pt(5)
@@ -172,6 +173,7 @@ def create_pdf(content: str, title: str, template: str = "classic", market: str 
     heading = ParagraphStyle("ApplicationHeading", parent=body, fontName=theme["pdf_bold"], fontSize=13, leading=16, textColor=accent_hex, spaceBefore=10, spaceAfter=6, keepWithNext=True)
     title_style = ParagraphStyle("ApplicationTitle", parent=heading, fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=10)
     bullet = ParagraphStyle("ApplicationBullet", parent=body, leftIndent=18, firstLineIndent=-10, bulletIndent=4, spaceAfter=4)
+    is_cover_letter = title.casefold() == "cover letter"
     story = []
     for index, raw in enumerate(_ascii_punctuation(content).splitlines()):
         line = raw.strip()
@@ -184,7 +186,7 @@ def create_pdf(content: str, title: str, template: str = "classic", market: str 
             story.append(Paragraph(escaped, heading))
         elif line.startswith("- "):
             story.append(Paragraph(escaped[2:], bullet, bulletText="-"))
-        elif index == 0 and len(line) < 100:
+        elif index == 0 and len(line) < 100 and not is_cover_letter:
             story.append(Paragraph(escaped.replace("**", ""), title_style))
         elif line.startswith("**") and line.endswith("**") and len(line) < 100:
             story.append(Paragraph(escaped, heading))

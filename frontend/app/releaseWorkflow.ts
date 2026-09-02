@@ -16,8 +16,8 @@ export type ReleaseIssue = { code?: string; message: string; document_type?: str
 export type PackReviewResult = { status?: "pass" | "fail"; skipped?: boolean; skip_reason?: string; blocks_release?: boolean; results?: { document_type: string; issues: ({ description: string; blocks_release?: boolean } & Record<string, unknown>)[] }[] };
 export type AtsResult = { ready: boolean; status: "pass" | "fail"; document_id: number; format: "docx" | "pdf"; template: string; checks: { code: string; state: string; message: string; blocking: boolean }[]; keywords: { term: string; status: string; message: string; advisory: boolean }[] };
 
-export function canGenerate(decisionStatus: string | undefined, detailsConfirmed: boolean): boolean {
-  return decisionStatus === "ready" && detailsConfirmed;
+export function canGenerate(hasJobDescription: boolean, hasResume: boolean): boolean {
+  return hasJobDescription && hasResume;
 }
 
 export function artifactMatches(result: AtsResult | null, documentId: number | undefined, format: string, template: string): boolean {

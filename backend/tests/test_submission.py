@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -307,6 +308,48 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "applied")
+
+    def test_deletes_draft_and_its_generated_documents(self):
+        with Session(self.engine) as session:
+            session.add(GeneratedDocument(
+                application_id=self.application_id,
+                document_type="tailored_resume",
+                content="Draft document",
+            ))
+            session.commit()
+
+        response = self.client.delete(f"/applications/{self.application_id}")
+
+        self.assertEqual(response.status_code, 204)
+        with Session(self.engine) as session:
+            self.assertIsNone(session.get(JobApplication, self.application_id))
+            self.assertEqual(session.exec(select(GeneratedDocument).where(GeneratedDocument.application_id == self.application_id)).all(), [])
+
+    def test_cannot_delete_ready_application(self):
+        with Session(self.engine) as session:
+            session.get(JobApplication, self.application_id).status = "ready_to_apply"
+            session.commit()
+
+        response = self.client.delete(f"/applications/{self.application_id}")
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_permanently_deletes_archived_application_after_title_confirmation(self):
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.application_id)
+            application.status = "applied"
+            application.archived_at = datetime.utcnow()
+            session.add(GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Draft"))
+            session.commit()
+
+        wrong = self.client.request("DELETE", f"/applications/{self.application_id}/permanent", json={"position_title": "Wrong title"})
+        deleted = self.client.request("DELETE", f"/applications/{self.application_id}/permanent", json={"position_title": "Project Officer"})
+
+        self.assertEqual(wrong.status_code, 422)
+        self.assertEqual(deleted.status_code, 204)
+        with Session(self.engine) as session:
+            self.assertIsNone(session.get(JobApplication, self.application_id))
+            self.assertEqual(session.exec(select(GeneratedDocument).where(GeneratedDocument.application_id == self.application_id)).all(), [])
 
     def test_cannot_archive_another_users_application(self):
         app.dependency_overrides[get_current_user] = lambda: uuid4()

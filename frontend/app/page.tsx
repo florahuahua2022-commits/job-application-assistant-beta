@@ -23,7 +23,7 @@ type Experience = { id: string; role_title: string; organization: string; time_p
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string; updated_at: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
-type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string; archived_at?: string | null };
+type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string; archived_at?: string | null; updated_at?: string };
 type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
 type ReviewerResult = { status: "pass" | "fail" | "pending" | "provider_failed"; state?: string; message?: string; results?: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; severity?: "critical" | "major" | "advisory"; description: string; recommended_action?: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
@@ -134,6 +134,7 @@ export default function Home() {
   const [requirementsEditDraft, setRequirementsEditDraft] = useState<ApplicationRequirementsCorrectionDraft | null>(null);
   const [requirementsError, setRequirementsError] = useState("");
   const [applicationDecision, setApplicationDecision] = useState<ApplicationDecision | null>(null);
+  const [applicationDecisionCurrent, setApplicationDecisionCurrent] = useState(false);
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [isEditingRequirements, setIsEditingRequirements] = useState(false);
   const requirementsRequestId = useRef(0);
@@ -519,8 +520,8 @@ export default function Home() {
     setApplications((current) => current.map((application) => application.id === result.id ? result : application));
     setConfirmedApplication(null);
     setQualityResult(null);
-    setDocuments([]); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
-    await Promise.all([loadApplicationRequirements(selectedApplication), loadSources(selectedApplication)]);
+    setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+    await openApplication(selectedApplication);
     setNotice("Saved job details updated. Earlier documents are now historical; diagnose and regenerate from the current job.");
   }
 
@@ -651,6 +652,12 @@ export default function Home() {
     } : current);
   }
 
+  function toggleDocumentGeneration(documentType: "cover_letter" | "selection_criteria", enabled: boolean) {
+    updateRequirementDocument(documentType, enabled
+      ? { requirement: "required", format: "standalone" }
+      : { requirement: "not_required", format: "not_applicable" });
+  }
+
   function toggleRequirementLimit(documentType: "cover_letter" | "selection_criteria", enabled: boolean) {
     const limit: SubmissionLimit | null = enabled
       ? { value: 1, unit: "pages", scope: "document", constraint: "maximum", source_text: "User-corrected limit" }
@@ -699,6 +706,7 @@ export default function Home() {
     setConfirmedApplication(null);
     setQualityResult(null);
     setApplicationDecision(null);
+    setApplicationDecisionCurrent(false);
     setReleaseChecklist(null);
     setPackReviewResult(null);
     setAtsResult(null);
@@ -712,7 +720,10 @@ export default function Home() {
     setDocuments(loaded);
     if (decisionResponse.ok) {
       const result = await decisionResponse.json() as { decision: ApplicationDecision; current: boolean };
-      if (result.current) setApplicationDecision(result.decision);
+      if (result.decision?.status) {
+        setApplicationDecision(result.decision);
+        setApplicationDecisionCurrent(result.current);
+      }
     }
     const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
     setActiveType(firstAvailable || "tailored_resume");
@@ -814,9 +825,9 @@ export default function Home() {
       setPackNotice(message);
     };
     const documentTypes = requiredGeneratedDocumentTypes(applicationRequirements);
-    if (!documentTypes.length) return showPackNotice("Resolve and confirm the employer's document requirements before generating.");
+    const defaultTypes: readonly (typeof packTypes[number])[] = ["tailored_resume", "cover_letter"];
     const includesSelectionCriteria = documentTypes.includes("selection_criteria");
-    let generationTypes: readonly (typeof packTypes[number])[] = documentTypes;
+    let generationTypes: readonly (typeof packTypes[number])[] = documentTypes.length ? documentTypes : defaultTypes;
     let selectionCriteriaSkipped = false;
     if (includesSelectionCriteria) {
       const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
@@ -992,6 +1003,7 @@ export default function Home() {
     setDecisionBusy(false);
     if (!response.ok) return setPackNotice(result.detail || "Could not diagnose this application.");
     setApplicationDecision(result);
+    setApplicationDecisionCurrent(true);
     setPackNotice(result.status === "ready" ? "Diagnosis ready. Review it before generating." : "Diagnosis needs your confirmation.");
   }
 
@@ -1005,6 +1017,7 @@ export default function Home() {
     setDecisionBusy(false);
     if (!response.ok) return setPackNotice(result.detail || "Could not save this confirmation.");
     setApplicationDecision(result);
+    setApplicationDecisionCurrent(true);
   }
 
   async function reviewAndApply() {
@@ -1101,6 +1114,37 @@ export default function Home() {
     setNotice(`${result.position_title} ${action === "archive" ? "archived" : "restored"}.`);
   }
 
+  async function deleteDraftApplication(application: Application) {
+    if (!window.confirm(`Delete the draft for ${application.position_title}? You can then create a new job from the correct JD.`)) return;
+    const response = await authenticatedFetch(`${api}/applications/${application.id}`, { method: "DELETE" });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      return setNotice(result.detail || "Could not delete the draft application.");
+    }
+    setApplications((current) => current.filter((item) => item.id !== application.id));
+    if (selectedApplication === application.id) {
+      setSelectedApplication(null); setDocuments([]); setApplicationRequirements(null); setApplicationDecision(null);
+      setReleaseChecklist(null); setQualityResult(null); setPackNotice("");
+    }
+    setNotice(`${application.position_title} was deleted. Create a new application when you are ready.`);
+  }
+
+  async function permanentlyDeleteApplication(application: Application) {
+    if (!window.confirm(`Permanently delete ${application.position_title}? This removes its documents and application history and cannot be undone.`)) return;
+    const positionTitle = window.prompt(`Type the exact position title to confirm:\n${application.position_title}`);
+    if (positionTitle === null) return;
+    const response = await authenticatedFetch(`${api}/applications/${application.id}/permanent`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ position_title: positionTitle }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      return setNotice(result.detail || "Could not permanently delete the application.");
+    }
+    setApplications((current) => current.filter((item) => item.id !== application.id));
+    if (selectedApplication === application.id) setSelectedApplication(null);
+    setNotice(`${application.position_title} was permanently deleted.`);
+  }
+
   async function createLocalBackup() {
     const response = await authenticatedFetch(`${api}/backups`, { method: "POST" });
     const result = await response.json();
@@ -1148,6 +1192,7 @@ export default function Home() {
   }
 
   const selected = applications.find((application) => application.id === selectedApplication);
+  const documentsNeedRegeneration = Boolean(selected?.updated_at && documents.some((document) => new Date(document.created_at) < new Date(selected.updated_at as string)));
   const selectionPlan = useMemo(() => {
     try { return JSON.parse(selected?.selection_plan_json || "{}").items as SelectionPlanItem[] || []; } catch { return []; }
   }, [selected?.selection_plan_json]);
@@ -1214,8 +1259,7 @@ export default function Home() {
   const requiredPackTypes = requiredGeneratedDocumentTypes(applicationRequirements);
   const generationLabel = requiredPackTypes.length
     ? `Generate ${requiredPackTypes.map((type) => labels[type]).join(requiredPackTypes.length > 1 ? ", " : "")}`.replace(/, ([^,]+)$/, " & $1")
-    : "Choose documents first";
-  const requirementsReady = Boolean(applicationRequirements && applicationRequirements.review_status !== "needs_confirmation" && !requirementsHasUnknown(applicationRequirements) && applicationRequirements.completeness !== "incomplete");
+    : "Generate Resume & Cover Letter";
   const packReady = requiredPackTypes.length > 0 && requiredPackTypes.every((type) => latestDocuments[type]);
   const active = activeApplications(applications);
   const archived = archivedApplications(applications);
@@ -1406,7 +1450,7 @@ export default function Home() {
         <div className="trackerList">
           {filteredApplications.length ? filteredApplications.map((application) => <div className="trackerRow" key={application.id}>
             <button type="button" className="trackerJob" onClick={() => openApplication(application.id)}><strong>{application.position_title}</strong><small>{application.company}{application.submitted_at ? ` · Applied ${new Date(application.submitted_at).toLocaleDateString()}` : ""}{application.submission_reference ? ` · ${application.submission_reference}` : ""}</small></button>
-            <select aria-label={`Status for ${application.position_title}`} value={application.status} onChange={(event) => updateApplicationStatus(application, event.target.value)}>{applicationStatuses.map((status) => <option value={status} key={status}>{statusLabels[status]}</option>)}</select>
+            <div className="selectedActions"><select aria-label={`Status for ${application.position_title}`} value={application.status} onChange={(event) => updateApplicationStatus(application, event.target.value)}>{applicationStatuses.map((status) => <option value={status} key={status}>{statusLabels[status]}</option>)}</select><button type="button" className="secondary" onClick={() => updateApplicationArchive(application, application.archived_at ? "restore" : "archive")}>{application.archived_at ? "Restore" : "Archive"}</button>{application.archived_at && <button type="button" className="secondary dangerButton" onClick={() => permanentlyDeleteApplication(application)}>Delete permanently</button>}</div>
           </div>) : <p className="helper">No applications in this status.</p>}
         </div>
       </section>
@@ -1421,11 +1465,11 @@ export default function Home() {
           </aside>
           <div className="reviewArea">
             {selected ? <>
-              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions"><button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button><button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button><button disabled={busy || !resumes.length || !requirementsReady || !canGenerate(applicationDecision?.status, confirmedApplication === selected.id)} title={!requirementsReady ? "Choose and confirm the documents for this application first." : confirmedApplication !== selected.id ? "Confirm the applicant and contact details first." : applicationDecision?.status !== "ready" ? "Complete the application match check first." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div></div>
+              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions">{selected.status === "draft" ? <button className="secondary dangerButton" type="button" onClick={() => deleteDraftApplication(selected)}>Delete draft</button> : <button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button>}{selected.archived_at && <button className="secondary dangerButton" type="button" onClick={() => permanentlyDeleteApplication(selected)}>Delete permanently</button>}<button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button></div></div>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
-                <div><strong>Confirm before generating</strong><p>Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}</p></div>
+                <div><strong>Check application details</strong><p>Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}</p></div>
                 <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={confirmReleaseDetails}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
               </div>
               <section className={`requirementsCard ${applicationRequirements && requirementsHasUnknown(applicationRequirements) ? "needs_confirmation" : applicationRequirements?.review_status || "loading"}`} aria-live="polite">
@@ -1437,26 +1481,27 @@ export default function Home() {
                 {requirementsLoadState === "error" && <div className="requirementsError" role="alert"><strong>Requirements could not be loaded</strong><p>{requirementsError}</p><button type="button" className="secondary" onClick={() => loadApplicationRequirements(selected.id)}>Retry</button></div>}
                 {requirementsLoadState === "success" && applicationRequirements && <>
                   {applicationRequirements.source === "legacy_inference" && <div className="legacyRequirementNotice"><strong>Legacy estimate</strong><p>These requirements were inferred from the previous application-pack behaviour. Check them against the job advertisement.</p></div>}
-                  <p className="requirementsStatusHelp">{applicationRequirements.review_status === "needs_confirmation" ? "Review these document choices before generating." : applicationRequirements.review_status === "confirmed" ? "You confirmed these document choices." : "Your document choices are saved."}</p>
+                  <p className="requirementsStatusHelp">Resume and Cover Letter are included by default. Selection Criteria is off unless you choose it.</p>
                   {requirementsSavedMessage && <p className="saveStatus" data-state="saved" role="status">{requirementsSavedMessage}</p>}
                   {requirementsHasUnknown(applicationRequirements) && <div className="unknownRequirementNotice"><strong>⚠ We’re not sure what documents this employer wants.</strong><p>Review requirements and decide:</p><ul>{unresolvedRequirementLabels(applicationRequirements).map((label) => <li key={label}>{label}</li>)}</ul></div>}
                   {!isEditingRequirements ? <>
                     <div className="documentChoices">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; const title = name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"; return <article className="documentChoice" key={name}><span aria-hidden="true">{document.requirement === "required" ? "✓" : "○"}</span><div><strong>{title}</strong><small>{documentChoiceLabel(document)}</small>{name === "selection_criteria" && document.format === "embedded_in_cover_letter" && <small>Addressed inside the Cover Letter</small>}</div></article>; })}</div>
                     <details className="requirementsSource"><summary>View requirement details</summary><div className="requirementsGrid">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; return <article key={name}><strong>{name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"}</strong><dl><div><dt>Choice</dt><dd>{formatRequirementLabel(document.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(document.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(document.limit)}</dd></div></dl></article>; })}</div></details>
                     {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
-                    {applicationRequirements.warnings.length > 0 && <div className="requirementsWarnings"><strong>Check these parser warnings</strong><ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
+                    {applicationRequirements.warnings.length > 0 && <details className="requirementsSource"><summary>View source notes</summary><ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></details>}
                     <details className="requirementsSource"><summary>Why this was detected</summary>{applicationRequirements.source_excerpt ? <blockquote>{applicationRequirements.source_excerpt}</blockquote> : applicationRequirements.source === "legacy_inference" ? <p>No source excerpt is available for this legacy application.</p> : <p>No source excerpt was identified.</p>}{applicationRequirements.source_text && <details><summary>Show full source</summary><pre>{applicationRequirements.source_text}</pre></details>}</details>
                     {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
-                    <div className="requirementsActions"><button type="button" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Review / change documents</button>{requirementsNeedConfirmation(applicationRequirements) && <button type="button" className="secondary" onClick={confirmApplicationRequirements} disabled={requirementsSaveState === "saving" || requirementsHasUnknown(applicationRequirements)} title={requirementsHasUnknown(applicationRequirements) ? "Decide the unresolved document choices first." : ""}>{requirementsSaveState === "saving" ? "Saving…" : "Confirm document choices"}</button>}</div>
+                    <div className="requirementsActions"><button type="button" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Change documents or format</button></div>
                   </> : requirementsEditDraft && <div className="requirementsEditor">
                     <p className="editModeNotice"><strong>Editing document choices</strong> — save your changes below.</p>
-                    <fieldset><legend>Resume</legend><div className="requirementEditGrid"><label>Requirement<select value={requirementsEditDraft.documents.resume.requirement} onChange={(event) => updateRequirementDocument("resume", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Format<select value={requirementsEditDraft.documents.resume.format} onChange={(event) => updateRequirementDocument("resume", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></div></fieldset>
-                    <fieldset><legend>Cover Letter</legend><div className="requirementEditGrid"><label>Requirement<select value={requirementsEditDraft.documents.cover_letter.requirement} onChange={(event) => updateRequirementDocument("cover_letter", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Format<select value={requirementsEditDraft.documents.cover_letter.format} onChange={(event) => updateRequirementDocument("cover_letter", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></div><RequirementLimitEditor limit={requirementsEditDraft.documents.cover_letter.limit} onToggle={(enabled) => toggleRequirementLimit("cover_letter", enabled)} onChange={(changes) => updateRequirementLimit("cover_letter", changes)} /></fieldset>
-                    <fieldset><legend>Selection Criteria</legend><div className="requirementEditGrid"><label>Submission requirement<select value={requirementsEditDraft.documents.selection_criteria.requirement} onChange={(event) => updateRequirementDocument("selection_criteria", { requirement: event.target.value as RequirementValue })}>{requirementOptions.map((option) => <option value={option} key={option}>{formatRequirementLabel(option)}</option>)}</select></label><label>Response format<select value={requirementsEditDraft.documents.selection_criteria.format} onChange={(event) => updateRequirementDocument("selection_criteria", { format: event.target.value as DocumentFormat })}>{selectionFormatOptions.map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><label>Criteria count <em>leave blank if unknown</em><input type="number" min="0" value={requirementsEditDraft.documents.selection_criteria.criteria_count ?? ""} onChange={(event) => updateRequirementDocument("selection_criteria", { criteria_count: event.target.value === "" ? null : Number(event.target.value) })} /></label></div><RequirementLimitEditor limit={requirementsEditDraft.documents.selection_criteria.limit} onToggle={(enabled) => toggleRequirementLimit("selection_criteria", enabled)} onChange={(changes) => updateRequirementLimit("selection_criteria", changes)} /></fieldset>
+                    <fieldset><legend>Resume</legend><p className="helper">Always included with a valid Master Resume.</p><label>Format<select value={requirementsEditDraft.documents.resume.format} onChange={(event) => updateRequirementDocument("resume", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></fieldset>
+                    <fieldset><legend>Cover Letter</legend><label className="requirementCheckbox"><input type="checkbox" checked={requirementsEditDraft.documents.cover_letter.requirement === "required"} onChange={(event) => toggleDocumentGeneration("cover_letter", event.target.checked)} /> Generate a Cover Letter</label>{requirementsEditDraft.documents.cover_letter.requirement === "required" && <><label>Format<select value={requirementsEditDraft.documents.cover_letter.format} onChange={(event) => updateRequirementDocument("cover_letter", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><RequirementLimitEditor limit={requirementsEditDraft.documents.cover_letter.limit} onToggle={(enabled) => toggleRequirementLimit("cover_letter", enabled)} onChange={(changes) => updateRequirementLimit("cover_letter", changes)} /></>}</fieldset>
+                    <fieldset><legend>Selection Criteria</legend><label className="requirementCheckbox"><input type="checkbox" checked={requirementsEditDraft.documents.selection_criteria.requirement === "required"} onChange={(event) => toggleDocumentGeneration("selection_criteria", event.target.checked)} /> Generate Selection Criteria</label>{requirementsEditDraft.documents.selection_criteria.requirement === "required" && <><label>Response format<select value={requirementsEditDraft.documents.selection_criteria.format} onChange={(event) => updateRequirementDocument("selection_criteria", { format: event.target.value as DocumentFormat })}>{selectionFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><label>Criteria count <em>leave blank if unknown</em><input type="number" min="0" value={requirementsEditDraft.documents.selection_criteria.criteria_count ?? ""} onChange={(event) => updateRequirementDocument("selection_criteria", { criteria_count: event.target.value === "" ? null : Number(event.target.value) })} /></label><RequirementLimitEditor limit={requirementsEditDraft.documents.selection_criteria.limit} onToggle={(enabled) => toggleRequirementLimit("selection_criteria", enabled)} onChange={(changes) => updateRequirementLimit("selection_criteria", changes)} /></>}</fieldset>
                     {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><p className="helper">Shown for reference in this first editor version.</p><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                     {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
                     <div className="requirementsActions"><button type="button" onClick={saveApplicationRequirementsCorrections} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Save corrections"}</button><button type="button" className="secondary" onClick={cancelRequirementsEdit} disabled={requirementsSaveState === "saving"}>Cancel</button></div>
                   </div>}
+                  <div className="requirementsActions"><button type="button" disabled={busy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div>
                 </>}
               </section>
               <section className="sourcesCard" aria-live="polite">
@@ -1474,13 +1519,14 @@ export default function Home() {
                 {sourcesLoadState === "success" && sourcesError && <p className="requirementsError" role="alert">{sourcesError}</p>}
               </section>
               <section className={`requirementsCard ${applicationDecision?.status || "loading"}`} aria-live="polite">
-                <div className="requirementsHeading"><div><strong>Stage 1 · Application diagnosis</strong><small>Evidence decisions guide whether and how to proceed; they are not applicant evidence.</small></div>{applicationDecision && <span className="requirementsStatus">{decisionLabel(applicationDecision.application_recommendation)}</span>}</div>
-                {!applicationDecision ? <><p className="helper">Check evidence coverage, risks and material eligibility questions before generation.</p><button type="button" onClick={diagnoseApplication} disabled={decisionBusy || !resumes.length}>{decisionBusy ? "Diagnosing…" : "Diagnose application"}</button></> : <>
-                  {applicationDecision.blocking_issues.length > 0 && <div className="requirementsError"><strong>Blocking issues</strong><ul>{applicationDecision.blocking_issues.map((issue) => <li key={issue.criteria_id}>{issue.message}</li>)}</ul></div>}
+                <div className="requirementsHeading"><div><strong>Application diagnosis</strong><small>Optional guidance about evidence coverage and application risks.</small></div>{applicationDecision && <span className="requirementsStatus">{decisionLabel(applicationDecision.application_recommendation)}</span>}</div>
+                {!applicationDecision ? <><p className="helper">Generate when you are ready, or run a diagnosis first for tailored suggestions.</p><button type="button" onClick={diagnoseApplication} disabled={decisionBusy || !resumes.length}>{decisionBusy ? "Checking…" : "Check application"}</button></> : <>
+                  {!applicationDecisionCurrent && <div className="requirementsWarnings"><strong>Based on changed job details</strong><p>Run the check again before relying on this diagnosis.</p></div>}
+                  {applicationDecision.diagnosed_at && <p className="helper">Last checked: {new Date(applicationDecision.diagnosed_at).toLocaleString()}</p>}
+                  {applicationDecision.blocking_issues.length > 0 && <div className="requirementsWarnings"><strong>Things to review</strong><ul>{applicationDecision.blocking_issues.map((issue) => <li key={issue.criteria_id}>{issue.message}</li>)}</ul></div>}
                   <div className="requirementsGrid">{applicationDecision.requirements.map((item) => <article key={item.criteria_id}><strong>{item.requirement_text}</strong><dl><div><dt>Importance</dt><dd>{decisionLabel(item.importance)}</dd></div><div><dt>Evidence</dt><dd>{item.evidence_classification ? decisionLabel(item.evidence_classification) : "Unsupported — no candidate conclusion"}</dd></div><div><dt>Risk</dt><dd>{decisionLabel(item.risk)}</dd></div><div><dt>Action</dt><dd>{decisionLabel(item.recommended_action)}</dd></div></dl></article>)}</div>
                   {applicationDecision.questions.filter((question) => question.material).map((question) => <div className="confirmCard" key={question.question_id}><div><strong>Material confirmation</strong><p>{question.prompt}</p>{question.answer !== null && <small>Recorded as {question.answer ? "Yes" : "No"} · user confirmed</small>}</div><div className="selectedActions"><button type="button" onClick={() => answerDecisionQuestion(question.question_id, true)} disabled={decisionBusy}>Yes</button><button type="button" className="secondary" onClick={() => answerDecisionQuestion(question.question_id, false)} disabled={decisionBusy}>No</button></div></div>)}
-                  {applicationDecision.status === "ready" && confirmedApplication !== selected.id && <p className="unknownRequirementNotice"><strong>One more confirmation is required.</strong> Confirm the applicant, job and contact details above before Generate is enabled.</p>}
-                  <button type="button" className="secondary" onClick={diagnoseApplication} disabled={decisionBusy}>{decisionBusy ? "Diagnosing…" : "Run diagnosis again"}</button>
+                  <button type="button" className="secondary" onClick={diagnoseApplication} disabled={decisionBusy}>{decisionBusy ? "Checking…" : "Run diagnosis again"}</button>
                 </>}
               </section>
               <details className="jobEditPanel" key={`edit-${selected.id}`}>
@@ -1496,6 +1542,7 @@ export default function Home() {
                 </form>
               </details>
               {documents.length ? <>
+                {documentsNeedRegeneration && <div className="requirementsWarnings"><strong>Earlier documents need regeneration</strong><p>They were created before the latest job details or document choices were saved.</p></div>}
                 {releaseChecklist && <section className={`releaseChecklist ${releaseChecklist.ready ? "pass" : "pending"}`}>
                   <div className="requirementsHeading"><div><strong>Check application</strong><small>Checks accuracy, consistency and Resume compatibility before you apply.</small></div><span className="requirementsStatus">{releaseChecklist.ready ? "Ready to apply" : documents.some((document) => { try { return ["pending", "provider_failed"].includes(JSON.parse(document.reviewer_json || "{}").status); } catch { return false; } }) ? "Needs attention" : releaseChecklist.checks.final_check.ready ? "Documents reviewed" : "Draft"}</span></div>
                   <ul className="releaseChecks">
