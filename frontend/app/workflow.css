@@ -37,6 +37,7 @@
 .documentChoices { display: grid; gap: 10px; margin: 12px 0; }
 .documentChoice { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
 .documentChoice > span { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; background: #e8f4ef; color: var(--accent-dark); font-weight: 900; }
+.documentChoice > input { width: 20px; height: 20px; margin: 0 2px; accent-color: var(--accent); }
 .documentChoice div { display: grid; gap: 2px; }
 .documentChoice small { color: var(--muted); }
 .editModeNotice { padding: 10px 12px; border-left: 4px solid var(--accent); background: #eef7f5; }

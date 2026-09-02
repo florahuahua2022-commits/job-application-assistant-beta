@@ -118,11 +118,11 @@ export function unresolvedRequirementLabels(requirements: ApplicationRequirement
 
 export function requiredGeneratedDocumentTypes(requirements: ApplicationRequirements | null): ("tailored_resume" | "cover_letter" | "selection_criteria")[] {
   if (!requirements) return [];
-  const mapping = { resume: "tailored_resume", cover_letter: "cover_letter", selection_criteria: "selection_criteria" } as const;
-  return (Object.keys(mapping) as (keyof typeof mapping)[]).filter((key) => {
+  const mapping = { cover_letter: "cover_letter", selection_criteria: "selection_criteria" } as const;
+  return ["tailored_resume", ...(Object.keys(mapping) as (keyof typeof mapping)[]).filter((key) => {
     const document = requirements.documents[key];
     return document.requirement === "required" && document.format === "standalone";
-  }).map((key) => mapping[key]);
+  }).map((key) => mapping[key])];
 }
 
 export function createCorrectionDraft(requirements: ApplicationRequirements): ApplicationRequirementsCorrectionDraft {

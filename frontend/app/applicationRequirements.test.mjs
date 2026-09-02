@@ -20,6 +20,17 @@ test("structured requirements alone control standalone document tabs and generat
   assert.deepEqual(requiredGeneratedDocumentTypes(requirements), ["tailored_resume", "cover_letter"]);
 });
 
+test("the Resume is always generated when document requirements are loaded", () => {
+  const requirements = {
+    documents: {
+      resume: { requirement: "optional", format: "not_applicable", limit: null },
+      cover_letter: { requirement: "not_required", format: "not_applicable", limit: null },
+      selection_criteria: { requirement: "not_required", format: "not_applicable", limit: null },
+    },
+  };
+  assert.deepEqual(requiredGeneratedDocumentTypes(requirements), ["tailored_resume"]);
+});
+
 test("a material unknown format remains unresolved", () => {
   const requirements = {
     documents: {
@@ -29,7 +40,7 @@ test("a material unknown format remains unresolved", () => {
     },
   };
   assert.equal(requirementsHasUnknown(requirements), true);
-  assert.deepEqual(requiredGeneratedDocumentTypes(requirements), []);
+  assert.deepEqual(requiredGeneratedDocumentTypes(requirements), ["tailored_resume"]);
   assert.deepEqual(unresolvedRequirementLabels(requirements), ["Resume format"]);
 });
 

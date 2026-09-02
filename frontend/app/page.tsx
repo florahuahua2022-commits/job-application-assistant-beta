@@ -652,7 +652,7 @@ export default function Home() {
     } : current);
   }
 
-  function toggleDocumentGeneration(documentType: "cover_letter" | "selection_criteria", enabled: boolean) {
+  function toggleDraftDocumentGeneration(documentType: "cover_letter" | "selection_criteria", enabled: boolean) {
     updateRequirementDocument(documentType, enabled
       ? { requirement: "required", format: "standalone" }
       : { requirement: "not_required", format: "not_applicable" });
@@ -671,15 +671,15 @@ export default function Home() {
     updateRequirementDocument(documentType, { limit: { ...currentLimit, ...changes, source_text: "User-corrected limit" } });
   }
 
-  async function saveApplicationRequirementsCorrections() {
-    if (!selectedApplication || !requirementsEditDraft || requirementsSaveState === "saving") return;
+  async function saveApplicationRequirementsCorrections(draft = requirementsEditDraft) {
+    if (!selectedApplication || !draft || requirementsSaveState === "saving") return;
     setRequirementsSaveState("saving");
     setRequirementsError("");
     try {
       const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/application-requirements`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "correct", ...requirementsEditDraft }),
+        body: JSON.stringify({ action: "correct", ...draft }),
       });
       const result = await response.json().catch(() => null) as ApplicationRequirementsResponse | { detail?: string } | null;
       if (!response.ok || !result || !("requirements" in result)) {
@@ -698,6 +698,18 @@ export default function Home() {
       setRequirementsSaveState("error");
       setRequirementsError("Could not save the requirement corrections. Check the connection and try again.");
     }
+  }
+
+  async function toggleDocumentGeneration(documentType: "cover_letter" | "selection_criteria", enabled: boolean) {
+    if (!applicationRequirements) return;
+    const draft = createCorrectionDraft(applicationRequirements);
+    draft.documents[documentType] = {
+      ...draft.documents[documentType],
+      requirement: enabled ? "required" : "not_required",
+      format: enabled ? "standalone" : "not_applicable",
+      basis: "user_confirmed",
+    };
+    await saveApplicationRequirementsCorrections(draft);
   }
 
   async function openApplication(id: number) {
@@ -1466,6 +1478,18 @@ export default function Home() {
           <div className="reviewArea">
             {selected ? <>
               <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions">{selected.status === "draft" ? <button className="secondary dangerButton" type="button" onClick={() => deleteDraftApplication(selected)}>Delete draft</button> : <button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button>}{selected.archived_at && <button className="secondary dangerButton" type="button" onClick={() => permanentlyDeleteApplication(selected)}>Delete permanently</button>}<button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button></div></div>
+              <details className="jobEditPanel" key={`edit-${selected.id}`}>
+                <summary>Edit saved job details</summary>
+                <form onSubmit={updateSavedJob} className="compactForm">
+                  <label>Organisation<input name="company" defaultValue={selected.company} required /></label>
+                  <label>Position title<input name="position_title" defaultValue={selected.position_title} required /></label>
+                  <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
+                  <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
+                  <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} placeholder="Full criteria or a short instruction" /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
+                  <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
+                  <button className="full">Save job changes</button>
+                </form>
+              </details>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
@@ -1485,21 +1509,21 @@ export default function Home() {
                   {requirementsSavedMessage && <p className="saveStatus" data-state="saved" role="status">{requirementsSavedMessage}</p>}
                   {requirementsHasUnknown(applicationRequirements) && <div className="unknownRequirementNotice"><strong>⚠ We’re not sure what documents this employer wants.</strong><p>Review requirements and decide:</p><ul>{unresolvedRequirementLabels(applicationRequirements).map((label) => <li key={label}>{label}</li>)}</ul></div>}
                   {!isEditingRequirements ? <>
-                    <div className="documentChoices">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; const title = name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"; return <article className="documentChoice" key={name}><span aria-hidden="true">{document.requirement === "required" ? "✓" : "○"}</span><div><strong>{title}</strong><small>{documentChoiceLabel(document)}</small>{name === "selection_criteria" && document.format === "embedded_in_cover_letter" && <small>Addressed inside the Cover Letter</small>}</div></article>; })}</div>
+                    <div className="documentChoices">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; const title = name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"; const selectedForGeneration = name === "resume" || document.requirement === "required"; return <article className="documentChoice" key={name}>{name === "resume" ? <span aria-hidden="true">✓</span> : <input aria-label={`Generate ${title}`} type="checkbox" checked={selectedForGeneration} disabled={requirementsSaveState === "saving"} onChange={(event) => void toggleDocumentGeneration(name, event.target.checked)} />}<div><strong>{title}</strong><small>{name === "resume" ? "Always included" : selectedForGeneration ? "Will be generated" : "Click to include"}</small>{name === "selection_criteria" && document.format === "embedded_in_cover_letter" && <small>Addressed inside the Cover Letter</small>}</div></article>; })}</div>
                     <details className="requirementsSource"><summary>View requirement details</summary><div className="requirementsGrid">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; return <article key={name}><strong>{name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"}</strong><dl><div><dt>Choice</dt><dd>{formatRequirementLabel(document.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(document.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(document.limit)}</dd></div></dl></article>; })}</div></details>
                     {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                     {applicationRequirements.warnings.length > 0 && <details className="requirementsSource"><summary>View source notes</summary><ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></details>}
                     <details className="requirementsSource"><summary>Why this was detected</summary>{applicationRequirements.source_excerpt ? <blockquote>{applicationRequirements.source_excerpt}</blockquote> : applicationRequirements.source === "legacy_inference" ? <p>No source excerpt is available for this legacy application.</p> : <p>No source excerpt was identified.</p>}{applicationRequirements.source_text && <details><summary>Show full source</summary><pre>{applicationRequirements.source_text}</pre></details>}</details>
                     {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
-                    <div className="requirementsActions"><button type="button" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Change documents or format</button></div>
+                    <div className="requirementsActions"><button type="button" className="secondary" onClick={beginRequirementsEdit} disabled={requirementsSaveState === "saving"}>Advanced format options</button></div>
                   </> : requirementsEditDraft && <div className="requirementsEditor">
                     <p className="editModeNotice"><strong>Editing document choices</strong> — save your changes below.</p>
                     <fieldset><legend>Resume</legend><p className="helper">Always included with a valid Master Resume.</p><label>Format<select value={requirementsEditDraft.documents.resume.format} onChange={(event) => updateRequirementDocument("resume", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label></fieldset>
-                    <fieldset><legend>Cover Letter</legend><label className="requirementCheckbox"><input type="checkbox" checked={requirementsEditDraft.documents.cover_letter.requirement === "required"} onChange={(event) => toggleDocumentGeneration("cover_letter", event.target.checked)} /> Generate a Cover Letter</label>{requirementsEditDraft.documents.cover_letter.requirement === "required" && <><label>Format<select value={requirementsEditDraft.documents.cover_letter.format} onChange={(event) => updateRequirementDocument("cover_letter", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><RequirementLimitEditor limit={requirementsEditDraft.documents.cover_letter.limit} onToggle={(enabled) => toggleRequirementLimit("cover_letter", enabled)} onChange={(changes) => updateRequirementLimit("cover_letter", changes)} /></>}</fieldset>
-                    <fieldset><legend>Selection Criteria</legend><label className="requirementCheckbox"><input type="checkbox" checked={requirementsEditDraft.documents.selection_criteria.requirement === "required"} onChange={(event) => toggleDocumentGeneration("selection_criteria", event.target.checked)} /> Generate Selection Criteria</label>{requirementsEditDraft.documents.selection_criteria.requirement === "required" && <><label>Response format<select value={requirementsEditDraft.documents.selection_criteria.format} onChange={(event) => updateRequirementDocument("selection_criteria", { format: event.target.value as DocumentFormat })}>{selectionFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><label>Criteria count <em>leave blank if unknown</em><input type="number" min="0" value={requirementsEditDraft.documents.selection_criteria.criteria_count ?? ""} onChange={(event) => updateRequirementDocument("selection_criteria", { criteria_count: event.target.value === "" ? null : Number(event.target.value) })} /></label><RequirementLimitEditor limit={requirementsEditDraft.documents.selection_criteria.limit} onToggle={(enabled) => toggleRequirementLimit("selection_criteria", enabled)} onChange={(changes) => updateRequirementLimit("selection_criteria", changes)} /></>}</fieldset>
+                    <fieldset><legend>Cover Letter</legend><label className="requirementCheckbox"><input type="checkbox" checked={requirementsEditDraft.documents.cover_letter.requirement === "required"} onChange={(event) => toggleDraftDocumentGeneration("cover_letter", event.target.checked)} /> Generate a Cover Letter</label>{requirementsEditDraft.documents.cover_letter.requirement === "required" && <><label>Format<select value={requirementsEditDraft.documents.cover_letter.format} onChange={(event) => updateRequirementDocument("cover_letter", { format: event.target.value as DocumentFormat })}>{coverFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><RequirementLimitEditor limit={requirementsEditDraft.documents.cover_letter.limit} onToggle={(enabled) => toggleRequirementLimit("cover_letter", enabled)} onChange={(changes) => updateRequirementLimit("cover_letter", changes)} /></>}</fieldset>
+                    <fieldset><legend>Selection Criteria</legend><label className="requirementCheckbox"><input type="checkbox" checked={requirementsEditDraft.documents.selection_criteria.requirement === "required"} onChange={(event) => toggleDraftDocumentGeneration("selection_criteria", event.target.checked)} /> Generate Selection Criteria</label>{requirementsEditDraft.documents.selection_criteria.requirement === "required" && <><label>Response format<select value={requirementsEditDraft.documents.selection_criteria.format} onChange={(event) => updateRequirementDocument("selection_criteria", { format: event.target.value as DocumentFormat })}>{selectionFormatOptions.filter((option) => option !== "not_applicable" && option !== "unknown").map((option) => <option value={option} key={option}>{formatDocumentFormat(option)}</option>)}</select></label><label>Criteria count <em>leave blank if unknown</em><input type="number" min="0" value={requirementsEditDraft.documents.selection_criteria.criteria_count ?? ""} onChange={(event) => updateRequirementDocument("selection_criteria", { criteria_count: event.target.value === "" ? null : Number(event.target.value) })} /></label><RequirementLimitEditor limit={requirementsEditDraft.documents.selection_criteria.limit} onToggle={(enabled) => toggleRequirementLimit("selection_criteria", enabled)} onChange={(changes) => updateRequirementLimit("selection_criteria", changes)} /></>}</fieldset>
                     {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><p className="helper">Shown for reference in this first editor version.</p><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                     {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
-                    <div className="requirementsActions"><button type="button" onClick={saveApplicationRequirementsCorrections} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Save corrections"}</button><button type="button" className="secondary" onClick={cancelRequirementsEdit} disabled={requirementsSaveState === "saving"}>Cancel</button></div>
+                    <div className="requirementsActions"><button type="button" onClick={() => void saveApplicationRequirementsCorrections()} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Save corrections"}</button><button type="button" className="secondary" onClick={cancelRequirementsEdit} disabled={requirementsSaveState === "saving"}>Cancel</button></div>
                   </div>}
                   <div className="requirementsActions"><button type="button" disabled={busy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div>
                 </>}
@@ -1529,18 +1553,6 @@ export default function Home() {
                   <button type="button" className="secondary" onClick={diagnoseApplication} disabled={decisionBusy}>{decisionBusy ? "Checking…" : "Run diagnosis again"}</button>
                 </>}
               </section>
-              <details className="jobEditPanel" key={`edit-${selected.id}`}>
-                <summary>Edit saved job details</summary>
-                <form onSubmit={updateSavedJob} className="compactForm">
-                  <label>Organisation<input name="company" defaultValue={selected.company} required /></label>
-                  <label>Position title<input name="position_title" defaultValue={selected.position_title} required /></label>
-                  <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
-                  <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
-                  <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} placeholder="Full criteria or a short instruction" /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
-                  <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
-                  <button className="full">Save job changes</button>
-                </form>
-              </details>
               {documents.length ? <>
                 {documentsNeedRegeneration && <div className="requirementsWarnings"><strong>Earlier documents need regeneration</strong><p>They were created before the latest job details or document choices were saved.</p></div>}
                 {releaseChecklist && <section className={`releaseChecklist ${releaseChecklist.ready ? "pass" : "pending"}`}>
