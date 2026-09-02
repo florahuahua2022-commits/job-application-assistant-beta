@@ -336,7 +336,7 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = deepseek_call.call_args.args[0]
         self.assertIn("Do not infer a recruiter/client relationship", prompt)
         self.assertIn("use 'Yours faithfully' after a generic salutation", prompt)
-        self.assertIn("Never use 'RE:'", prompt)
+        self.assertIn("'RE: [POSITION TITLE]'", prompt)
 
     def test_cover_letter_prompt_uses_traceable_priority_and_narrative_plan(self):
         plan = '{"schema_version":"1.0","priorities":[{"criteria_id":"C1","requirement":"Stakeholder engagement"}],"selected_evidence":[{"evidence_id":"EV1"}],"narrative_plan":[{"section":"role_and_organisation_alignment","target_share":0.45}]}'
@@ -349,7 +349,7 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("COVER LETTER PLAN", prompt)
         self.assertIn("role_and_organisation_alignment", prompt)
         self.assertIn("follow the COVER LETTER PLAN as authoritative", prompt)
-        self.assertIn("do not turn the letter into a response to every Selection Criteria item", prompt)
+        self.assertIn("when Selection Criteria is embedded", prompt)
         self.assertIn("If motivation is absent or 'Not provided'", prompt)
         self.assertIn("Prefer a distinct comparable differentiator", prompt)
 
@@ -373,8 +373,9 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = deepseek_call.call_args.args[0]
         self.assertIn("## Professional Summary", prompt)
         self.assertIn("## Key Skills", prompt)
-        self.assertIn("## Work Experience", prompt)
-        self.assertIn("no more than two pages", prompt)
+        self.assertIn("only when the Master Resume or Applicant Profile contains", prompt)
+        self.assertIn("never add a blank section, placeholder or inferred item", prompt)
+        self.assertIn("Key Achievement:", prompt)
 
     def test_resume_prompt_uses_curation_plan_and_declares_used_evidence(self):
         plan = '{"schema_version":"1.0","selected_evidence":[{"evidence_id":"EV1","curation_action":"feature"}],"maximum_pages":2}'

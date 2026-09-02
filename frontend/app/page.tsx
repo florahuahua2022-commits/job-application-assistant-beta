@@ -108,6 +108,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [resumeContentCheck, setResumeContentCheck] = useState<ResumeContentCheckResult | null>(null);
   const [resumeCheckState, setResumeCheckState] = useState<"idle" | "checking" | "done" | "error">("idle");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [applicationListLimit, setApplicationListLimit] = useState(8);
   const [backups, setBackups] = useState<Backup[]>([]);
   const [resumeUploadState, setResumeUploadState] = useState("idle");
   const [jobImportState, setJobImportState] = useState("idle");
@@ -1316,6 +1317,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const archived = archivedApplications(applications);
   const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, activeApplications(applications).filter((application) => application.status === status).length])), [applications]);
   const filteredApplications = statusFilter === "archived" ? archived : statusFilter === "all" ? active : active.filter((application) => application.status === statusFilter);
+  const visibleApplications = filteredApplications.slice(0, applicationListLimit);
   const privacyNotice = showPrivacy && <div className="modalBackdrop" role="presentation" onClick={() => setShowPrivacy(false)}><section className="privacyModal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="requirementsHeading"><h2 id="privacy-title">Private Beta Privacy Notice</h2><button type="button" className="secondary" onClick={() => setShowPrivacy(false)}>Close</button></div><p>This service stores your profile, Resume, job descriptions, application records and generated documents. These materials may contain personal information.</p><p>Relevant Resume, job and application content is sent to the configured AI provider when the service generates or reviews documents. This is a beta service, so errors and interruptions may occur. Review every document yourself before submitting it.</p><p>Avoid uploading unnecessary highly sensitive information such as passwords, identity documents, health information or criminal-history details.</p><p>Use <strong>Export my data</strong> to download your account data. Use <strong>Delete my account</strong> to permanently remove your account and saved data.</p><p>For access, privacy or support questions, contact {betaSupportContact}.</p></section></div>;
 
   if (!authReady) return <main><section className="panel"><p>Preparing secure sign-in…</p></section></main>;
@@ -1495,28 +1497,15 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       </section>
     </>
     )}
-      <section className="panel" id="application-tracker">
-        <div className="stepHeading"><span>3</span><div><strong>Application Tracker</strong><small>Review and update every application in one place</small></div></div>
-        <div className="statusFilters">
-          <button type="button" className={statusFilter === "all" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("all")}><strong>{active.length}</strong><small>All jobs</small></button>
-          {applicationStatuses.map((status) => <button type="button" key={status} className={statusFilter === status ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter(status)}><strong>{statusCounts[status] || 0}</strong><small>{statusLabels[status]}</small></button>)}
-          <button type="button" className={statusFilter === "archived" ? "statusCard activeStatus" : "statusCard"} onClick={() => setStatusFilter("archived")}><strong>{archived.length}</strong><small>Archived</small></button>
-        </div>
-        <div className="trackerList">
-          {filteredApplications.length ? filteredApplications.map((application) => <div className="trackerRow" key={application.id}>
-            <button type="button" className="trackerJob" onClick={() => openApplication(application.id)}><strong>{application.position_title}</strong><small>{application.company}{application.submitted_at ? ` · Applied ${new Date(application.submitted_at).toLocaleDateString()}` : ""}{application.submission_reference ? ` · ${application.submission_reference}` : ""}</small></button>
-            <div className="selectedActions"><select aria-label={`Status for ${application.position_title}`} value={application.status} onChange={(event) => updateApplicationStatus(application, event.target.value)}>{applicationStatuses.map((status) => <option value={status} key={status}>{statusLabels[status]}</option>)}</select><button type="button" className="secondary" onClick={() => updateApplicationArchive(application, application.archived_at ? "restore" : "archive")}>{application.archived_at ? "Restore" : "Archive"}</button>{application.archived_at && <button type="button" className="secondary dangerButton" onClick={() => permanentlyDeleteApplication(application)}>Delete permanently</button>}</div>
-          </div>) : <p className="helper">No applications in this status.</p>}
-        </div>
-      </section>
-
       <section className="panel" id="application-workspace">
         <div className="stepHeading"><span>4</span><div><strong>Create and check your application</strong><small>Choose documents, generate drafts, review them, then check and download</small></div></div>
         <div className="applicationLayout">
           <aside className="jobList">
-            {filteredApplications.length ? filteredApplications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
+            <label className="applicationFilter">Show applications<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setApplicationListLimit(8); }}><option value="all">All ({active.length})</option>{applicationStatuses.map((status) => <option value={status} key={status}>{statusLabels[status]} ({statusCounts[status] || 0})</option>)}<option value="archived">Archived ({archived.length})</option></select></label>
+            {visibleApplications.length ? visibleApplications.map((application) => <button type="button" className={application.id === selectedApplication ? "job active" : "job"} key={application.id} onClick={() => openApplication(application.id)}>
               <strong>{application.position_title}</strong><small>{application.company} · {statusLabels[application.status] || application.status}</small>
             </button>) : <p className="helper">Save a job to get started.</p>}
+            {filteredApplications.length > visibleApplications.length && <button type="button" className="secondary" onClick={() => setApplicationListLimit((limit) => limit + 8)}>Load more</button>}
           </aside>
           <div className="reviewArea">
             {selected ? <>

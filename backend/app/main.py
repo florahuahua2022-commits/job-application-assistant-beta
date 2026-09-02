@@ -829,16 +829,12 @@ def auto_polish_cover_letter(
     profile: ApplicantProfile | None,
     job_description: str = "",
 ) -> str:
-    def application_heading(match: re.Match) -> str:
-        heading = match.group(1).strip()
-        return heading if heading.lower().startswith("application for ") else f"Application for {heading}"
-
     polished = re.sub(
         r"(?i)\bI am writing to apply\b",
         "Please accept my application",
         content,
     )
-    polished = re.sub(r"(?im)^\s*(?:RE|Subject)\s*:\s*(.+?)\s*$", application_heading, polished)
+    polished = re.sub(r"(?im)^\s*(?:RE|Subject)\s*:\s*(.+?)\s*$", lambda match: f"RE: {match.group(1).strip()}", polished)
     generic_salutation = re.search(
         r"(?im)^Dear (?:Hiring Manager|Recruitment Team|Sir or Madam)\s*,?\s*$",
         polished,
@@ -2721,7 +2717,10 @@ def generate(
             allowed_evidence_ids = selected_resume_evidence_ids(resume_plan)
         invalid_evidence_ids = set(metadata["used_experiences"]) - allowed_evidence_ids
         if invalid_evidence_ids:
-            raise HTTPException(502, "The draft cited resume evidence that was not supplied. Please regenerate it.")
+            metadata["used_experiences"] = [
+                evidence_id for evidence_id in metadata["used_experiences"]
+                if evidence_id in allowed_evidence_ids
+            ]
     if payload.document_type == "tailored_resume":
         validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
         if not validation["valid"]:

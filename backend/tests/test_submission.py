@@ -74,8 +74,7 @@ class SubmissionRecordTests(unittest.TestCase):
             None,
         )
 
-        self.assertIn("Application for Project Administrator", polished)
-        self.assertNotIn("RE:", polished)
+        self.assertIn("RE: Project Administrator", polished)
 
     def test_resume_polish_standardises_sections_and_reference_wording(self):
         polished = auto_polish_tailored_resume(

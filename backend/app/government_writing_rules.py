@@ -18,5 +18,5 @@ def government_writing_rules(english_variant: str = "Australian English") -> str
 - Do not hide or fabricate an evidence gap to avoid negative wording. If the employer explicitly requires disclosure of a qualification, experience or limitation, answer neutrally, briefly and factually at the exact level supported by the evidence.
 - Do not copy Job Description or criterion wording verbatim; paraphrase while preserving meaning.
 - Prefer quantified outcomes only when the supporting source_text contains the number.
-- Never open like an email reply and never use RE: or Subject: as a heading.
+- In a formal cover letter, use `RE: [POSITION TITLE]` after the greeting; do not use an email-style Subject line.
 - Do not introduce qualifications, systems, security clearances, licences, responsibilities or outcomes absent from the supplied evidence."""
