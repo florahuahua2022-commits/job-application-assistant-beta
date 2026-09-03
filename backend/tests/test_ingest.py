@@ -4,6 +4,7 @@ from io import BytesIO
 
 from docx import Document
 
+from app.ckb import build_career_knowledge_base
 from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, normalise_resume_experiences, parse_job_ad_text, parse_job_page
 from app.job_model import build_job_model
 
@@ -101,6 +102,25 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(result[0]["fact_verification"], "explicit")
         self.assertEqual(result[1]["role_title"], "Administration Officer")
         self.assertEqual(result[1]["organization"], "Example Council")
+
+    def test_preserves_separate_resume_duties_as_separate_evidence(self):
+        source_text = """Work Experience
+Project Coordinator
+Bright Energy Pty Ltd
+January 2022 – Present
+Coordinated project schedules and procurement.
+Prepared stakeholder briefings and maintained project registers.
+Education
+Bachelor of Business"""
+
+        experiences = extract_resume_experiences(source_text)
+        ckb = build_career_knowledge_base(source_text, json.dumps(experiences))
+
+        duties = [item["action"] for item in ckb if item["evidence_type"] == "experience"]
+        self.assertEqual(duties, [
+            "Coordinated project schedules and procurement.",
+            "Prepared stakeholder briefings and maintained project registers.",
+        ])
 
     def test_resume_experience_parser_fails_safely_without_dated_roles(self):
         self.assertEqual(

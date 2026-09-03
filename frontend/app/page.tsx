@@ -1498,7 +1498,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     </>
     )}
       <section className="panel" id="application-workspace">
-        <div className="stepHeading"><span>4</span><div><strong>Create and check your application</strong><small>Choose documents, generate drafts, review them, then check and download</small></div></div>
+        <div className="stepHeading"><span>3</span><div><strong>Create and check your application</strong><small>Choose documents, generate drafts, review them, then check and download</small></div></div>
         <div className="applicationLayout">
           <aside className="jobList">
             <label className="applicationFilter">Show applications<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setApplicationListLimit(8); }}><option value="all">All ({active.length})</option>{applicationStatuses.map((status) => <option value={status} key={status}>{statusLabels[status]} ({statusCounts[status] || 0})</option>)}<option value="archived">Archived ({archived.length})</option></select></label>
@@ -1509,7 +1509,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
           </aside>
           <div className="reviewArea">
             {selected ? <>
-              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions">{selected.status === "draft" ? <button className="secondary dangerButton" type="button" onClick={() => deleteDraftApplication(selected)}>Delete draft</button> : <button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button>}{selected.archived_at && <button className="secondary dangerButton" type="button" onClick={() => permanentlyDeleteApplication(selected)}>Delete permanently</button>}<button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button></div></div>
+              <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions">{selected.status !== "draft" && <button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button>}{selected.archived_at && <button className="secondary dangerButton" type="button" onClick={() => permanentlyDeleteApplication(selected)}>Delete permanently</button>}<button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button></div></div>
               <details className="jobEditPanel" key={`edit-${selected.id}`}>
                 <summary>Edit saved job details</summary>
                 <form onSubmit={updateSavedJob} className="compactForm">
@@ -1521,6 +1521,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                   <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
                   <button className="full">Save job changes</button>
                 </form>
+                {selected.status === "draft" && <div className="jobEditDiscard"><p className="helper">Pasted the wrong JD and prefer to begin again? This removes this draft and its generated documents.</p><button className="secondary dangerButton" type="button" onClick={() => deleteDraftApplication(selected)}>Discard this draft and start again</button></div>}
               </details>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}

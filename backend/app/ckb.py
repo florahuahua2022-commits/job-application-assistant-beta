@@ -83,6 +83,29 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _experience_evidence_items(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep separately written CV duties separate so a tailored CV can reuse them."""
+    raw_source = str(item.get("source_text") or "").strip()
+    lines = [line.strip(" •▪■*-\t") for line in raw_source.splitlines() if line.strip()]
+    date_index = next((index for index, line in enumerate(lines) if EMPLOYMENT_PERIOD_PATTERN.search(line) or re.search(r"\b(?:19|20)\d{2}\b", line)), -1)
+    duties = [
+        line for line in lines[date_index + 1:]
+        if len(line) > 2 and not re.fullmatch(r"(?i)(?:responsibilities|key achievements|achievements|duties):?", line)
+    ] if date_index >= 0 else []
+    if len(duties) < 2:
+        evidence = experience_to_evidence(item)
+        return [evidence] if evidence else []
+
+    evidence_items = []
+    header = "\n".join(lines[:date_index + 1])
+    for duty in duties:
+        detail = {**item, "evidence_id": "", "responsibility": duty, "source_text": f"{header}\n{duty}"}
+        evidence = experience_to_evidence(detail)
+        if evidence:
+            evidence_items.append(evidence)
+    return evidence_items
+
+
 def _detail_evidence(source_text: str) -> list[dict[str, Any]]:
     heading_types = {
         "education": "education", "qualifications": "qualification", "qualification": "qualification",
@@ -137,9 +160,7 @@ def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") 
     if isinstance(experiences, list):
         for item in experiences:
             if isinstance(item, dict):
-                normalized = experience_to_evidence(item)
-                if normalized:
-                    evidence.append(normalized)
+                evidence.extend(_experience_evidence_items(item))
     evidence.extend(_detail_evidence(source_text))
     unique: dict[str, dict[str, Any]] = {}
     for item in evidence:
