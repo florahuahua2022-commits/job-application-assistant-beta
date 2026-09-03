@@ -336,7 +336,7 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = deepseek_call.call_args.args[0]
         self.assertIn("Do not infer a recruiter/client relationship", prompt)
         self.assertIn("use 'Yours faithfully' after a generic salutation", prompt)
-        self.assertIn("'RE: [POSITION TITLE]'", prompt)
+        self.assertIn("'Cover Letter: [POSITION TITLE]'", prompt)
 
     def test_cover_letter_prompt_uses_traceable_priority_and_narrative_plan(self):
         plan = '{"schema_version":"1.0","priorities":[{"criteria_id":"C1","requirement":"Stakeholder engagement"}],"selected_evidence":[{"evidence_id":"EV1"}],"narrative_plan":[{"section":"role_and_organisation_alignment","target_share":0.45}]}'

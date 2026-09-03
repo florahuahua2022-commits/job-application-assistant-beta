@@ -9,11 +9,11 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 
 
 INK = RGBColor(23, 36, 58)
@@ -81,13 +81,25 @@ def _add_page_number(paragraph, theme: dict) -> None:
     run._r.extend([begin, instruction, end])
 
 
-def _configure_docx(document: Document, theme: dict, page_size: tuple[float, float]) -> None:
+def _add_bottom_border(paragraph, color: RGBColor) -> None:
+    properties = paragraph._p.get_or_add_pPr()
+    borders = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single"); bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), str(color))
+    borders.append(bottom); properties.append(borders)
+
+
+def _configure_docx(document: Document, theme: dict, page_size: tuple[float, float], resume_layout: bool = False) -> None:
     section = document.sections[0]
     section.page_width = Inches(page_size[0] / 72)
     section.page_height = Inches(page_size[1] / 72)
-    section.top_margin = section.right_margin = section.bottom_margin = section.left_margin = Inches(theme["margin"])
+    margin = 0.7 if resume_layout else theme["margin"]
+    section.top_margin = section.right_margin = section.bottom_margin = section.left_margin = Inches(margin)
     section.header_distance = section.footer_distance = Inches(0.492)
-    _add_page_number(section.footer.paragraphs[0], theme)
+    if not resume_layout:
+        _add_page_number(section.footer.paragraphs[0], theme)
 
     normal = document.styles["Normal"]
     normal.font.name = theme["font"]; normal.font.size = Pt(theme["body_size"]); normal.font.color.rgb = INK
@@ -116,19 +128,25 @@ def _add_inline_markdown(paragraph, text: str, theme: dict) -> None:
 def create_docx(content: str, title: str, template: str = "classic", market: str | None = None, page_size: str | None = None) -> bytes:
     theme = export_theme(template)
     document = Document()
-    _configure_docx(document, theme, resolve_page_size(market, page_size)["dimensions"])
+    is_resume = title.casefold() in {"resume", "tailored resume"}
     lines = _ascii_punctuation(content).splitlines()
     is_cover_letter = title.casefold() == "cover letter"
+    _configure_docx(document, theme, resolve_page_size(market, page_size)["dimensions"], is_resume or is_cover_letter)
 
     for index, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             document.add_paragraph()
             continue
-        if line.startswith("### "):
+        if line.startswith("Cover Letter:") and is_cover_letter:
+            paragraph = document.add_paragraph(style="Heading 3")
+            paragraph.add_run(line)
+        elif line.startswith("### "):
             document.add_paragraph(line[4:], style="Heading 3")
         elif line.startswith("## "):
-            document.add_paragraph(line[3:], style="Heading 2")
+            paragraph = document.add_paragraph(line[3:], style="Heading 2")
+            if is_resume:
+                _add_bottom_border(paragraph, theme["accent"])
         elif line.startswith("# "):
             document.add_paragraph(line[2:], style="Heading 1")
         elif line.startswith("- "):
@@ -146,16 +164,26 @@ def create_docx(content: str, title: str, template: str = "classic", market: str
         elif line.startswith("**") and line.endswith("**") and len(line) < 100:
             paragraph = document.add_paragraph(style="Heading 2")
             paragraph.add_run(line[2:-2])
+        elif index == 0 and len(line) < 100 and is_cover_letter:
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_after = Pt(5)
+            run = paragraph.add_run(line.replace("**", "")); _set_font(run, size=16, bold=True, color=INK, font_name=theme["font"])
         elif index == 0 and len(line) < 100 and not is_cover_letter:
             paragraph = document.add_paragraph()
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if is_resume else WD_ALIGN_PARAGRAPH.CENTER
             paragraph.paragraph_format.space_after = Pt(5)
             run = paragraph.add_run(line.replace("**", "")); _set_font(run, size=19, bold=True, color=theme["accent"], font_name=theme["font"])
         elif index == 1 and len(line) < 140:
             paragraph = document.add_paragraph()
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if (is_resume or is_cover_letter) else WD_ALIGN_PARAGRAPH.CENTER
             paragraph.paragraph_format.space_after = Pt(14)
             run = paragraph.add_run(line.replace("**", "")); _set_font(run, size=10, color=MUTED, font_name=theme["font"])
+            if is_cover_letter:
+                _add_bottom_border(paragraph, MUTED)
+        elif is_cover_letter and index > 0 and lines[index - 1].strip().startswith("Cover Letter:"):
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_after = Pt(14)
+            run = paragraph.add_run(line.replace("**", "")); _set_font(run, size=10.5, color=MUTED, font_name=theme["font"])
         else:
             paragraph = document.add_paragraph()
             _add_inline_markdown(paragraph, line, theme)
@@ -171,29 +199,50 @@ def create_pdf(content: str, title: str, template: str = "classic", market: str 
     styles = getSampleStyleSheet()
     body = ParagraphStyle("ApplicationBody", parent=styles["BodyText"], fontName=theme["pdf_font"], fontSize=theme["body_size"] - .5, leading=(theme["body_size"] + 3), textColor="#17243A", spaceAfter=7)
     heading = ParagraphStyle("ApplicationHeading", parent=body, fontName=theme["pdf_bold"], fontSize=13, leading=16, textColor=accent_hex, spaceBefore=10, spaceAfter=6, keepWithNext=True)
-    title_style = ParagraphStyle("ApplicationTitle", parent=heading, fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=10)
+    is_resume = title.casefold() in {"resume", "tailored resume"}
+    title_style = ParagraphStyle("ApplicationTitle", parent=heading, fontSize=18, leading=22, alignment=TA_LEFT if is_resume else TA_CENTER, spaceAfter=8)
+    contact = ParagraphStyle("ApplicationContact", parent=body, fontSize=10, leading=13, textColor="#5F6B7A", alignment=TA_LEFT if is_resume else TA_CENTER, spaceAfter=13)
+    role = ParagraphStyle("ApplicationRole", parent=body, fontName=theme["pdf_bold"], fontSize=12, leading=15, spaceBefore=7, spaceAfter=2, keepWithNext=True)
+    cover_title = ParagraphStyle("CoverTitle", parent=body, fontName=theme["pdf_bold"], fontSize=13, leading=16, spaceBefore=14, spaceAfter=3, keepWithNext=True)
+    cover_meta = ParagraphStyle("CoverMeta", parent=body, fontSize=10.5, leading=13, textColor="#5F6B7A", spaceAfter=14)
     bullet = ParagraphStyle("ApplicationBullet", parent=body, leftIndent=18, firstLineIndent=-10, bulletIndent=4, spaceAfter=4)
     is_cover_letter = title.casefold() == "cover letter"
     story = []
-    for index, raw in enumerate(_ascii_punctuation(content).splitlines()):
+    lines = _ascii_punctuation(content).splitlines()
+    for index, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             story.append(Spacer(1, 5)); continue
         escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         escaped = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped)
-        if line.startswith("#"):
+        if line.startswith("Cover Letter:") and is_cover_letter:
+            story.append(Paragraph(escaped, cover_title))
+        elif line.startswith("### "):
+            story.append(Paragraph(escaped[4:], role))
+        elif line.startswith("#"):
             escaped = re.sub(r"^#+\s*", "", escaped)
             story.append(Paragraph(escaped, heading))
+            if is_resume and line.startswith("## "):
+                story.append(HRFlowable(width="100%", thickness=.6, color=accent_hex, spaceBefore=-2, spaceAfter=8))
         elif line.startswith("- "):
             story.append(Paragraph(escaped[2:], bullet, bulletText="-"))
+        elif index == 0 and len(line) < 100 and is_cover_letter:
+            story.append(Paragraph(escaped.replace("**", ""), ParagraphStyle("CoverName", parent=body, fontName=theme["pdf_bold"], fontSize=16, leading=19, spaceAfter=5)))
         elif index == 0 and len(line) < 100 and not is_cover_letter:
             story.append(Paragraph(escaped.replace("**", ""), title_style))
+        elif index == 1 and len(line) < 140 and is_resume:
+            story.append(Paragraph(escaped.replace("**", ""), contact))
+        elif index == 1 and len(line) < 140 and is_cover_letter:
+            story.append(Paragraph(escaped.replace("**", ""), ParagraphStyle("CoverContact", parent=contact, alignment=TA_LEFT)))
+            story.append(HRFlowable(width="100%", thickness=.45, color="#AAB2B8", spaceBefore=-5, spaceAfter=8))
+        elif is_cover_letter and index > 0 and lines[index - 1].strip().startswith("Cover Letter:"):
+            story.append(Paragraph(escaped.replace("**", ""), cover_meta))
         elif line.startswith("**") and line.endswith("**") and len(line) < 100:
             story.append(Paragraph(escaped, heading))
         else:
             story.append(Paragraph(escaped, body))
 
-    margin = theme["margin"] * inch
+    margin = (0.7 if is_resume else 0.6 if is_cover_letter else theme["margin"]) * inch
     pdf = SimpleDocTemplate(stream, pagesize=resolve_page_size(market, page_size)["dimensions"], rightMargin=margin, leftMargin=margin, topMargin=margin, bottomMargin=margin, title=title, author="")
     pdf.build(story)
     return stream.getvalue()

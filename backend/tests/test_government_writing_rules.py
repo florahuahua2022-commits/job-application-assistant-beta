@@ -14,7 +14,7 @@ class GovernmentWritingRulesTests(unittest.TestCase):
         self.assertIn("traceable to supplied CKB source_text", rules)
         self.assertIn("not as evidence", rules)
         self.assertIn("only when the supporting source_text contains the number", rules)
-        self.assertIn("RE: [POSITION TITLE]", rules)
+        self.assertIn("Cover Letter: [POSITION TITLE]", rules)
         self.assertIn("must not become managed, led, owned", rules)
         self.assertIn("does not by itself support claims of discretion", rules)
 

@@ -28,6 +28,12 @@ class ExporterTests(unittest.TestCase):
         with ZipFile(BytesIO(payload)) as archive:
             self.assertIn("word/document.xml", archive.namelist())
 
+    def test_resume_header_is_left_aligned_and_has_compact_margins(self):
+        from docx import Document
+        document = Document(BytesIO(create_docx(SAMPLE, "Tailored Resume")))
+        self.assertEqual(str(document.paragraphs[0].alignment), "LEFT (0)")
+        self.assertAlmostEqual(document.sections[0].left_margin.inches, 0.7, places=2)
+
     def test_pdf_is_readable_and_contains_text(self):
         payload = create_pdf(SAMPLE, "Tailored Resume")
         self.assertTrue(payload.startswith(b"%PDF"))
