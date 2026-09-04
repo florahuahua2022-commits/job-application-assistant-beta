@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 
-CKB_SCHEMA_VERSION = "1.0"
+CKB_SCHEMA_VERSION = "1.1"
 EVIDENCE_TYPES = {
     "experience", "project", "volunteer", "education", "qualification", "award", "publication",
 }
@@ -170,7 +170,9 @@ def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") 
 
 def career_knowledge_base_is_current(items: Any) -> bool:
     return isinstance(items, list) and all(isinstance(item, dict) for item in items) and all(
-        item.get("evidence_type") != "experience" or "time_period_status" in item
+        item.get("evidence_type") != "experience" or (
+            "time_period_status" in item and len(_experience_evidence_items(item)) <= 1
+        )
         for item in items
     )
 

@@ -72,6 +72,38 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
     return {"valid": not issues, "word_count": word_count, "issues": issues}
 
 
+def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any]:
+    """Apply cheap, objective quality checks after factual review."""
+    issues = []
+    target_words = int(plan.get("target_words") or 0)
+    word_count = len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE))
+    if target_words and word_count < target_words * .7:
+        issues.append({
+            "type": "resume_too_brief", "severity": "major", "blocks_release": True,
+            "description": f"The CV contains {word_count} words, below 70% of its {target_words}-word target.",
+        })
+
+    roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
+    one_bullet_roles = sum(int(role.get("max_bullets") or 0) <= 1 for role in roles)
+    if len(roles) >= 3 and one_bullet_roles / len(roles) >= .8:
+        issues.append({
+            "type": "resume_shallow_role_coverage", "severity": "major", "blocks_release": True,
+            "description": f"{one_bullet_roles} of {len(roles)} included roles are capped at one bullet.",
+        })
+
+    work_section = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", content)
+    bullets = re.findall(r"(?im)^\s*[-*]\s+([A-Za-z][A-Za-z'-]*)\b", work_section.group(1) if work_section else "")
+    if len(bullets) >= 3:
+        counts = {verb.lower(): sum(item.lower() == verb.lower() for item in bullets) for verb in bullets}
+        repeated_verb, repeated_count = max(counts.items(), key=lambda item: item[1])
+        if repeated_count / len(bullets) > .5:
+            issues.append({
+                "type": "resume_repetitive_opening", "severity": "major", "blocks_release": True,
+                "description": f"'{repeated_verb.title()}' opens {repeated_count} of {len(bullets)} work-experience bullets.",
+            })
+    return {"status": "fail" if issues else "pass", "word_count": word_count, "issues": issues}
+
+
 def selected_resume_evidence_ids(plan: dict[str, Any]) -> set[str]:
     return {str(item.get("evidence_id")) for item in plan.get("selected_evidence") or [] if item.get("evidence_id")}
 
@@ -230,6 +262,23 @@ def build_resume_curation_plan(
         select(item)
 
     selected_set = set(selected_ids)
+    role_supported_requirements: dict[str, set[str]] = defaultdict(set)
+    role_has_essential: dict[str, bool] = defaultdict(bool)
+    for evidence_id, item in evidence_by_id.items():
+        section = str(item.get("source_section") or "Master Resume")
+        for criterion_id, importance, framing in support[evidence_id]:
+            role_supported_requirements[section].add(criterion_id)
+            if framing == "direct":
+                role_has_essential[section] |= importance == "essential"
+    strength_promoted_sections = {
+        section for section, _requirements in sorted(
+            (
+                (section, requirements) for section, requirements in role_supported_requirements.items()
+                if len(requirements) >= 3 and not role_has_essential[section]
+            ),
+            key=lambda item: (-len(item[1]), item[0]),
+        )[:2]
+    }
     selected = []
     for evidence_id, item in evidence_by_id.items():
         if evidence_id not in selected_set:
@@ -241,7 +290,10 @@ def build_resume_curation_plan(
             "evidence_type": str(item.get("evidence_type") or "experience"),
             "source_section": str(item.get("source_section") or "Master Resume"),
             "supports_requirements": sorted({link[0] for link in links}),
-            "curation_action": "feature" if framing == "direct" and any(link[1] == "essential" for link in links) else "include_concisely",
+            "curation_action": "feature" if (
+                any(link[1] == "essential" and link[2] == "direct" for link in links)
+                or str(item.get("source_section") or "Master Resume") in strength_promoted_sections
+            ) else "include_concisely",
             "evidence_framing": framing,
             "fact_policy": "preserve_source_facts_only",
         })
@@ -256,7 +308,7 @@ def build_resume_curation_plan(
         links = [link for item in items for link in support[str(item.get("evidence_id"))] if str(item.get("evidence_id")) in selected_set]
         is_current = any(_is_current(item) for item in items)
         direct_essential = any(importance == "essential" and framing == "direct" for _, importance, framing in links)
-        if direct_essential:
+        if direct_essential or section in strength_promoted_sections:
             action, cap = "promote", 4
         elif links:
             action, cap = "keep", 2
@@ -281,7 +333,11 @@ def build_resume_curation_plan(
             "supports_requirements": sorted({link[0] for link in links}),
             "evidence_framing": framing,
             "rationale": {
-                "promote": "Verified direct support for an essential requirement.",
+                "promote": (
+                    "Verified direct support for an essential requirement."
+                    if direct_essential else
+                    "Grounded direct or transferable support across at least three job requirements."
+                ),
                 "keep": "Grounded relevant or transferable evidence.",
                 "compress": "Retained for explicit current-role continuity only.",
                 "omit": "No selected job-relevant evidence or continuity need.",

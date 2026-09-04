@@ -303,6 +303,34 @@ Bachelor of Business"""
         self.assertEqual(result["company"], "Metrowest")
         self.assertNotEqual(result["company"], "What you'll be doing")
 
+    def test_body_copy_does_not_treat_what_we_or_intro_sentence_as_job_identity(self):
+        raw_text = """What We
+We are currently experiencing a high demand for experienced Project Officers for multiple projects across the Perth Metro Area.
+By registering your interest with Randstad, you gain direct access to unadvertised contract roles that contribute to high-profile initiatives, community infrastructure, and vital public policies shaping Western Australia.
+Key Responsibilities
+Depending on the specific department and level, your day-to-day responsibilities will include project coordination, reporting and stakeholder engagement.
+"""
+
+        result = parse_job_ad_text(raw_text)
+
+        self.assertEqual(result["company"], "Randstad")
+        self.assertEqual(result["position_title"], "Project Officers")
+
+    def test_opportunities_heading_and_what_we_are_looking_for_are_not_identity(self):
+        for heading in ("About the Opportunities", "About Us", "What We Offer"):
+            with self.subTest(heading=heading):
+                result = parse_job_ad_text(f"""{heading}
+We are currently experiencing a high demand for experienced Project Officers for multiple projects across the Perth Metro Area.
+By registering your interest with Randstad, you gain direct access to unadvertised contract roles.
+What We Are Looking For
+Strong communication skills and project coordination experience.
+""")
+                self.assertEqual(result["company"], "Randstad")
+                self.assertEqual(result["position_title"], "Project Officers")
+        unknown = parse_job_ad_text("About the Opportunities\nReporting and briefing for executive leadership.\nWhat We Are Looking For\nStrong communication skills and project coordination experience.")
+        self.assertEqual((unknown["company"], unknown["position_title"]), ("", ""))
+        self.assertEqual(len(unknown["warnings"]), 2)
+
     def test_prefers_labelled_fields_and_extracts_modern_criteria_heading(self):
         raw_text = """
         Job details

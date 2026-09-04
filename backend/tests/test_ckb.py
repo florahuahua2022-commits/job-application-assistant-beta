@@ -19,7 +19,7 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         first = build_career_knowledge_base(source, experiences)[0]
         second = build_career_knowledge_base(source, experiences)[0]
 
-        self.assertEqual(first["schema_version"], "1.0")
+        self.assertEqual(first["schema_version"], "1.1")
         self.assertEqual(first["evidence_id"], second["evidence_id"])
         self.assertEqual(first["source_text"], source)
         self.assertEqual(first["time_period"], {"start": "January 2022", "end": "Present"})
@@ -31,11 +31,34 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         self.assertEqual(EVIDENCE_TYPES, expected)
 
     def test_currentness_uses_date_status_not_an_empty_period_heuristic(self):
-        base = {"evidence_type": "experience", "time_period": {"start": None, "end": None}}
+        base = {"schema_version": "1.1", "evidence_type": "experience", "time_period": {"start": None, "end": None}}
         self.assertFalse(career_knowledge_base_is_current([base]))
         for status in ("verified", "uncertain", "not_provided"):
             with self.subTest(status=status):
                 self.assertTrue(career_knowledge_base_is_current([{**base, "time_period_status": status}]))
+
+    def test_coarse_old_schema_is_refreshed_and_multiline_role_duties_stay_atomic(self):
+        source = """Project Officer
+Example Agency
+January 2022 - Present
+Prepared monthly project reports.
+Coordinated meetings with external stakeholders.
+Maintained the project risk register.
+"""
+        self.assertFalse(career_knowledge_base_is_current([{
+            "schema_version": "1.0", "evidence_type": "experience", "time_period_status": "verified",
+            "source_text": source, "role_title": "Project Officer", "organization": "Example Agency",
+            "action": "Prepared reports, coordinated meetings and maintained the risk register.",
+        }]))
+        items = build_career_knowledge_base(source, json.dumps([{
+            "role_title": "Project Officer", "organization": "Example Agency",
+            "responsibility": "Prepared reports; coordinated meetings; maintained the risk register.",
+            "source_text": source, "time_period_text": "January 2022 - Present",
+        }]))
+
+        self.assertEqual(len(items), 3)
+        self.assertEqual(len({item["evidence_id"] for item in items}), 3)
+        self.assertTrue(all(item["schema_version"] == "1.1" for item in items))
 
     def test_extracts_non_employment_detail_evidence(self):
         source = """Education

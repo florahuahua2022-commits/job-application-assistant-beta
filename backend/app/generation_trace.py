@@ -77,6 +77,8 @@ def build_generation_trace(
         "trace": {"evidence_ids": sorted(set(evidence_ids))},
         "review": {
             "status": str((reviewer or {}).get("status") or "not_run"),
+            "factual_status": str((reviewer or {}).get("factual_status") or (reviewer or {}).get("status") or "not_run"),
+            "quality_status": str((reviewer or {}).get("quality_status") or "not_run"),
             "finding_count": sum(len(item.get("issues") or []) for item in (reviewer or {}).get("results") or []),
         },
     }

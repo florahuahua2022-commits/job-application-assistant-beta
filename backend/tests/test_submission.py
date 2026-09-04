@@ -14,12 +14,27 @@ from app.database import get_session
 from app.auth import get_current_user
 from app.application_requirements import empty_application_requirements, parse_application_requirements
 from app.application_decision import decision_inputs
-from app.main import app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, enforce_profile_contact, organisation_is_named
+from app.main import add_resume_quality_status, app, auto_polish_cover_letter, auto_polish_tailored_resume, build_resume_content_check, enforce_profile_contact, organisation_is_named
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
 from app import backup
 
 
 class SubmissionRecordTests(unittest.TestCase):
+    def test_resume_review_reports_factual_and_quality_status_separately(self):
+        review = {"status": "pass", "generation_status": "clean", "results": []}
+        plan = {"target_words": 650, "roles": [
+            {"include_role_header": True, "max_bullets": 1} for _ in range(5)
+        ]}
+        content = "## Work Experience\n" + "\n".join(
+            f"### Role {index}\n- Provided administrative support." for index in range(5)
+        )
+
+        result = add_resume_quality_status(review, content, plan)
+
+        self.assertEqual((result["factual_status"], result["quality_status"]), ("pass", "fail"))
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["generation_status"], "completed_low_confidence")
+
     def test_resume_content_check_matches_source_and_flags_unsupported_edit(self):
         resume = Resume(
             source_text="Alex Morgan\n0400 000 000\nalex@example.com\nProject Officer\nExample Agency\nPrepared monthly reports and project registers.",
@@ -374,7 +389,7 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertEqual(payload["job_url"], "https://example.com/job/123")
         self.assertIn("purchase orders", payload["job_description"])
 
-    def test_created_application_persists_unconfirmed_application_requirements(self):
+    def test_created_application_persists_default_document_choices(self):
         response = self.client.post("/applications", json={
             "company": "Example Department",
             "position_title": "Policy Officer",
@@ -383,9 +398,13 @@ class SubmissionRecordTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         requirements = json.loads(response.json()["application_requirements_json"])
-        self.assertEqual(requirements["review_status"], "needs_confirmation")
+        self.assertEqual(requirements["review_status"], "user_overridden")
         self.assertEqual(requirements["source"], "deterministic_parser")
-        self.assertEqual(requirements["documents"]["selection_criteria"]["format"], "embedded_in_cover_letter")
+        for name in ("resume", "cover_letter"):
+            self.assertEqual(requirements["documents"][name]["requirement"], "required")
+            self.assertEqual(requirements["documents"][name]["format"], "standalone")
+        self.assertEqual(requirements["documents"]["selection_criteria"]["requirement"], "not_required")
+        self.assertEqual(requirements["documents"]["selection_criteria"]["format"], "not_applicable")
 
     def test_parse_ad_response_serialises_application_requirements_without_routing(self):
         raw_text = """Position title: Project Officer

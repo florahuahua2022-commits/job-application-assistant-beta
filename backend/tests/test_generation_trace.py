@@ -27,7 +27,9 @@ class GenerationTraceTests(unittest.TestCase):
         self.assertEqual(trace["run_id"], "run-123")
         self.assertEqual(trace["input_refs"], {"application_id": 7, "resume_id": 3})
         self.assertEqual(trace["trace"]["evidence_ids"], ["EV001", "EV002"])
-        self.assertEqual(trace["review"], {"status": "fail", "finding_count": 1})
+        self.assertEqual(trace["review"], {
+            "status": "fail", "factual_status": "fail", "quality_status": "not_run", "finding_count": 1,
+        })
         self.assertEqual(trace["versions"]["government_writing_rules"], "1.0")
         self.assertEqual(trace["versions"]["applicant_profile_schema"], "1.0")
         self.assertEqual(trace["runtime"]["status"], "completed")
@@ -45,7 +47,9 @@ class GenerationTraceTests(unittest.TestCase):
             evidence_ids=[],
         )
 
-        self.assertEqual(trace["review"], {"status": "not_run", "finding_count": 0})
+        self.assertEqual(trace["review"], {
+            "status": "not_run", "factual_status": "not_run", "quality_status": "not_run", "finding_count": 0,
+        })
         self.assertTrue(trace["created_at"].endswith("+00:00"))
 
     def test_export_bundle_contains_plan_review_evidence_and_final_output(self):

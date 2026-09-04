@@ -473,38 +473,46 @@ def parse_job_ad_text(raw_text: str, previous_companies: list[str] | None = None
     position_title = _plain_ad_line(labelled_title.group(1))[:160] if labelled_title else ""
     company = _plain_ad_line(labelled_company.group(1))[:160] if labelled_company else ""
     excluded_heading = re.compile(
-        r"(?i)^(about (?:the )?(?:role|job|company|organisation)|job summary|job description|key responsibilities|"
-        r"responsibilities|requirements|selection criteria|what you(?:'|’)?ll|what we(?:'|’)?re|the position|how to apply)$"
+        r"(?i)^(about\b|what\b|who we\b|we offer\b|job summary\b|job description\b|key responsibilities\b|"
+        r"responsibilities\b|requirements\b|selection criteria\b|the position\b|how to apply\b)"
     )
     if not position_title:
         for candidate in candidates:
-            if excluded_heading.search(candidate) or ":" in candidate[:30]:
+            if excluded_heading.search(candidate):
+                break  # Job identity belongs above the body headings, not inside the duties.
+            if ":" in candidate[:30]:
                 continue
             if re.search(r"(?i),\s*(?:perth\s+)?WA(?:\s|\(|$)", candidate):
                 continue
             position_title = candidate[:160]
             break
+    if not labelled_title and (not position_title or len(position_title.split()) > 12 or re.match(r"(?i)^(?:we|our|you|by)\b", position_title)):
+        role_match = re.search(
+            r"(?i)\b(?:demand for|seeking|looking for|hiring)[ \t]+(?:an?[ \t]+)?(?:experienced[ \t]+)?"
+            r"([A-Z][A-Za-z&/' -]{2,70}?)(?=\s+(?:for|to|who|with|across|in)\b|[.,;]|$)",
+            text,
+        )
+        position_title = _plain_ad_line(role_match.group(1)) if role_match else ""
     company_patterns = (
         r"(?im)^\s*([A-Z][A-Za-z0-9&.'’ -]{2,100}?)\s+(?:is|are)\s+(?:growing|seeking|looking|hiring)\b",
         r"(?im)^\s*why\s+join\s+([A-Z][A-Za-z0-9&.'’ -]{2,100}?)\s*$",
+        r"(?i)\b(?:with|at)\s+([A-Z][A-Za-z0-9&.'’ -]{2,80}?)(?=\s*[,.;]|\s+(?:you|we|our|for|to|as)\b)",
     )
     for pattern in company_patterns if not company else ():
-        match = re.search(pattern, text)
-        if match:
-            company = _plain_ad_line(match.group(1))
+        for match in re.finditer(pattern, text):
+            candidate = _plain_ad_line(match.group(1))
+            if not excluded_heading.search(candidate) and not re.match(r"(?i)^(?:we|our|you|your)\b", candidate):
+                company = candidate
+                break
+        if company:
             break
-    section_heading = re.compile(
-        r"(?i)^(what you(?:'|’)?ll be doing|what we(?:'|’)?re looking for|requirements|key responsibilities|about (?:the )?role|the position|why join\b|how to apply)"
-    )
-    for line in candidates[1:8] if not company else []:
+    for line in candidates[1:8] if not company and candidates and not excluded_heading.search(candidates[0]) else []:
         lowered = line.lower()
-        if lowered.startswith(("about ", "key responsibilities", "the role", "location")):
+        if excluded_heading.search(line) or lowered.startswith(("the role", "location", "why join")):
             break
-        if section_heading.search(line):
-            continue
         is_location = bool(re.search(r"(?i),\s*(?:perth\s+)?WA(?:\s|\(|$)", line))
         is_category = bool(re.search(r"\([^)]*(?:construction|technology|administration|management)[^)]*\)", line, re.I))
-        if len(line) <= 140 and not is_location and not is_category:
+        if len(line) <= 140 and len(line.split()) <= 10 and not is_location and not is_category and not excluded_heading.search(line):
             company = line
             break
 

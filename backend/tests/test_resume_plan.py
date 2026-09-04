@@ -2,7 +2,7 @@ import json
 import unittest
 
 from app.ckb import build_career_knowledge_base
-from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
+from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, evaluate_resume_quality, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 
 
 def evidence(evidence_id, section, action="Grounded work", *, period=None, result=""):
@@ -181,6 +181,62 @@ Oct 2007 - Aug 2012
             {"matches": [{"criteria_id": "C1", "matched_evidence": ["FIN"], "match_type": "direct", "coverage": "strong"}]}, ckb)
         self.assertEqual(plan["roles"][0]["curation_action"], "promote")
         self.assertEqual(plan["roles"][0]["evidence_framing"], "direct")
+
+    def test_inferred_match_strength_promotes_only_top_two_roles(self):
+        ckb = [
+            evidence(f"{role}{index}", f"Work > Role {role}", f"Distinct duty {role}-{index}")
+            for role in "ABC" for index in range(3)
+        ]
+        criteria = [{"criteria_id": f"C{index}", "criteria_type": "inferred"} for index in range(3)]
+        matches = {"matches": [{
+            "criteria_id": f"C{index}", "matched_evidence": [f"{role}{index}" for role in "ABC"],
+            "match_type": "direct", "coverage": "strong",
+        } for index in range(3)]}
+
+        plan = build_resume_curation_plan({"criteria": criteria}, matches, ckb)
+        promoted = [role for role in plan["roles"] if role["curation_action"] == "promote"]
+
+        self.assertEqual(len(promoted), 2)
+        self.assertTrue(all(role["max_bullets"] == 3 for role in promoted))
+
+    def test_objective_quality_gate_flags_the_audited_failure_shape(self):
+        plan = {"target_words": 650, "roles": [
+            {"include_role_header": True, "max_bullets": 1} for _ in range(5)
+        ]}
+        content = "## Work Experience\n" + "\n".join(
+            f"### Role {index}\n- Provided administrative and project support." for index in range(5)
+        )
+
+        quality = evaluate_resume_quality(content, plan)
+
+        self.assertEqual(quality["status"], "fail")
+        self.assertEqual({item["type"] for item in quality["issues"]}, {
+            "resume_too_brief", "resume_shallow_role_coverage", "resume_repetitive_opening",
+        })
+
+    def test_mixed_support_promotes_finance_without_upgrading_adjacent_evidence(self):
+        section = "Work Experience > Department of Communities > Finance Administration Officer"
+        ckb = [evidence(f"FIN{i}", section, f"Distinct source duty {i}") for i in range(3)]
+        for kinds in (("direct", "direct", "inferred"), ("inferred",) * 3):
+            matches = {"matches": [
+                {"criteria_id": f"C{i}", "matched_evidence": [f"FIN{i}"], "match_type": kind}
+                for i, kind in enumerate(kinds)
+            ]}
+            plan = build_resume_curation_plan({"criteria": []}, matches, ckb)
+            self.assertEqual(plan["roles"][0]["curation_action"], "promote")
+            self.assertEqual(plan["roles"][0]["max_bullets"], 3)
+            adjacent = next(item for item in plan["selected_evidence"] if item["evidence_id"] == "FIN2")
+            self.assertEqual((adjacent["curation_action"], adjacent["evidence_framing"]), ("feature", "adjacent"))
+        for match in matches["matches"]:
+            match["criteria_id"] = "SAME"
+        plan = build_resume_curation_plan({"criteria": []}, matches, ckb)
+        self.assertEqual(plan["roles"][0]["curation_action"], "keep")
+
+    def test_word_quality_gate_at_trace_size_and_threshold(self):
+        for words, expected in ((228, "fail"), (454, "fail"), (455, "pass")):
+            quality = evaluate_resume_quality(" ".join(["word"] * words), {"target_words": 650})
+            self.assertEqual(quality["word_count"], words)
+            self.assertEqual(quality["status"], expected)
 
     def test_current_role_with_no_bullet_content_stays_visible_without_filler(self):
         current = evidence("NOW", "Work > Current Role", "", period={"start": "2025", "end": "Present"})

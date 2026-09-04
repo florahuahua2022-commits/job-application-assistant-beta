@@ -36,7 +36,7 @@ from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePa
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
-from .resume_plan import build_resume_curation_plan, selected_resume_evidence_ids, validate_resume_content
+from .resume_plan import build_resume_curation_plan, evaluate_resume_quality, selected_resume_evidence_ids, validate_resume_content
 from .release_state import ats_is_current, details_fingerprint, document_is_current, fingerprint, generation_inputs_fingerprint, load_release_state, pack_fingerprint, pack_review_is_current
 from .selection_logic import actual_word_count, build_selection_plan, criteria_requiring_confirmation
 from .source_acquisition import acquire_sources, process_uploaded_document
@@ -137,10 +137,20 @@ def application_ckb(session: Session, application: JobApplication, resume: Resum
     if application.resume_snapshot_json not in {"", "{}", None}:
         try:
             snapshot_ckb = json.loads(resume.ckb_json or "[]")
-            if isinstance(snapshot_ckb, list):
+            if career_knowledge_base_is_current(snapshot_ckb):
                 return snapshot_ckb, "reused_snapshot"
         except (json.JSONDecodeError, TypeError):
             pass
+        refreshed = json.loads(serialise_ckb(resume.source_text, resume.experiences_json))
+        snapshot = json.loads(application.resume_snapshot_json or "{}")
+        snapshot["ckb_json"] = json.dumps(refreshed, ensure_ascii=False)
+        application.resume_snapshot_json = json.dumps(snapshot, ensure_ascii=False)
+        application.evidence_matches_json = "{}"
+        application.application_decision_json = "{}"
+        application.selection_plan_json = "{}"
+        session.add(application)
+        session.commit()
+        return refreshed, "refreshed_snapshot"
     return get_or_refresh_current_ckb(session, resume, user_id)
 
 
@@ -253,6 +263,25 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(model, ensure_ascii=False)
+
+
+def add_resume_quality_status(review: dict, content: str, plan: dict) -> dict:
+    factual_status = str(review.get("status") or "fail")
+    quality = evaluate_resume_quality(content, plan)
+    review["factual_status"] = factual_status
+    review["quality_status"] = quality["status"]
+    review["quality_issues"] = quality["issues"]
+    if quality["issues"]:
+        review["status"] = "fail"
+        if review.get("generation_status") == "clean":
+            review["generation_status"] = "completed_low_confidence"
+        review.setdefault("results", []).append({
+            "criteria_id": "resume_quality",
+            "status": "fail",
+            "issues": quality["issues"],
+            "recommendation": "Regenerate after improving the Resume Plan or review this draft manually.",
+        })
+    return review
 
 
 def rebuild_source_aware_models(application: JobApplication, sources: list[JobSource]) -> None:
@@ -2363,6 +2392,7 @@ def review_edited_document(
         profile_text = applicant_profile_prompt(profile) if profile else None
         if document.document_type == "tailored_resume":
             review = review_tailored_resume(ckb_json, application.job_model_json, json.dumps(structured), document.content, profile_text)
+            review = add_resume_quality_status(review, document.content, structured)
         elif document.document_type == "cover_letter":
             review = review_cover_letter(ckb_json, application.job_model_json, json.dumps(structured), profile_text, document.content)
         else:
@@ -2376,9 +2406,14 @@ def review_edited_document(
         trace = json.loads(document.trace_json or "{}")
         trace["review"] = {
             "status": str(review.get("status") or "not_run"),
+            "factual_status": str(review.get("factual_status") or review.get("status") or "not_run"),
+            "quality_status": str(review.get("quality_status") or "not_run"),
             "finding_count": sum(len(item.get("issues") or []) for item in review.get("results") or []),
         }
-        trace["runtime"] = {**trace.get("runtime", {}), "status": "completed"}
+        trace["runtime"] = {
+            **trace.get("runtime", {}),
+            "status": "completed_low_confidence" if review.get("quality_status") == "fail" else "completed",
+        }
         document.trace_json = json.dumps(trace, ensure_ascii=False)
     except (ValueError, json.JSONDecodeError) as error:
         raise HTTPException(409, str(error)) from error
@@ -2824,6 +2859,8 @@ def generate(
                 "document_id": document.id, "document_type": document.document_type,
             }) from error
     review_result = selection_review or cover_letter_review or resume_review or {}
+    if payload.document_type == "tailored_resume":
+        review_result = add_resume_quality_status(review_result, content, resume_plan or {})
     retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
     retry_count += int(review_result.get("telemetry", {}).get("reviewer_retries", 0))
     trace = build_generation_trace(
@@ -2840,6 +2877,8 @@ def generate(
         input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
     )
     trace["runtime"]["ckb_status"] = ckb_status
+    if review_result.get("quality_status") == "fail":
+        trace["runtime"]["status"] = "completed_low_confidence"
     document.content = content
     document.structured_content_json = json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False)
     document.reviewer_json = json.dumps(review_result, ensure_ascii=False)
