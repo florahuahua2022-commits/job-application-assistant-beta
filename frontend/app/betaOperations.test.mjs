@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { sourceDetailIsThin } from "./betaOperations.ts";
+
+test("source detail prompts for thin input without counting role headers", () => {
+  assert.equal(sourceDetailIsThin("负责日常行政工作", "", ""), true);
+  assert.equal(sourceDetailIsThin(Array(20).fill("word").join(" "), "", ""), false);
+  const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("insufficient_source_detail"));
+  assert.ok(page.includes("issue.recommended_action"));
+});
 import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
 
 test("Pack Review and ATS network failures clear busy state", async () => {

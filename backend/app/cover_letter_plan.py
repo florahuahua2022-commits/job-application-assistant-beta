@@ -1,8 +1,105 @@
 import json
+from calendar import monthrange
+from datetime import date, datetime
+import re
 from typing import Any
 
 
 COVER_LETTER_PLAN_SCHEMA_VERSION = "1.0"
+
+COVER_LETTER_FACT_RULES = (
+    "Every applicant employment claim, including opening summaries, must be supported by plan-selected evidence; "
+    "candidate_evidence_ids and unselected records are not permission to use them. Check actual prose, not only declared IDs. "
+    "Use past tense for completed employment. Never say current role, currently employed, or use present-tense duties "
+    "for a closed past employment period. Current employment requires explicit current/present/ongoing status or an "
+    "open-ended authoritative time_period; missing dates do not establish current employment. "
+    "Never infer government policies, procedures or governance expertise merely from a government employer."
+)
+
+
+def _employment_end(value: str) -> date | None:
+    # Month/year precision means the end of that month/year, not its first day.
+    for fmt in ("%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%b %Y", "%B %Y", "%Y-%m", "%Y"):
+        try:
+            parsed = datetime.strptime(value.strip(), fmt).date()
+        except ValueError:
+            continue
+        if fmt == "%Y":
+            return parsed.replace(month=12, day=31)
+        if "%d" not in fmt:
+            return parsed.replace(day=monthrange(parsed.year, parsed.month)[1])
+        return parsed
+    return None
+
+
+def _present_predicate(sentence: str) -> bool:
+    # ponytail: first-person verb-form heuristic, not a grammatical parser. Unusual
+    # subjects/subordinate clauses can be missed or misclassified; use a parser if
+    # reviewed examples justify it. Perfect/past/modal clauses are not current duties.
+    past_or_modal = set("was were had did led ran wrote made took gave held kept met built dealt felt found got knew left read saw sent set spoke spent stood taught thought understood won would could should might may must can will shall".split())
+    text = sentence.casefold()
+    for match in re.finditer(r"\b(?:i|we)\s+(?:(?:[a-z]+ly|also|still|often|now|never|always)\s+)*([a-z]+)\b", text):
+        verb = match.group(1)
+        if verb in past_or_modal or verb.endswith("ed") or verb in {"have", "has"}:
+            continue
+        return True
+    return False
+
+
+def cover_letter_contract_issues(content: str, ckb: list[dict], plan: dict, as_of: date | None = None) -> list[dict]:
+    as_of = as_of or date.today()
+    selected_ids = selected_cover_letter_evidence_ids(plan)
+
+    def normalise(value: str) -> str:
+        return re.sub(r"[^\w]+", " ", value.casefold()).strip()
+
+    employers: dict[str, list[dict]] = {}
+    for item in ckb:
+        parts = str(item.get("source_section") or "").split(">")
+        name = str(item.get("organization") or (parts[-2].split("|")[0] if len(parts) >= 3 else "")).strip()
+        if normalise(name):
+            employers.setdefault(normalise(name), []).append(item)
+    selected_employers = {name for name, items in employers.items()
+                          if any(str(item.get("evidence_id")) in selected_ids for item in items)}
+    # Longest full name wins: 'ABC Services' must not also match employer 'ABC'.
+    names = sorted(employers, key=len, reverse=True)
+    pattern = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, names)) + r")(?!\w)") if names else None
+    body = re.sub(r"<!--.*?-->", "", content, flags=re.S)
+    greeting = re.search(r"(?im)^\s*Dear[^\n]*\n", body)
+    if greeting:
+        body = body[greeting.end():]
+    body = re.split(r"(?im)^\s*(?:Yours (?:sincerely|faithfully)|Kind regards|Best regards)\b", body)[0]
+    issues = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n", body):
+        text = normalise(sentence)
+        mentioned_names = {match.group() for match in pattern.finditer(text)} if pattern else set()
+        excluded = mentioned_names - selected_employers
+        # Body context mentions are deliberately subject to the same whitelist;
+        # no employment-phrase or first-person classification can bypass this check.
+        if excluded:
+            issues.append({"type": "unmatched_evidence_used", "description": "Cover letter body names employers outside the selected evidence.",
+                           "evidence": ", ".join(sorted(excluded)), "location": sentence,
+                           "recommended_action": "Remove unselected employer mentions; do not expand the approved plan."})
+        mentioned = [item for name in mentioned_names for item in employers[name]]
+        explicit_current = bool(re.search(r"\bmy current (?:role|position|job)\b", text))
+        # Remove employer adjuncts so 'I, at X, manage ...' exposes the same verb
+        # as 'At X, I manage ...', without enumerating employment sentences.
+        predicate = normalise(re.sub(r"(?i)\b(I|we)['’](ve|re|m|d|ll)\b",
+                                    lambda m: m[1] + " " + {"ve": "have", "re": "are", "m": "am", "d": "would", "ll": "will"}[m[2].lower()], sentence))
+        if pattern:
+            predicate = pattern.sub(" EMPLOYER ", predicate)
+        predicate = re.sub(r"\b(?:at|with|for|within|from)\s+EMPLOYER\b", " ", predicate)
+        predicate = re.sub(r"\s+", " ", predicate)
+        present = _present_predicate(predicate)
+        candidates = mentioned or ([item for item in ckb if str(item.get("evidence_id")) in selected_ids] if explicit_current else [])
+        ends = [str((item.get("time_period") or {}).get("end") or "").strip() for item in candidates]
+        ended = [end for end in ends if (parsed := _employment_end(end)) is not None and parsed < as_of]
+        unestablished = explicit_current and (not ends or any(not re.fullmatch(r"(?i)present|current|ongoing|now", end) and _employment_end(end) is None for end in ends))
+        if (ended and (present or explicit_current)) or unestablished:
+            issues.append({"type": "contradiction", "description": "Present employment wording conflicts with an ended or unestablished employment period.",
+                           "location": sentence, "evidence": json.dumps([item.get("time_period") for item in candidates]),
+                           "recommended_action": "Use past tense or remove the unsupported current-employment claim."})
+    return issues
 
 
 def selected_cover_letter_evidence_ids(plan: dict[str, Any]) -> set[str]:

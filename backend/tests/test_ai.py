@@ -154,6 +154,39 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 
+    def test_cover_letter_contract_overrides_false_pass_and_repair_rechecks(self):
+        ckb = json.dumps([
+            {"evidence_id": "EA", "source_section": "Work Experience > Avaintec > Executive Assistant",
+             "source_text": "Prepared executive agendas.", "time_period": {"start": "Nov 2017", "end": "Jan 2019"}},
+            {"evidence_id": "FIN", "source_section": "Work Experience > Department of Communities > Finance Administration Officer",
+             "source_text": "SECRET_UNSELECTED_DUTY", "time_period": {"start": "Feb 2026", "end": "Aug 2026"}},
+        ])
+        plan = json.dumps({"priorities": [{"criteria_id": "C1"}], "selected_evidence": [{"evidence_id": "EA"}]})
+        bad = "At Department of Communities, I support financial operations."
+        good = "At Avaintec, I prepared executive agendas."
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}') as provider:
+            review = ai.review_cover_letter(ckb, "{}", plan, None, bad)
+        self.assertEqual(review["status"], "fail")
+        self.assertEqual({i["type"] for i in review["results"][0]["issues"]}, {"contradiction", "unmatched_evidence_used"})
+        self.assertTrue(all(i["blocks_release"] for i in review["results"][0]["issues"]))
+        self.assertNotIn("SECRET_UNSELECTED_DUTY", provider.call_args.args[0])
+        with patch.object(ai, "_selection_provider_response", side_effect=[
+            '{"status":"pass","issues":[]}', good, '{"status":"pass","issues":[]}',
+        ]):
+            content, review = ai.repair_cover_letter(bad, ckb, "{}", plan, None)
+        self.assertEqual(content, good)
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["telemetry"]["repair_rounds"], 1)
+        selected_finance = json.dumps({"priorities": [{"criteria_id": "C1"}], "selected_evidence": [{"evidence_id": "FIN"}]})
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_cover_letter(ckb, "{}", selected_finance, None, bad)
+        self.assertEqual([i["type"] for i in review["results"][0]["issues"]], ["contradiction"])
+        open_ckb = json.loads(ckb)
+        open_ckb[1]["time_period"]["end"] = "Present"
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_cover_letter(json.dumps(open_ckb), "{}", selected_finance, None, bad)
+        self.assertEqual(review["status"], "pass")
+
     def test_cover_letter_repair_removes_unsupported_claim_and_rechecks(self):
         failed = {"status":"fail","results":[{"issues":[{"type":"unsupported_claim","severity":"critical","description":"Over a decade is unsupported.","location":"over a decade"}]}],"telemetry":{}}
         passed = {"status":"pass","results":[{"issues":[]}],"telemetry":{}}
@@ -359,10 +392,13 @@ class GenerateDraftTests(unittest.TestCase):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
             ai, "_deepseek_draft", return_value="Draft"
         ) as provider:
-            ai.generate_draft("Resume", "JD", "cover_letter", user_experiences_json=ckb, cover_letter_plan_json=plan)
+            ai.generate_draft("UNSELECTED_MASTER_FACT", "JD", "cover_letter", user_experiences_json=ckb, cover_letter_plan_json=plan,
+                              resume_plan_json='{"context":"UNSELECTED_PLAN_FACT"}')
         prompt = provider.call_args.args[0]
         self.assertIn("Selected fact", prompt)
         self.assertNotIn("Broader matched fact", prompt)
+        self.assertNotIn("UNSELECTED_MASTER_FACT", prompt)
+        self.assertNotIn("UNSELECTED_PLAN_FACT", prompt)
 
     def test_resume_prompt_requires_standard_sections_and_two_page_limit(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(

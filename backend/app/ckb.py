@@ -5,6 +5,23 @@ from typing import Any
 
 
 CKB_SCHEMA_VERSION = "1.1"
+EVIDENCE_THIN_WORD_THRESHOLD = 20
+
+
+def evidence_density(item: dict[str, Any]) -> dict[str, Any]:
+    """Measure source detail without counting employer/title/date headers twice."""
+    source = str(item.get("source_text") or "").strip()
+    headers = {part.strip().casefold() for part in str(item.get("source_section") or "").split(">")}
+    headers.update(str(item.get(key) or "").strip().casefold() for key in ("role_title", "organization", "time_period_text"))
+    if source:
+        detail = "\n".join(line for line in source.splitlines() if line.strip().casefold() not in headers
+                           and not EMPLOYMENT_PERIOD_PATTERN.search(line))
+    else:
+        detail = "\n".join(dict.fromkeys(str(item.get(key) or "").strip() for key in ("action", "responsibility", "task", "result", "detail")))
+    count = len(re.findall(r"\b[\w'-]+\b", detail))
+    # ponytail: word length is an English-oriented proxy, not proof of informative content; calibrate with reviewed sources.
+    return {"source_detail_words": count, "evidence_thin": count < EVIDENCE_THIN_WORD_THRESHOLD,
+            "density_threshold_words": EVIDENCE_THIN_WORD_THRESHOLD}
 EVIDENCE_TYPES = {
     "experience", "project", "volunteer", "education", "qualification", "award", "publication",
 }
@@ -80,6 +97,7 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         "evidence_quality": str(item.get("evidence_quality") or _quality(item)),
         "fact_verification": "explicit",
         "competency_inference": str(item.get("competency_inference") or "derived"),
+        **evidence_density({**item, "source_text": source_text}),
     }
 
 

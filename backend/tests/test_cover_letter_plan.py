@@ -1,12 +1,65 @@
 import json
 import unittest
+from datetime import date
 from types import SimpleNamespace
 
-from app.cover_letter_plan import COVER_LETTER_PLAN_SCHEMA_VERSION, build_cover_letter_plan, cover_letter_evidence_pack, selected_cover_letter_evidence_ids
+from app.cover_letter_plan import COVER_LETTER_PLAN_SCHEMA_VERSION, build_cover_letter_plan, cover_letter_contract_issues, cover_letter_evidence_pack, selected_cover_letter_evidence_ids
 from app.evidence_allocation import build_evidence_allocation
 
 
 class CoverLetterPlanTests(unittest.TestCase):
+    def test_structural_employer_and_tense_checks(self):
+        ckb = [{"evidence_id": "FIN", "source_section": "Work Experience > Department of Communities > Officer",
+                "time_period": {"end": "Aug 2026"}}]
+        selected = {"selected_evidence": [{"evidence_id": "FIN"}]}
+        probes = [
+            "At Department of Communities, I support financial operations.",
+            "I coordinate monthly reporting at Department of Communities.",
+            "I, within Department of Communities, oversee supplier reconciliations.",
+            "Across the team at Department of Communities, we regularly streamline reporting.",
+            "In my current role at Department of Communities, I manage records.",
+            "At Department of Communities, I currently work on reporting.",
+            "At Department of\nCommunities, I support reporting.",
+        ]
+        for text in probes:
+            for plan, expected in (({}, {"contradiction", "unmatched_evidence_used"}), (selected, {"contradiction"})):
+                with self.subTest(text=text, selected=bool(plan)):
+                    issues = cover_letter_contract_issues(text, ckb, plan, date(2026, 9, 4))
+                    self.assertEqual({i["type"] for i in issues}, expected)
+        for text in [
+            "At Department of Communities, I supported financial operations.",
+            "At Department of Communities, I led reporting and wrote summaries.",
+            "At Department of Communities, I was responsible for reports.",
+            "At Department of Communities, I've supported reporting.",
+            "At Department of Communities, I would support reporting.",
+            "At Department of Communities, I worked on reports. I manage a different team now.",
+        ]:
+            with self.subTest(past=text):
+                self.assertEqual(cover_letter_contract_issues(text, ckb, selected, date(2026, 9, 4)), [])
+        text = probes[0]
+        for end, as_of, conflict in [
+            ("Present", date(2026, 9, 4), False), ("ongoing", date(2026, 9, 4), False),
+            ("current", date(2026, 9, 4), False), ("now", date(2026, 9, 4), False),
+            ("Aug 2026", date(2026, 8, 15), False), ("2026", date(2026, 9, 4), False),
+            ("2026-09-04", date(2026, 9, 4), False), ("2026-09-03", date(2026, 9, 4), True),
+            ("August 2026", date(2026, 9, 4), True), ("2026-08", date(2026, 9, 4), True),
+            ("2025", date(2026, 9, 4), True), ("", date(2026, 9, 4), False),
+        ]:
+            ckb[0]["time_period"]["end"] = end
+            with self.subTest(end=end, as_of=as_of):
+                self.assertEqual(bool(cover_letter_contract_issues(text, ckb, selected, as_of)), conflict)
+
+    def test_employer_whitelist_uses_body_and_longest_whole_name(self):
+        ckb = [{"evidence_id": name, "organization": name} for name in ("ABC", "ABC Services", "Art")]
+        plan = {"selected_evidence": [{"evidence_id": "ABC Services"}]}
+        for text in ["ABC Services is mentioned in passing.", "I enjoy participating in events.",
+                     "ABC\nDear Hiring Manager,\nABC Services is mentioned.\nYours faithfully,\nArt"]:
+            with self.subTest(text=text):
+                self.assertEqual(cover_letter_contract_issues(text, ckb, plan), [])
+        for text in ["ABC is mentioned in passing.", "An aside about ABC: reporting matters.", "ART provides services."]:
+            with self.subTest(text=text):
+                self.assertEqual([i["type"] for i in cover_letter_contract_issues(text, ckb, plan)], ["unmatched_evidence_used"])
+
     def test_no_selection_criteria_context_still_selects_grounded_differentiator(self):
         resume = {"selected_evidence": [{"evidence_id": "EV1", "curation_action": "feature", "evidence_framing": "direct"}]}
         decision = {"requirements": [{"criteria_id": "C1", "importance": "essential", "evidence_classification": "verified_match", "matched_evidence": ["EV1"]}]}

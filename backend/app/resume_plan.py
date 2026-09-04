@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from collections import defaultdict
 from typing import Any
+from .ckb import evidence_density
 
 
 RESUME_PLAN_SCHEMA_VERSION = "1.1"
@@ -78,8 +79,25 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
     target_words = int(plan.get("target_words") or 0)
     word_count = len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE))
     if target_words and word_count < target_words * .7:
+        evidence = [item for item in plan.get("selected_evidence") or [] if item.get("evidence_type") == "experience"]
+        measured = [item for item in evidence if isinstance(item.get("evidence_thin"), bool)]
+        thin = [item for item in measured if item["evidence_thin"]]
+        reason = "resume_too_brief"  # Historical plans lack source-density metadata: do not guess attribution.
+        if measured and len(measured) == len(evidence):
+            reason = "insufficient_source_detail" if len(thin) / len(measured) > .5 else "generation_under_utilized"
+        sections = sorted({str(item.get("source_section") or "Unnamed experience") for item in thin})
+        guidance = (
+            "Add factual detail in Master Resume for: " + "; ".join(sections) +
+            ". Describe specific actions, systems/tools, volume or frequency, and an observed result if known. Do not invent numbers. "
+            "Existing applications keep their original Resume snapshot; use the updated Resume in a new application after saving."
+            if reason == "insufficient_source_detail" else
+            "The selected sources meet the length threshold. Review evidence utilisation and generation before requesting more source detail."
+            if reason == "generation_under_utilized" else "Source density is unavailable in this historical plan. Regenerate to assess the cause."
+        )
         issues.append({
-            "type": "resume_too_brief", "severity": "major", "blocks_release": True,
+            "type": reason, "code": "resume_too_brief", "severity": "major", "blocks_release": True,
+            "thin_source_sections": sections, "thin_evidence_count": len(thin), "selected_experience_count": len(evidence),
+            "recommended_action": guidance,
             "description": f"The CV contains {word_count} words, below 70% of its {target_words}-word target.",
         })
 
@@ -296,6 +314,7 @@ def build_resume_curation_plan(
             ) else "include_concisely",
             "evidence_framing": framing,
             "fact_policy": "preserve_source_facts_only",
+            **(evidence_density(item) if item.get("evidence_type") == "experience" else {}),
         })
 
     role_groups: dict[str, list[dict[str, Any]]] = {}

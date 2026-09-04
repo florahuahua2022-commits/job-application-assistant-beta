@@ -238,6 +238,20 @@ Oct 2007 - Aug 2012
             self.assertEqual(quality["word_count"], words)
             self.assertEqual(quality["status"], expected)
 
+    def test_short_resume_attributes_source_density_and_names_experience(self):
+        section = "Work Experience > Example Department > Finance Administration Officer"
+        matches = {"matches": [{"criteria_id": "C1", "match_type": "direct", "matched_evidence": ["FIN"]}]}
+        for source, reason in (("负责日常行政工作", "insufficient_source_detail"),
+                               ("Reconciled weekly invoices in the finance system, checked supplier details against purchase orders, investigated discrepancies with business units and maintained an audit register for monthly reporting.", "generation_under_utilized")):
+            plan = build_resume_curation_plan({"criteria": []}, matches, [evidence("FIN", section, source)])
+            quality = evaluate_resume_quality("Short draft.", plan)
+            issue = quality["issues"][0]
+            self.assertEqual(issue["type"], reason)
+            self.assertEqual(issue["code"], "resume_too_brief")
+            if reason == "insufficient_source_detail":
+                self.assertIn("Finance Administration Officer", issue["recommended_action"])
+                self.assertIn("systems/tools", issue["recommended_action"])
+
     def test_current_role_with_no_bullet_content_stays_visible_without_filler(self):
         current = evidence("NOW", "Work > Current Role", "", period={"start": "2025", "end": "Present"})
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [current])

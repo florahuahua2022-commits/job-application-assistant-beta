@@ -25,3 +25,7 @@ export function parsedSelectionCriteria(value: unknown): string {
 export function preservedOrganisation(current: string, extracted: string): string {
   return current || extracted;
 }
+
+export function sourceDetailIsThin(action: string, context: string, result: string): boolean {
+  return ([...new Set([action, context, result].map(value => value.trim()))].join(" ").match(/[\p{L}\p{N}]+(?:['-][\p{L}\p{N}]+)*/gu) || []).length < 20;
+}

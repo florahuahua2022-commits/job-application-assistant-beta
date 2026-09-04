@@ -11,7 +11,7 @@ from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding
 from .resume_plan import resume_evidence_pack
-from .cover_letter_plan import cover_letter_evidence_pack
+from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
 
 EVIDENCE_STOP_WORDS = {
@@ -463,7 +463,13 @@ def review_cover_letter(
         raise ValueError("Cover Letter Reviewer inputs are invalid.") from error
     if not content.strip() or not plan.get("priorities"):
         raise ValueError("The Cover Letter Reviewer package is incomplete.")
+    selected = cover_letter_evidence_pack(ckb_json, cover_letter_plan_json)
+    contract_issues = cover_letter_contract_issues(content, ckb, plan)
     prompt = f"""You are the factual and requirement-coverage Reviewer for an Australian government Cover Letter. Do not rewrite, improve or repair the letter. Only verify and flag material issues.
+
+CURRENT REVIEW DATE: {date.today().isoformat()}
+{COVER_LETTER_FACT_RULES}
+Report unmatched_evidence_used for claims not supported by SELECTED CKB, even if another career record could support them. Check each employment sentence against a selected evidence_id and its source_text.
 
 {government_writing_rules(target_english_variant())}
 
@@ -504,8 +510,8 @@ COVER LETTER PLAN:
 APPLICANT PROFILE DECLARATIONS:
 {applicant_profile or 'Not provided'}
 
-FULL CKB WITH SOURCE TEXT:
-{json.dumps(ckb, ensure_ascii=False)}
+SELECTED CKB WITH SOURCE TEXT (only permitted employment evidence):
+{json.dumps(selected, ensure_ascii=False)}
 
 FINAL COVER LETTER:
 {content}
@@ -518,6 +524,7 @@ Use pass with an empty issues array when there is no material issue."""
     for attempt in range(2):
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
+            raw["issues"] = list(raw.get("issues") or []) + contract_issues
             result = normalise_document_review(raw, "cover_letter")
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
@@ -540,8 +547,11 @@ def auto_fix_cover_letter(
     ]
     if not issues:
         return content
-    selected_evidence = resume_evidence_pack(ckb_json, cover_letter_plan_json)
+    selected_evidence = cover_letter_evidence_pack(ckb_json, cover_letter_plan_json)
     prompt = f"""You are correcting a Cover Letter after factual validation. Return the full corrected letter only.
+
+CURRENT REVIEW DATE: {date.today().isoformat()}
+{COVER_LETTER_FACT_RULES}
 
 PREVIOUS COVER LETTER:
 ---
@@ -972,6 +982,9 @@ def generate_draft(
         evidence_pack = resume_evidence_pack(user_experiences_json, resume_plan_json)
     elif document_type == "cover_letter":
         evidence_pack = cover_letter_evidence_pack(user_experiences_json, cover_letter_plan_json)
+        task += " " + COVER_LETTER_FACT_RULES
+        master_resume = "Omitted: use only the selected evidence and Applicant Profile."
+        resume_plan_json = selection_plan_json = evidence_matches_json = "{}"
     else:
         evidence_pack = matched_evidence_pack(user_experiences_json, evidence_matches_json) or build_evidence_pack(
             master_resume, user_experiences_json, job_description, selection_criteria
