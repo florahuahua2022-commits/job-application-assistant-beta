@@ -139,7 +139,21 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
     work_lines = lines[section_start:section_end]
     date_indexes = [index for index, line in enumerate(work_lines) if EMPLOYMENT_PERIOD_PATTERN.search(line)]
     if not date_indexes:
-        return []
+        # ponytail: only explicit short role/company header pairs are inferred;
+        # unusual layouts remain in source_text for user correction, not guessed identities.
+        headers = [index for index in range(len(work_lines) - 2)
+                   if len(work_lines[index]) <= 80 and _ROLE_HINT.search(work_lines[index])
+                   and len(work_lines[index + 1]) <= 100 and _COMPANY_HINT.search(work_lines[index + 1])
+                   and not re.search(r"[.!?]$", work_lines[index])]
+        records = []
+        for position, index in enumerate(headers):
+            stop = headers[position + 1] if position + 1 < len(headers) else len(work_lines)
+            detail = "\n".join(work_lines[index + 2:stop])
+            if detail:
+                records.append({"role_title": work_lines[index], "organization": work_lines[index + 1],
+                                "responsibility": detail, "source_text": "\n".join(work_lines[index:stop]),
+                                "source_section": f"Work Experience > {work_lines[index + 1]} > {work_lines[index]}"})
+        return records
 
     headers: list[tuple[int, int, str, str, str]] = []
     for date_index in date_indexes:
@@ -189,7 +203,7 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
             if len(line) > 2 and not re.fullmatch(r"(?i)(?:responsibilities|key achievements|achievements|duties):?", line)
         ]
         responsibility = " ".join(responsibility_lines).strip()
-        if not role_title or len(responsibility) < 25:
+        if not role_title:
             continue
         source_block = "\n".join(work_lines[max(0, header_start):next_header_start]).strip()
         evidence_id = stable_evidence_id("experience", source_block)
@@ -209,7 +223,7 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
             "competency_tags": [],
             "fact_verification": "explicit",
         })
-    return experiences[:20]
+    return experiences
 
 
 def extract_document_text(filename: str, payload: bytes, kind: str | None = None) -> tuple[str, str, list[str]]:

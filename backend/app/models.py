@@ -214,6 +214,12 @@ class ResumeUpdate(SQLModel):
     experiences_json: str | None = None
 
 
+class ApplicationResumeUpdate(SQLModel):
+    use_latest_master: bool = False
+    source_text: str | None = Field(default=None, max_length=200000)
+    expected_snapshot: str
+
+
 class JobApplicationCreate(SQLModel):
     company: str
     position_title: str

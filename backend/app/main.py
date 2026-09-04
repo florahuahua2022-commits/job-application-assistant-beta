@@ -12,12 +12,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlmodel import Session, delete, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
 from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
-from .ats_verification import verify_resume_artifact
+from .ats_verification import verify_resume_artifact, verify_document_export
 from .applicant_profile import applicant_profile_prompt
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
@@ -41,6 +41,7 @@ from .release_state import ats_is_current, details_fingerprint, document_is_curr
 from .selection_logic import actual_word_count, build_selection_plan, criteria_requiring_confirmation
 from .source_acquisition import acquire_sources, process_uploaded_document
 from .source_aware_parsing import build_source_aware_models
+from .models import ApplicationResumeUpdate
 
 app = FastAPI(title="Job Application Assistant API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -130,6 +131,8 @@ def application_master_resume(session: Session, application: JobApplication, use
             source_text=snapshot["source_text"], experiences_json=snapshot.get("experiences_json") or "[]",
             ckb_json=snapshot.get("ckb_json") or "[]",
         )
+    if application.resume_snapshot_json not in {"", "{}", None}:
+        return None
     return session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
 
 
@@ -144,6 +147,7 @@ def application_ckb(session: Session, application: JobApplication, resume: Resum
         refreshed = json.loads(serialise_ckb(resume.source_text, resume.experiences_json))
         snapshot = json.loads(application.resume_snapshot_json or "{}")
         snapshot["ckb_json"] = json.dumps(refreshed, ensure_ascii=False)
+        resume.ckb_json = snapshot["ckb_json"]
         application.resume_snapshot_json = json.dumps(snapshot, ensure_ascii=False)
         application.evidence_matches_json = "{}"
         application.application_decision_json = "{}"
@@ -185,6 +189,8 @@ def current_required_documents(
 
 
 def serialise_ckb(source_text: str, experiences_json: str) -> str:
+    if experiences_json.strip() in {"", "[]"}:
+        experiences_json = json.dumps(extract_resume_experiences(source_text), ensure_ascii=False)
     ckb = build_career_knowledge_base(source_text, experiences_json)
     errors = validate_career_knowledge_base(ckb)
     if errors:
@@ -266,12 +272,18 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
 
 
 def add_resume_quality_status(review: dict, content: str, plan: dict) -> dict:
-    factual_status = str(review.get("status") or "fail")
+    findings = [issue for result in review.get("results") or [] for issue in result.get("issues") or []]
+    content_types = {"requirement_omission", "ai_tone", "jd_wording_repeated", "declared_evidence_unused"}
+    factual_status = "fail" if any(item.get("blocks_release", item.get("severity") != "advisory") and item.get("type") not in content_types for item in findings) else "pass"
+    if review.get("status") != "pass" and not findings:
+        factual_status = str(review.get("status") or "pending")
     quality = evaluate_resume_quality(content, plan)
     review["factual_status"] = factual_status
+    if any(item.get("type") in content_types and item.get("blocks_release", True) for item in findings):
+        quality["status"] = "fail"
     review["quality_status"] = quality["status"]
     review["quality_issues"] = quality["issues"]
-    if quality["issues"]:
+    if quality["status"] == "fail":
         review["status"] = "fail"
         if review.get("generation_status") == "clean":
             review["generation_status"] = "completed_low_confidence"
@@ -311,6 +323,8 @@ def semantic_source_state(sources: list[JobSource]) -> tuple:
 
 def invalidate_evidence_matches(session: Session, user_id: UUID | None) -> None:
     for application in session.exec(select_for_user(JobApplication, user_id)).all():
+        if application.resume_snapshot_json not in {"", "{}", None}:
+            continue
         application.evidence_matches_json = "{}"
         application.application_decision_json = "{}"
         application.selection_plan_json = "{}"
@@ -1139,6 +1153,50 @@ def create_application(
     return application
 
 
+@app.put("/applications/{application_id}/resume", response_model=JobApplication)
+def update_application_resume(
+    application_id: int,
+    payload: ApplicationResumeUpdate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if payload.expected_snapshot != application.resume_snapshot_json:
+        raise HTTPException(409, "Application materials changed. Reload before saving your changes.")
+    if payload.use_latest_master == (payload.source_text is not None):
+        raise HTTPException(422, "Choose the latest Master Resume or supply application resume text.")
+    if payload.use_latest_master:
+        resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+        if not resume or not resume.source_text.strip():
+            raise HTTPException(409, "Save a usable Master Resume first.")
+        ckb, _ = get_or_refresh_current_ckb(session, resume, user_id)
+        snapshot = {"resume_id": resume.id, "title": resume.title, "source_text": resume.source_text,
+                    "experiences_json": resume.experiences_json, "ckb_json": json.dumps(ckb, ensure_ascii=False)}
+    else:
+        source = (payload.source_text or "").strip()
+        if not source:
+            raise HTTPException(422, "Add the resume source text for this application.")
+        experiences = json.dumps(extract_resume_experiences(source), ensure_ascii=False)
+        snapshot = {"title": "Application Resume", "source_text": source, "experiences_json": experiences,
+                    "ckb_json": serialise_ckb(source, experiences)}
+    snapshot["material_version"] = str(uuid4())
+    snapshot["updated_at"] = datetime.utcnow().isoformat()
+    application.resume_snapshot_json = json.dumps(snapshot, ensure_ascii=False)
+    application.evidence_matches_json = "{}"
+    application.application_decision_json = "{}"
+    application.selection_plan_json = "{}"
+    application.selection_confirmations_json = "[]"
+    require_current_generation_contract(application)
+    application.updated_at = datetime.utcnow()
+    if application.status == "ready_to_apply":
+        application.status = "draft"
+    session.add(application)
+    session.commit(); session.refresh(application)
+    return application
+
+
 @app.post("/applications/import-url", response_model=JobUrlImportResponse)
 def import_application_url(
     payload: JobUrlImportRequest,
@@ -1709,6 +1767,23 @@ def list_generated_documents(
     return sorted(current.values(), key=lambda document: document.created_at, reverse=True)
 
 
+@app.get("/applications/{application_id}/document-history")
+def document_history(application_id: int, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    resume = application_master_resume(session, application, user_id)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
+    current_input = generation_inputs_fingerprint(application, resume, profile) if resume else ""
+    documents = session.exec(select_for_user(GeneratedDocument, user_id).where(GeneratedDocument.application_id == application_id).order_by(GeneratedDocument.created_at.desc(), GeneratedDocument.id.desc())).all()
+    result = []
+    for document in documents:
+        review = load_release_state(document.reviewer_json)
+        state = "outdated" if not current_input or not document_is_current(document, current_input, True) else "pending" if review.get("status") not in {"pass", "fail"} else "needs_improvement" if review.get("status") == "fail" else "usable"
+        result.append({**document.model_dump(), "quality_state": state})
+    return result
+
+
 @app.get("/applications/{application_id}/quality-check", response_model=QualityCheckResponse)
 def quality_check(
     application_id: int,
@@ -2250,6 +2325,13 @@ def release_checklist(
         "pack_review": {"ready": pack_current, "current": (state.get("pack_review") or {}).get("fingerprint") == pack_key, "result": stored_pack},
         "ats": {"ready": ats_current, "document_id": resume.id if resume else None, "format": format, "template": template, "result": stored_ats if ats_current else None},
     }
+    if any((load_release_state(item.trace_json).get("versions") or {}).get("prompt") == "2.0" for item in latest.values()):
+        exports = state.get("exports") or {}
+        exported = exports.get("documents") or {}
+        checks["exports"] = {"ready": exports.get("format") == format and exports.get("template") == template and all(
+            key in latest and exported.get(key, {}).get("document_id") == latest[key].id
+            and exported.get(key, {}).get("content_sha256") == fingerprint(latest[key].content)
+            and exported.get(key, {}).get("result", {}).get("ready") is True for key in required)}
     ready = all(item["ready"] for item in checks.values())
     release_status = "applied" if application.status == "applied" else "ready_to_apply" if ready else "artifact_verified" if ats_current else "content_reviewed" if pack_current else "needs_attention" if latest else "draft"
     return {"schema_version": "1.0", "status": release_status, "ready": ready, "checks": checks, "warnings": warnings}
@@ -2337,10 +2419,21 @@ def update_generated_document(
     document = get_for_user(session, GeneratedDocument, document_id, user_id)
     if not document:
         raise HTTPException(404, "Generated document not found.")
-    document.content = payload.content
-    # Reviewer findings describe the generated content. Once the applicant edits
-    # that content, those findings are stale and must not block Final Check.
-    document.reviewer_json = "{}"
+    if document.content == payload.content:
+        return document
+    trace = load_release_state(document.trace_json)
+    trace["parent_document_id"] = document.id
+    trace["version_kind"] = "user_edit"
+    trace["review"] = {"status": "pending"}
+    document = GeneratedDocument(
+        user_id=document.user_id, application_id=document.application_id,
+        document_type=document.document_type, content=payload.content,
+        structured_content_json=document.structured_content_json,
+        trace_json=json.dumps(trace, ensure_ascii=False),
+        reviewer_json=json.dumps({"status": "pending", "state": "pending"}),
+        used_experiences_json=document.used_experiences_json,
+        closing_styles_json=document.closing_styles_json,
+    )
     session.add(document)
     if document.document_type == "selection_criteria":
         application = get_for_user(session, JobApplication, document.application_id, user_id)
@@ -2384,7 +2477,7 @@ def review_edited_document(
     application = get_for_user(session, JobApplication, document.application_id, user_id)
     master_resume = application_master_resume(session, application, user_id) if application else None
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
-    if not application or not master_resume or document.document_type not in current_required_documents(session, application, user_id, master_resume, profile):
+    if not application or not master_resume or document.id != getattr(current_required_documents(session, application, user_id, master_resume, profile).get(document.document_type), "id", None):
         raise HTTPException(409, "This document is historical or no longer required. Regenerate the current application documents.")
     try:
         structured = json.loads(document.structured_content_json or "{}")
@@ -2459,13 +2552,16 @@ def export_generated_document(
         "cover_letter": "Cover_Letter",
         "selection_criteria": "Selection_Criteria",
     }.get(document.document_type, document.document_type)
-    filename = safe_filename(f"{application.position_title}_{label}")
+    filename = safe_filename(f"{application.position_title}_{label}_Draft_v{document.id}")
     if format == "docx":
         payload = create_docx(document.content, label.replace("_", " "), template, market)
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
         payload = create_pdf(document.content, label.replace("_", " "), template, market)
         media_type = "application/pdf"
+    integrity = verify_document_export(document.content, payload, format)
+    if not integrity["ready"]:
+        raise HTTPException(409, "Export integrity check failed. Your saved text is unchanged; try another format or correct the document.")
     return Response(payload, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'})
 
 
@@ -2494,7 +2590,7 @@ def ats_check_generated_resume(
         ckb = json.loads(master_resume.ckb_json or "[]")
     except (json.JSONDecodeError, TypeError) as error:
         raise HTTPException(409, "Resume verification metadata is invalid.") from error
-    if plan.get("schema_version") not in {"1.0", "1.1"} or not isinstance(plan.get("roles"), list):
+    if plan.get("schema_version") not in {"1.0", "1.1", "2.0"} or not isinstance(plan.get("roles"), list):
         raise HTTPException(409, "Generate the Resume with a valid current Resume Plan before ATS verification.")
     if reviewer.get("status") != "pass":
         raise HTTPException(409, "Review the current Resume before ATS verification.")
@@ -2527,6 +2623,18 @@ def ats_check_generated_resume(
         "template": payload.template,
         "result": result,
     }
+    exports = {}
+    for kind in final.checked_documents:
+        selected_document = latest[kind]
+        title = {"tailored_resume": "Tailored Resume", "cover_letter": "Cover Letter", "selection_criteria": "Selection Criteria"}.get(kind, kind)
+        try:
+            render = create_docx if payload.format == "docx" else create_pdf
+            artifact = render(selected_document.content, title, payload.template, profile.country)
+            integrity = verify_document_export(selected_document.content, artifact, payload.format)
+        except Exception:
+            integrity = {"ready": False, "message": "Export could not be completed."}
+        exports[kind] = {"document_id": selected_document.id, "content_sha256": fingerprint(selected_document.content), "result": integrity}
+    state["exports"] = {"format": payload.format, "template": payload.template, "documents": exports}
     application.release_state_json = json.dumps(state, ensure_ascii=False)
     session.add(application); session.commit()
     return result
@@ -2580,13 +2688,61 @@ def export_application_pack(
             document = latest[document_type]
             label = labels[document_type]
             payload = create_docx(document.content, label.replace("_", " "), template, market) if format == "docx" else create_pdf(document.content, label.replace("_", " "), template, market)
-            archive.writestr(f"{safe_filename(application.position_title)}_{label}.{format}", payload)
+            if not verify_document_export(document.content, payload, format)["ready"]:
+                raise HTTPException(409, f"{label.replace('_', ' ')} export failed its integrity check. Saved documents are unchanged.")
+            archive.writestr(f"{safe_filename(application.position_title)}_{label}_Draft_v{document.id}.{format}", payload)
     filename = safe_filename(f"{application.position_title}_Application_Pack_{format.upper()}")
     return Response(archive_stream.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}.zip"'})
 
 
+def save_generation_request(session, application_id, key, value, *, reserve=False):
+    # Compare-and-swap protects concurrent workers without holding a transaction during AI calls.
+    for _ in range(3):
+        session.expire_all()
+        application = session.get(JobApplication, application_id)
+        if not application:
+            raise HTTPException(404, "Application not found.")
+        previous = application.release_state_json
+        state = load_release_state(previous)
+        requests = state.setdefault("generation_requests", {})
+        if reserve and key in requests:
+            return requests[key]
+        requests[key] = value
+        result = session.execute(update(JobApplication).where(JobApplication.id == application_id, JobApplication.release_state_json == previous).values(release_state_json=json.dumps(state, ensure_ascii=False)))
+        session.commit()
+        if result.rowcount:
+            return None
+    raise HTTPException(409, "Another application update is in progress. Please retry.")
+
+
 @app.post("/generate", response_model=GeneratedDocument)
-def generate(
+def generate(payload: GenerateRequest, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+    application = get_for_user(session, JobApplication, payload.application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    if payload.pack_id is None:
+        return generate_document(payload, session, user_id)
+    key = f"{payload.pack_id}:{payload.document_type}"
+    previous = save_generation_request(session, application.id, key, {"status": "running", "started_at": datetime.utcnow().isoformat()}, reserve=True)
+    if previous:
+        if previous.get("document_id"):
+            saved = get_for_user(session, GeneratedDocument, previous["document_id"], user_id)
+            if saved:
+                return saved
+        raise HTTPException(409, "This generation request is running or was interrupted. Existing drafts are kept; use Retry to start a new request.")
+    try:
+        document = generate_document(payload, session, user_id)
+    except Exception as error:
+        session.rollback()
+        detail = getattr(error, "detail", {})
+        save_generation_request(session, payload.application_id, key, {"status": "failed", "document_id": detail.get("document_id") if isinstance(detail, dict) else None})
+        raise
+    document_id = document.id
+    save_generation_request(session, payload.application_id, key, {"status": "completed", "document_id": document_id})
+    return get_for_user(session, GeneratedDocument, document_id, user_id)
+
+
+def generate_document(
     payload: GenerateRequest,
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
@@ -2599,6 +2755,7 @@ def generate(
     if not feature["enabled"]:
         raise HTTPException(503, f"{payload.document_type.replace('_', ' ').title()} generation is temporarily unavailable. Existing documents remain available.")
     generation_started = perf_counter()
+    generation_started_at = datetime.utcnow()
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
     master_resume = application_master_resume(session, application, user_id) if application else None
     if not application or not master_resume:
@@ -2636,6 +2793,7 @@ def generate(
         session.add(application)
         session.commit()
     decision = json.loads(application.application_decision_json or "{}")
+    started_fingerprint = generation_inputs_fingerprint(application, master_resume, profile)
     current_inputs = decision_inputs(
         json.loads(job_model_json), stored_requirements, json.loads(ckb_source_json), profile,
     )
@@ -2663,6 +2821,12 @@ def generate(
             json.loads(job_model_json), json.loads(evidence_matches_json), json.loads(ckb_source_json),
             application_decision=decision, outcome_learning=outcome_learning,
         )
+        resume_limit = (stored_requirements.get("documents", {}).get("resume", {}).get("limit") or {})
+        if resume_limit.get("scope") == "document" and resume_limit.get("constraint") in {"maximum", "exact"}:
+            if resume_limit.get("unit") == "words":
+                resume_plan["maximum_words"] = resume_limit["value"]
+            elif resume_limit.get("unit") == "pages":
+                resume_plan["maximum_pages"] = resume_limit["value"]
         selection_plan_json = application.selection_plan_json or "{}"
         if not selection_criteria_context_required(stored_requirements):
             selection_plan_json = '{"schema_version":"1.0","items":[]}'
@@ -2760,9 +2924,10 @@ def generate(
         validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
         if not validation["valid"]:
             raise HTTPException(502, validation["issues"][0]["message"] + " Please regenerate it.")
+    generation_provider = provider_response_telemetry()
     run_id = str(uuid4())
-    provider = settings.ai_provider.strip().lower()
-    model_name = settings.deepseek_model if provider == "deepseek" else settings.openai_model
+    provider = generation_provider.get("provider") or settings.ai_provider.strip().lower()
+    model_name = generation_provider.get("model") or (settings.deepseek_model if provider == "deepseek" else settings.openai_model)
     trace = build_generation_trace(
         run_id=run_id,
         document_type=payload.document_type,
@@ -2772,8 +2937,11 @@ def generate(
         model=model_name,
         evidence_ids=[str(value) for value in metadata["used_experiences"]],
         latency_ms=round((perf_counter() - generation_started) * 1000),
-        input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
+        input_fingerprint=started_fingerprint,
     )
+    trace["inputs"] = {"resume": master_resume.source_text, "ckb": current_ckb, "job_model": json.loads(job_model_json), "profile": profile_text}
+    trace["draft"] = content
+    trace["runtime"]["generation_provider"] = generation_provider
     trace["runtime"]["status"] = "review_pending"
     trace["runtime"]["ckb_status"] = ckb_status
     document = GeneratedDocument(
@@ -2784,6 +2952,7 @@ def generate(
         structured_content_json=json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False),
         reviewer_json=json.dumps({"status": "pending", "state": "pending"}),
         run_id=run_id,
+        created_at=generation_started_at,
         trace_json=json.dumps(trace, ensure_ascii=False),
         used_experiences_json=json.dumps(metadata["used_experiences"]),
         closing_styles_json=json.dumps(metadata["closing_styles"]),
@@ -2874,9 +3043,18 @@ def generate(
         reviewer=review_result,
         latency_ms=round((perf_counter() - generation_started) * 1000),
         retry_count=retry_count,
-        input_fingerprint=generation_inputs_fingerprint(application, master_resume, profile),
+        input_fingerprint=started_fingerprint,
     )
+    initial_trace = json.loads(document.trace_json or "{}")
+    trace["inputs"] = initial_trace.get("inputs", {})
+    trace["draft"] = initial_trace.get("draft", "")
+    trace["runtime"]["generation_provider"] = generation_provider
     trace["runtime"]["ckb_status"] = ckb_status
+    if provider != settings.ai_provider.strip().lower():
+        review_result["status"] = "pending"
+        review_result["state"] = "pending"
+        review_result["message"] = "A fallback generation service was used. Review this draft before use."
+        trace["runtime"]["fallback_used"] = True
     if review_result.get("quality_status") == "fail":
         trace["runtime"]["status"] = "completed_low_confidence"
     document.content = content

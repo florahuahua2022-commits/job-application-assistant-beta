@@ -183,6 +183,9 @@ def build_cover_letter_plan(
         fresh = [value for value in evidence_candidates if value not in detailed]
         repeated = [value for value in evidence_candidates if value in detailed]
         selected_ids = (fresh + repeated)[:2]
+    # Allocation must not starve the letter of its own strongest matched cases.
+    if not selected_ids:
+        selected_ids = evidence_candidates[:2]
     selected_evidence = [{
         "evidence_id": evidence_id,
         "source_section": str(evidence_by_id[evidence_id].get("source_section") or "Master Resume"),
@@ -212,8 +215,8 @@ def build_cover_letter_plan(
                 "Use declared motivation and JD context; do not present intent as employment fact."
                 if has_declared_motivation else
                 "Use neutral advertised-role and organisation facts only; do not invent applicant motivation, values or purpose."
-            ), "target_share": 0.45},
-            {"section": "evidence", "purpose": "Use at most two selected evidence items and avoid retelling the resume.", "target_share": 0.30},
+            ), "target_share": 0.20},
+            {"section": "evidence", "purpose": "Develop selected concrete cases: action, object or context, and relevance to the role. Preserve supported tools and scope; avoid copying resume wording.", "target_share": 0.55},
             {"section": "close", "purpose": "Close naturally and confirm only supported requirements.", "target_share": 0.10},
         ],
     }

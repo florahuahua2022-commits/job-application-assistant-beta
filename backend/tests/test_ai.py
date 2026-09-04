@@ -20,6 +20,7 @@ class GenerateDraftTests(unittest.TestCase):
 
         self.assertEqual(result, '{"status":"pass"}')
         self.assertEqual(ai.provider_response_telemetry(), {
+            "provider": "deepseek", "model": ai.settings.deepseek_model,
             "finish_reason": "length", "response_characters": 17, "completion_tokens": 321,
         })
         self.assertNotIn("private prompt", json.dumps(ai.provider_response_telemetry()))
@@ -70,10 +71,11 @@ class GenerateDraftTests(unittest.TestCase):
         ) as fixer:
             content, review = ai.repair_tailored_resume("draft", "[]", "{}", "{}")
 
-        self.assertEqual(content, "fixed twice")
+        self.assertEqual(content, "draft")
+        self.assertEqual(len(review["versions"]), 3)
         self.assertEqual(reviewer.call_count, 3)
         self.assertEqual(fixer.call_count, 2)
-        self.assertEqual(review["generation_status"], "needs_ckb_update")
+        self.assertEqual(review["generation_status"], "needs_review")
 
     def test_resume_repair_returns_early_when_clean(self):
         clean = {"status": "pass", "results": [{"issues": []}]}

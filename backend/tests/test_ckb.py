@@ -19,7 +19,7 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         first = build_career_knowledge_base(source, experiences)[0]
         second = build_career_knowledge_base(source, experiences)[0]
 
-        self.assertEqual(first["schema_version"], "1.1")
+        self.assertEqual(first["schema_version"], "2.0")
         self.assertEqual(first["evidence_id"], second["evidence_id"])
         self.assertEqual(first["source_text"], source)
         self.assertEqual(first["time_period"], {"start": "January 2022", "end": "Present"})
@@ -27,11 +27,11 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         self.assertEqual(validate_career_knowledge_base([first]), [])
 
     def test_supports_all_frozen_evidence_types(self):
-        expected = {"experience", "project", "volunteer", "education", "qualification", "award", "publication"}
+        expected = {"experience", "project", "volunteer", "education", "qualification", "award", "publication", "skill"}
         self.assertEqual(EVIDENCE_TYPES, expected)
 
     def test_currentness_uses_date_status_not_an_empty_period_heuristic(self):
-        base = {"schema_version": "1.1", "evidence_type": "experience", "time_period": {"start": None, "end": None}}
+        base = {"schema_version": "2.0", "evidence_type": "experience", "time_period": {"start": None, "end": None}}
         self.assertFalse(career_knowledge_base_is_current([base]))
         for status in ("verified", "uncertain", "not_provided"):
             with self.subTest(status=status):
@@ -58,7 +58,7 @@ Maintained the project risk register.
 
         self.assertEqual(len(items), 3)
         self.assertEqual(len({item["evidence_id"] for item in items}), 3)
-        self.assertTrue(all(item["schema_version"] == "1.1" for item in items))
+        self.assertTrue(all(item["schema_version"] == "2.0" for item in items))
 
     def test_extracts_non_employment_detail_evidence(self):
         source = """Education
@@ -83,7 +83,7 @@ Project Delivery Review, 2024
     def test_validation_rejects_unverified_or_unknown_evidence(self):
         item = {
             "schema_version": "1.0", "evidence_id": stable_evidence_id("experience", "Evidence"),
-            "evidence_type": "skill", "source_section": "Skills", "source_text": "Evidence",
+            "evidence_type": "invented_type", "source_section": "Skills", "source_text": "Evidence",
             "time_period": {"start": None, "end": None}, "evidence_quality": "low",
             "fact_verification": "inferred",
         }

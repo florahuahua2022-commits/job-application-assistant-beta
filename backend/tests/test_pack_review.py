@@ -235,8 +235,8 @@ class PackReviewEndpointTests(unittest.TestCase):
         with Session(self.engine) as session:
             profile = ApplicantProfile(first_name="Alex", last_name="Morgan", phone="0400000000", email="alex@example.com")
             resume = Resume(source_text="Alex Morgan", ckb_json=json.dumps([
-                {"evidence_id": "E1", "source_text": "Supported procurement administration."},
-                {"evidence_id": "E2", "source_text": "Prepared monthly reports."},
+                {"schema_version": "2.0", "evidence_id": "E1", "source_text": "Supported procurement administration."},
+                {"schema_version": "2.0", "evidence_id": "E2", "source_text": "Prepared monthly reports."},
             ]))
             requirements = empty_application_requirements("Confirmed", source="user_supplied")
             requirements["review_status"] = "confirmed"

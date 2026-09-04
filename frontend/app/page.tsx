@@ -23,8 +23,8 @@ type Experience = { id: string; role_title: string; organization: string; time_p
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string; updated_at: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
-type Application = { id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string; archived_at?: string | null; updated_at?: string };
-type GeneratedDocument = { id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
+type Application = { resume_snapshot_json?: string; id: number; company: string; position_title: string; job_url?: string; job_description: string; selection_criteria?: string; application_requirements_json?: string; selection_plan_json?: string; selection_confirmations_json?: string; status: string; submission_reference?: string; submitted_at?: string; archived_at?: string | null; updated_at?: string };
+type GeneratedDocument = { quality_state?: string; id: number; document_type: string; content: string; used_experiences_json?: string; reviewer_json?: string; run_id?: string; trace_json?: string; created_at: string };
 type ReviewerResult = { status: "pass" | "fail" | "pending" | "provider_failed"; factual_status?: "pass" | "fail"; quality_status?: "pass" | "fail"; state?: string; message?: string; results?: { criteria_id: string; status: "pass" | "fail"; issues: { type: string; severity?: "critical" | "major" | "advisory"; description: string; recommended_action?: string }[]; recommendation?: string }[] };
 type QualityIssue = { severity: "error" | "warning"; code: string; message: string; document_type?: string };
 type QualityResult = { ready: boolean; issues: QualityIssue[]; checked_documents: string[] };
@@ -99,6 +99,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [busy, setBusy] = useState(false);
   const [selectedApplication, setSelectedApplication] = useState<number | null>(null);
   const [documents, setDocuments] = useState<GeneratedDocument[]>([]);
+  const [documentHistory, setDocumentHistory] = useState<GeneratedDocument[]>([]);
   const [generationFailure, setGenerationFailure] = useState<{ documentType: typeof packTypes[number]; message: string } | null>(null);
   const [activeType, setActiveType] = useState<string>("tailored_resume");
   const [draftText, setDraftText] = useState("");
@@ -733,6 +734,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
 
   async function openApplication(id: number) {
     setSelectedApplication(id);
+    setDocumentHistory([]);
     setPackNotice("");
     setConfirmedApplication(null);
     setQualityResult(null);
@@ -975,6 +977,26 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setNotice("Referral recorded. The person who invited you has received one Selection Criteria credit.");
   }
 
+  async function updateApplicationResume(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected) return;
+    const form = new FormData(event.currentTarget);
+    const useLatest = form.get("source") === "master";
+    try {
+      const response = await authenticatedFetch(`${api}/applications/${selected.id}/resume`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ use_latest_master: useLatest,
+          source_text: useLatest ? null : form.get("source_text"),
+          expected_snapshot: selected.resume_snapshot_json || "{}" }),
+      });
+      if (!response.ok) { const error = await response.json(); throw new Error(error.detail || "Could not update application materials."); }
+      const updated = await response.json();
+      setApplications((current) => current.map((item) => item.id === updated.id ? updated : item));
+      await openApplication(updated.id);
+      setNotice("Application materials updated. Previous documents are kept as older versions. Generate new drafts when ready.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Could not update application materials."); }
+  }
+
   async function saveDraft() {
     if (!activeDocument) return;
     setDraftSaveState("saving");
@@ -988,7 +1010,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       return setNotice("Could not save your edits.");
     }
     const updated = await response.json();
-    setDocuments((current) => current.map((document) => document.id === updated.id ? updated : document));
+    setDocuments((current) => [updated, ...current.filter((document) => document.id !== updated.id)]);
     setQualityResult(null);
     setPackReviewResult(null); setAtsResult(null);
     setDraftSaveState("saved");
@@ -1229,14 +1251,14 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setNotice(`Backup restored: ${backup.filename}`);
   }
 
-  async function downloadDocument(format: "docx" | "pdf") {
-    if (!activeDocument) return;
-    const response = await authenticatedFetch(`${api}/documents/${activeDocument.id}/export?format=${format}&template=${exportTemplate}`);
+  async function downloadDocument(format: "docx" | "pdf", draftDocument = activeDocument) {
+    if (!draftDocument) return;
+    const response = await authenticatedFetch(`${api}/documents/${draftDocument.id}/export?format=${format}&template=${exportTemplate}`);
     if (!response.ok) return setNotice("Could not download this document.");
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${labels[activeType] || "Document"}.${format}`;
+    link.download = `${labels[draftDocument.document_type] || "Document"}_Draft_v${draftDocument.id}.${format}`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -1499,8 +1521,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
             <p className="helper">This fills the organisation, position title, job description and selection criteria below. Review them before saving.</p>
             {adWarnings.length > 0 && <div className="adWarnings"><strong>Check before saving</strong><ul>{adWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
           </div>
-          <label>Organisation<input name="company" value={jobFields.company} onChange={(event) => setJobFields({ ...jobFields, company: event.target.value })} required /></label>
-          <label>Position title<input name="position_title" value={jobFields.position_title} onChange={(event) => setJobFields({ ...jobFields, position_title: event.target.value })} required /></label>
+          <label>Organisation<input name="company" value={jobFields.company} onChange={(event) => setJobFields({ ...jobFields, company: event.target.value })} /></label>
+          <label>Position title<input name="position_title" value={jobFields.position_title} onChange={(event) => setJobFields({ ...jobFields, position_title: event.target.value })} /></label>
           <label className="full">Application link<div className="linkImportRow"><input name="job_url" type="url" placeholder="https://example.com/job" value={jobFields.job_url} onChange={(event) => setJobFields({ ...jobFields, job_url: event.target.value, discovered_sources: [] })} /><button type="button" onClick={importJobLink} disabled={jobImportState === "importing"}>{jobImportState === "importing" ? "Reading…" : jobImportState === "done" ? "Imported ✓" : "Import Details"}</button></div></label>
           <label className="full">Job description<textarea name="job_description" rows={8} value={jobFields.job_description} onChange={(event) => setJobFields({ ...jobFields, job_description: event.target.value })} required /></label>
           <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" rows={4} value={jobFields.selection_criteria} onChange={(event) => setJobFields({ ...jobFields, selection_criteria: event.target.value })} placeholder="Paste the full criteria, or add a short instruction such as: Focus on stakeholder engagement and government reporting." /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
@@ -1525,8 +1547,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
               <details className="jobEditPanel" key={`edit-${selected.id}`}>
                 <summary>Edit saved job details</summary>
                 <form onSubmit={updateSavedJob} className="compactForm">
-                  <label>Organisation<input name="company" defaultValue={selected.company} required /></label>
-                  <label>Position title<input name="position_title" defaultValue={selected.position_title} required /></label>
+                  <label>Organisation<input name="company" defaultValue={selected.company} /></label>
+                  <label>Position title<input name="position_title" defaultValue={selected.position_title} /></label>
                   <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
                   <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
                   <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} placeholder="Full criteria or a short instruction" /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
@@ -1534,6 +1556,30 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                   <button className="full">Save job changes</button>
                 </form>
                 {selected.status === "draft" && <div className="jobEditDiscard"><strong>Start over with a different job description</strong><p className="helper">This permanently removes this draft and all documents generated for it.</p><button className="discardDraftButton" type="button" onClick={() => deleteDraftApplication(selected)}>Discard this draft and start again</button></div>}
+              </details>
+              <details className="jobEditPanel" key={`materials-${selected.id}-${selected.resume_snapshot_json}`}>
+                <summary>Resume materials for this application</summary>
+                <form onSubmit={updateApplicationResume} className="compactForm">
+                  <p className="helper">This updates only this application. Earlier documents remain available. Your Master Resume and other applications stay unchanged.</p>
+                  <label>Source<select name="source" defaultValue="application"><option value="application">Edit this application's resume</option><option value="master">Use latest Master Resume</option></select></label>
+                  <label className="full">Resume and confirmed facts<textarea name="source_text" rows={12} defaultValue={(() => { try { return JSON.parse(selected.resume_snapshot_json || "{}").source_text || ""; } catch { return ""; } })()} /></label>
+                  <p className="helper">Include only facts you can confirm. Applying these materials keeps previous drafts as older versions.</p>
+                  <button type="submit">Apply materials to this application</button>
+                </form>
+              </details>
+              <details className="jobEditPanel" onToggle={async (event) => {
+                if (event.currentTarget.open) {
+                  const response = await authenticatedFetch(`${api}/applications/${selected.id}/document-history`);
+                  if (response.ok) setDocumentHistory(await response.json());
+                }
+              }}>
+                <summary>Previous document versions</summary>
+                {documentHistory.map((document) => <details key={document.id}>
+                  <summary>{labels[document.document_type]} · Version {document.id} · {({outdated: "Based on older materials", pending: "Needs checking", needs_improvement: "Needs improvement", usable: "Checks passed"} as Record<string, string>)[document.quality_state || "pending"]}</summary>
+                  <pre style={{whiteSpace: "pre-wrap"}}>{document.content}</pre>
+                  <button type="button" onClick={() => downloadDocument("docx", document)}>Download draft DOCX</button>
+                  <button type="button" onClick={() => downloadDocument("pdf", document)}>Download draft PDF</button>
+                </details>)}
               </details>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}

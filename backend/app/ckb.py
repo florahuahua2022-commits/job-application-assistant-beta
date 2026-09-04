@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 
-CKB_SCHEMA_VERSION = "1.1"
+CKB_SCHEMA_VERSION = "2.0"
 EVIDENCE_THIN_WORD_THRESHOLD = 20
 
 
@@ -23,7 +23,7 @@ def evidence_density(item: dict[str, Any]) -> dict[str, Any]:
     return {"source_detail_words": count, "evidence_thin": count < EVIDENCE_THIN_WORD_THRESHOLD,
             "density_threshold_words": EVIDENCE_THIN_WORD_THRESHOLD}
 EVIDENCE_TYPES = {
-    "experience", "project", "volunteer", "education", "qualification", "award", "publication",
+    "experience", "project", "volunteer", "education", "qualification", "award", "publication", "skill",
 }
 
 EMPLOYMENT_PERIOD_PATTERN = re.compile(
@@ -105,21 +105,22 @@ def _experience_evidence_items(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Keep separately written CV duties separate so a tailored CV can reuse them."""
     raw_source = str(item.get("source_text") or "").strip()
     lines = [line.strip(" •▪■*-\t") for line in raw_source.splitlines() if line.strip()]
-    date_index = next((index for index, line in enumerate(lines) if EMPLOYMENT_PERIOD_PATTERN.search(line) or re.search(r"\b(?:19|20)\d{2}\b", line)), -1)
+    date_index = next((index for index, line in enumerate(lines) if EMPLOYMENT_PERIOD_PATTERN.fullmatch(line)), -1)
     duties = [
         line for line in lines[date_index + 1:]
         if len(line) > 2 and not re.fullmatch(r"(?i)(?:responsibilities|key achievements|achievements|duties):?", line)
-    ] if date_index >= 0 else []
+    ] if date_index >= 0 else [line for line in str(item.get("responsibility") or item.get("action") or "").splitlines() if line.strip()]
     if len(duties) < 2:
         evidence = experience_to_evidence(item)
         return [evidence] if evidence else []
 
     evidence_items = []
-    header = "\n".join(lines[:date_index + 1])
+    header = "\n".join(lines[:date_index + 1]) if date_index >= 0 else "\n".join(str(item.get(key) or "") for key in ("role_title", "organization", "time_period_text"))
     for duty in duties:
         detail = {**item, "evidence_id": "", "responsibility": duty, "source_text": f"{header}\n{duty}"}
         evidence = experience_to_evidence(detail)
         if evidence:
+            evidence["source_paragraph"] = raw_source
             evidence_items.append(evidence)
     return evidence_items
 
@@ -130,6 +131,7 @@ def _detail_evidence(source_text: str) -> list[dict[str, Any]]:
         "certifications": "qualification", "certification": "qualification", "awards": "award", "award": "award",
         "publications": "publication", "publication": "publication", "projects": "project", "project": "project",
         "volunteering": "volunteer", "volunteer experience": "volunteer",
+        "skills": "skill", "technical skills": "skill",
     }
     stop_headings = {"skills", "technical skills", "references", "referees", "work experience", "professional experience", "employment history"}
     lines = [re.sub(r"\s+", " ", line).strip(" •▪■*-\t") for line in source_text.splitlines()]
@@ -188,9 +190,9 @@ def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") 
 
 def career_knowledge_base_is_current(items: Any) -> bool:
     return isinstance(items, list) and all(isinstance(item, dict) for item in items) and all(
-        item.get("evidence_type") != "experience" or (
+        item.get("schema_version") == CKB_SCHEMA_VERSION and (item.get("evidence_type") != "experience" or (
             "time_period_status" in item and len(_experience_evidence_items(item)) <= 1
-        )
+        ))
         for item in items
     )
 

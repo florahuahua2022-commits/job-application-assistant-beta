@@ -21,7 +21,6 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
             value = str(evidence_id)
             if value in valid_evidence and value not in evidence_ids:
                 evidence_ids.append(value)
-        evidence_ids = evidence_ids[:3]
         match_type = str(item.get("match_type") or "insufficient").lower()
         coverage = str(item.get("coverage") or "weak").lower()
         if match_type not in {"direct", "inferred", "insufficient"}:
@@ -72,8 +71,6 @@ def validate_match_result(result: dict[str, Any], job_model: dict[str, Any], ckb
         unknown = set(item.get("matched_evidence") or []) - valid_evidence
         if unknown:
             errors.append(f"Match {index} references unknown evidence.")
-        if len(item.get("matched_evidence") or []) > 3:
-            errors.append(f"Match {index} contains more than three evidence items.")
     if returned_criteria != valid_criteria:
         errors.append("The matcher did not return exactly one result for every criterion.")
     return errors

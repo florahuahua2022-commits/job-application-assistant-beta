@@ -22,6 +22,8 @@ def generation_inputs_fingerprint(application: Any, resume: Any, profile: Any | 
         "application_requirements": application.application_requirements_json,
         "application_decision": application.application_decision_json,
         "ckb": resume.ckb_json,
+        "source_text": getattr(resume, "source_text", ""),
+        "resume_snapshot": getattr(application, "resume_snapshot_json", "{}"),
         "profile": {
             key: getattr(profile, key, None)
             for key in ("title", "first_name", "last_name", "preferred_name", "phone", "email", "postal_address", "suburb", "state", "postcode", "country", "work_rights", "availability_notice", "target_direction", "motivation", "writing_tone", "preferences_notes")

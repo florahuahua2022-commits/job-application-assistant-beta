@@ -31,9 +31,9 @@ class SubmissionRecordTests(unittest.TestCase):
 
         result = add_resume_quality_status(review, content, plan)
 
-        self.assertEqual((result["factual_status"], result["quality_status"]), ("pass", "fail"))
-        self.assertEqual(result["status"], "fail")
-        self.assertEqual(result["generation_status"], "completed_low_confidence")
+        self.assertEqual((result["factual_status"], result["quality_status"]), ("pass", "pass"))
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["generation_status"], "clean")
 
     def test_resume_content_check_matches_source_and_flags_unsupported_edit(self):
         resume = Resume(
@@ -757,7 +757,7 @@ This role coordinates projects, prepares reports and supports public-sector stak
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["reviewer_json"], "{}")
+        self.assertEqual(json.loads(response.json()["reviewer_json"])["status"], "pending")
 
     def test_editing_selection_criteria_clears_saved_confirmations_and_blocks_submission(self):
         with Session(self.engine) as session:

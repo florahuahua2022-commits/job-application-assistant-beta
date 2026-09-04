@@ -1,11 +1,12 @@
 from io import BytesIO
+from collections import Counter
 import re
 from typing import Any
 
 from docx import Document
 from pypdf import PdfReader
 
-from .exporter import create_docx, create_pdf, resolve_page_size
+from .exporter import create_docx, create_pdf, resolve_page_size, _ascii_punctuation
 
 
 def _plain(value: str) -> str:
@@ -38,6 +39,19 @@ def extract_artifact(payload: bytes, format: str) -> tuple[str, dict[str, Any]]:
         box = reader.pages[0].mediabox
         page_size = f"{float(box.width):.0f} x {float(box.height):.0f} pt"
     return text, {"page_count": len(reader.pages), "page_size": page_size}
+
+
+def verify_document_export(content: str, payload: bytes, format: str) -> dict:
+    """Check every source token survives, including repeated words and dates."""
+    try:
+        extracted, metadata = extract_artifact(payload, format)
+        source = re.sub(r"(?m)^\s*\d+\.\s+", "", _ascii_punctuation(content))
+        missing = Counter(_words(source)) - Counter(_words(extracted))
+        internal = bool(re.search(r"GENERATION_META|<!--|\bEV[A-F0-9]{12}\b", extracted))
+        return {"ready": not missing and not internal, "missing_token_count": sum(missing.values()),
+                "internal_markers": internal, **metadata}
+    except Exception:
+        return {"ready": False, "message": "The exported document could not be checked."}
 
 
 def _role_marker(role: dict, ckb: list[dict]) -> str | None:

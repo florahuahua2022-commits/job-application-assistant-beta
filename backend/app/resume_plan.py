@@ -4,9 +4,10 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Any
 from .ckb import evidence_density
+from .resume_timeline import apply_timeline, timeline_text
 
 
-RESUME_PLAN_SCHEMA_VERSION = "1.1"
+RESUME_PLAN_SCHEMA_VERSION = "2.0"
 
 
 def _normalise_identity_text(value: Any) -> str:
@@ -44,8 +45,8 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         if not re.search(rf"(?im)^#+\s*{re.escape(str(section))}\s*$", content):
             issues.append({"code": "missing_required_section", "message": f"The CV is missing the {section} section."})
     word_count = len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE))
-    if word_count > 750:
-        issues.append({"code": "resume_too_long", "message": f"The CV contains {word_count} words; the two-page target allows at most 750."})
+    if plan.get("maximum_words") and word_count > int(plan["maximum_words"]):
+        issues.append({"code": "resume_too_long", "message": "The CV exceeds the employer's explicit word limit."})
     if set(map(str, evidence_used)) - selected_resume_evidence_ids(plan):
         issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
     normalised_lines = [_normalise_identity_text(line) for line in content.splitlines()]
@@ -68,6 +69,9 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         role_block = " ".join(normalised_lines[position:min(later_positions, default=len(normalised_lines))]) if position >= 0 else ""
         if period and not _contains_identity(role_block, period):
             issues.append({"code": "missing_role_period", "message": f"The CV is missing the authoritative employment period for {role.get('role_marker') or role.get('source_section')}."})
+    expected_timeline = timeline_text(plan)
+    if expected_timeline and _normalise_identity_text(expected_timeline) not in _normalise_identity_text(content):
+        issues.append({"code": "missing_timeline", "message": "The CV omits required timeline-only employment dates. Restore the Additional Experience lines from the plan."})
     if len(role_positions) > 1 and role_positions != sorted(role_positions):
         issues.append({"code": "role_order_mismatch", "message": "The CV role headers do not follow reverse chronological Resume Plan order."})
     return {"valid": not issues, "word_count": word_count, "issues": issues}
@@ -79,34 +83,17 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
     target_words = int(plan.get("target_words") or 0)
     word_count = len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE))
     if target_words and word_count < target_words * .7:
-        evidence = [item for item in plan.get("selected_evidence") or [] if item.get("evidence_type") == "experience"]
-        measured = [item for item in evidence if isinstance(item.get("evidence_thin"), bool)]
-        thin = [item for item in measured if item["evidence_thin"]]
-        reason = "resume_too_brief"  # Historical plans lack source-density metadata: do not guess attribution.
-        if measured and len(measured) == len(evidence):
-            reason = "insufficient_source_detail" if len(thin) / len(measured) > .5 else "generation_under_utilized"
-        sections = sorted({str(item.get("source_section") or "Unnamed experience") for item in thin})
-        guidance = (
-            "Add factual detail in Master Resume for: " + "; ".join(sections) +
-            ". Describe specific actions, systems/tools, volume or frequency, and an observed result if known. Do not invent numbers. "
-            "Existing applications keep their original Resume snapshot; use the updated Resume in a new application after saving."
-            if reason == "insufficient_source_detail" else
-            "The selected sources meet the length threshold. Review evidence utilisation and generation before requesting more source detail."
-            if reason == "generation_under_utilized" else "Source density is unavailable in this historical plan. Regenerate to assess the cause."
-        )
+        eligible = [item for item in plan.get("selected_evidence") or [] if item.get("evidence_type") == "experience"]
+        thin = [item for item in eligible if item.get("evidence_thin") is True]
+        source_is_thin = bool(eligible) and len(thin) / len(eligible) > .5
         issues.append({
-            "type": reason, "code": "resume_too_brief", "severity": "major", "blocks_release": True,
-            "thin_source_sections": sections, "thin_evidence_count": len(thin), "selected_experience_count": len(evidence),
-            "recommended_action": guidance,
-            "description": f"The CV contains {word_count} words, below 70% of its {target_words}-word target.",
-        })
-
-    roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
-    one_bullet_roles = sum(int(role.get("max_bullets") or 0) <= 1 for role in roles)
-    if len(roles) >= 3 and one_bullet_roles / len(roles) >= .8:
-        issues.append({
-            "type": "resume_shallow_role_coverage", "severity": "major", "blocks_release": True,
-            "description": f"{one_bullet_roles} of {len(roles)} included roles are capped at one bullet.",
+            "type": "insufficient_source_detail" if source_is_thin else "concise_but_relevant",
+            "severity": "major" if source_is_thin else "advisory", "blocks_release": source_is_thin,
+            "description": "Relevant source evidence is too thin to support a useful tailored CV." if source_is_thin else
+                           f"The CV contains {word_count} words. Length alone does not establish missing content.",
+            "recommended_action": "Add confirmed actions, objects, tools or scope to the relevant experiences: " +
+                                  "; ".join(sorted({item["source_section"] for item in thin})) if source_is_thin else
+                                  "Keep the concise draft; do not expand low or timeline-only roles for length.",
         })
 
     work_section = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", content)
@@ -116,10 +103,10 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
         repeated_verb, repeated_count = max(counts.items(), key=lambda item: item[1])
         if repeated_count / len(bullets) > .5:
             issues.append({
-                "type": "resume_repetitive_opening", "severity": "major", "blocks_release": True,
+                "type": "resume_repetitive_opening", "severity": "advisory", "blocks_release": False,
                 "description": f"'{repeated_verb.title()}' opens {repeated_count} of {len(bullets)} work-experience bullets.",
             })
-    return {"status": "fail" if issues else "pass", "word_count": word_count, "issues": issues}
+    return {"status": "fail" if any(item.get("blocks_release") for item in issues) else "pass", "word_count": word_count, "issues": issues}
 
 
 def selected_resume_evidence_ids(plan: dict[str, Any]) -> set[str]:
@@ -188,11 +175,13 @@ def build_resume_curation_plan(
     matches: dict[str, Any],
     ckb: list[dict[str, Any]],
     target_words: int = 650,
-    max_evidence: int = 10,
+    max_evidence: int | None = None,
     application_decision: dict[str, Any] | None = None,
     outcome_learning: dict[str, Any] | None = None,
+    generation_date=None,
 ) -> dict[str, Any]:
     evidence_by_id = {str(item.get("evidence_id")): item for item in ckb if item.get("evidence_id")}
+    max_evidence = len(evidence_by_id) if max_evidence is None else max_evidence
     source_order = {evidence_id: index for index, evidence_id in enumerate(evidence_by_id)}
     criteria = {str(item.get("criteria_id")): item for item in job_model.get("criteria") or []}
     decisions = {str(item.get("criteria_id")): item for item in (application_decision or {}).get("requirements") or []}
@@ -231,7 +220,7 @@ def build_resume_curation_plan(
         )
 
     relevant = [item for item in evidence_by_id.values() if support[str(item.get("evidence_id"))]]
-    fallback_credentials = [item for item in evidence_by_id.values() if not support[str(item.get("evidence_id"))] and item.get("evidence_type") in {"education", "qualification", "award"}]
+    fallback_credentials = [item for item in evidence_by_id.values() if not support[str(item.get("evidence_id"))] and item.get("evidence_type") in {"education", "qualification", "award", "skill"}]
     selected_ids: list[str] = []
     seen_content: set[str] = set()
 
@@ -260,19 +249,6 @@ def build_resume_curation_plan(
         if len(selected_ids) >= max_evidence:
             break
         select(item)
-
-    # Keep the minimum grounded continuity record for each explicit current role before unmatched credentials.
-    current_roles: dict[str, list[dict[str, Any]]] = {}
-    for item in evidence_by_id.values():
-        if item.get("evidence_type") == "experience" and _is_current(item) and _has_bullet_content(item):
-            current_roles.setdefault(str(item.get("source_section") or "Master Resume"), []).append(item)
-    for items in current_roles.values():
-        if len(selected_ids) >= max_evidence:
-            break
-        if not any(str(item.get("evidence_id")) in selected_ids for item in items):
-            for item in sorted(items, key=priority, reverse=True):
-                if select(item):
-                    break
 
     for item in fallback_credentials:
         if len(selected_ids) >= max_evidence:
@@ -348,7 +324,7 @@ def build_resume_curation_plan(
             "curation_action": action,
             "include_role_header": action != "omit",
             "selected_evidence_ids": role_selected,
-            "max_bullets": min(cap, sum(_has_bullet_content(item) for item in items if str(item.get("evidence_id")) in selected_set)),
+            "max_bullets": None if role_selected else 0,
             "supports_requirements": sorted({link[0] for link in links}),
             "evidence_framing": framing,
             "rationale": {
@@ -371,18 +347,29 @@ def build_resume_curation_plan(
     for chronology_order, role in enumerate(roles):
         role["chronology_order"] = chronology_order
 
+    timeline = apply_timeline(roles, role_groups, generation_date)
+    ineligible = {section for section in role_groups if next(role for role in roles if role["source_section"] == section)["display_mode"] in {"timeline_only", "hidden"}}
+    selected = [item for item in selected if item["source_section"] not in ineligible]
+    selected_set = {item["evidence_id"] for item in selected}
     return {
         "schema_version": RESUME_PLAN_SCHEMA_VERSION,
+        "timeline": timeline,
         "target_words": target_words,
-        "maximum_pages": 2,
+        "target_pages": 2,
+        "maximum_pages": None,
         "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
         "roles": roles,
         "selected_evidence": selected,
         "omitted_evidence_ids": sorted(set(evidence_by_id) - selected_set),
+        "omission_reasons": {evidence_id: (
+            "duplicate" if re.sub(r"\s+", " ", str(item.get("source_text") or "").strip().lower()) in seen_content
+            else "explicit_evidence_budget" if support[evidence_id] else "low_relevance"
+        ) for evidence_id, item in evidence_by_id.items() if evidence_id not in selected_set},
         "section_budget": {"professional_summary": 80, "key_skills": 90, "work_experience": max(target_words - 220, 250), "education_qualifications_references": 50},
         "rules": [
             "Preserve role chronology from authoritative CKB source order; relevance controls only content budget.",
-            "max_bullets is a ceiling, never a target; do not split or invent content to fill it.",
+            "max_bullets null means no mechanical ceiling. One evidence record may support multiple distinct actions; never repeat an action to fill space.",
+            "Word and page targets are guidance; employer limits take priority. Preserve distinctive relevant facts before compressing generic duties.",
             "Adjacent and continuity-only evidence must not be presented as direct JD capability evidence.",
             "promote, keep and compress roles must retain their role header; omit roles may be absent.",
             "Do not create achievements, metrics, titles, employers or dates.",
