@@ -65,7 +65,7 @@ class CoverLetterPlanTests(unittest.TestCase):
         decision = {"requirements": [{"criteria_id": "C1", "importance": "essential", "evidence_classification": "verified_match", "matched_evidence": ["EV1"]}]}
         allocation = build_evidence_allocation(resume, {"items": []}, self.ckb, decision)
         plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
-        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1"])
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1", "EV2"])
 
     def setUp(self):
         self.job_model = {"criteria": [
@@ -121,8 +121,8 @@ class CoverLetterPlanTests(unittest.TestCase):
             {"evidence_id": "EV2", "cover_letter": {"use": "primary", "purpose": "differentiator"}, "selection_criteria": [{"use": "secondary"}]},
         ]}
         plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
-        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV2"])
-        self.assertEqual(plan["selected_evidence"][0]["allocation_use"], "primary")
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1", "EV2"])
+        self.assertEqual(plan["selected_evidence"][1]["allocation_use"], "primary")
 
     def test_two_distinct_primary_differentiators_may_both_be_selected(self):
         allocation = {"items": [
@@ -135,7 +135,7 @@ class CoverLetterPlanTests(unittest.TestCase):
     def test_sole_reused_strong_evidence_remains_selectable(self):
         allocation = {"items": [{"evidence_id": "EV1", "cover_letter": {"use": "allowed_if_needed", "purpose": "differentiator"}, "selection_criteria": [{"criteria_id": "C1", "use": "primary"}]}]}
         plan = build_cover_letter_plan(self.job_model, self.matches, self.ckb, evidence_allocation=allocation)
-        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1"])
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["EV1", "EV2"])
 
     def test_distinct_primary_can_add_bridge_for_different_requirement(self):
         allocation = {"items": [

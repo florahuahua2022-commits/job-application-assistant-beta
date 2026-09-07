@@ -250,6 +250,27 @@ Oct 2007 - Aug 2012
             self.assertEqual(issue["blocks_release"], reason == "insufficient_source_detail")
             self.assertNotIn("new application", issue["recommended_action"])
 
+    def test_split_duties_use_combined_role_detail_for_quality_gate(self):
+        section = "Work Experience > Example Department > Project Officer"
+        paragraph = "\n".join([
+            "Project Officer", "Example Department", "January 2023 - December 2024",
+            "Prepared project reports.", "Coordinated stakeholder meetings.",
+            "Maintained governance records.", "Tracked actions and deadlines.",
+            "Supported procurement documentation.", "Updated finance and project systems.",
+            "Responded to stakeholder enquiries.",
+        ])
+        ckb = [
+            {**evidence(f"E{i}", section, duty), "source_paragraph": paragraph}
+            for i, duty in enumerate(("Prepared project reports.", "Coordinated stakeholder meetings.", "Maintained governance records."))
+        ]
+        matches = {"matches": [{"criteria_id": "C1", "match_type": "direct", "matched_evidence": [item["evidence_id"] for item in ckb]}]}
+        plan = build_resume_curation_plan({"criteria": []}, matches, ckb)
+
+        quality = evaluate_resume_quality("Short draft.", plan)
+
+        self.assertEqual(quality["status"], "pass")
+        self.assertEqual(quality["issues"][0]["type"], "concise_but_relevant")
+
     def test_current_role_with_no_bullet_content_stays_visible_without_filler(self):
         current = evidence("NOW", "Work > Current Role", "", period={"start": "2025", "end": "Present"})
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [current])

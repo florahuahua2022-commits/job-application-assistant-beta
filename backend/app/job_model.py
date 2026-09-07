@@ -15,6 +15,60 @@ def _criterion_id(text: str) -> str:
     return f"C{hashlib.sha1(text.lower().encode('utf-8')).hexdigest()[:10].upper()}"
 
 
+def job_identity(text: str, company: str) -> dict[str, Any]:
+    candidates = []
+    for match in re.finditer(r"(?im)^\s*(advertiser|recruiter|agency|employer|hiring organi[sz]ation|company)\s*:\s*([^\n]+)", text):
+        candidates.append({"name": match[2].strip(), "kind": match[1].lower(), "source_text": match[0].strip(),
+                           "source_start": match.start(), "source_end": match.end(), "confidence": "high",
+                           "selection_reason": "Explicitly labelled in the advertisement."})
+    occurrence = re.search(re.escape(company.strip()), text, re.I) if company.strip() else None
+    if company.strip():
+        candidates.append({"name": company.strip(), "kind": "company", "source_text": occurrence[0] if occurrence else company.strip(),
+                           "source_start": occurrence.start() if occurrence else None, "source_end": occurrence.end() if occurrence else None,
+                           "confidence": "high" if occurrence else "unconfirmed", "selection_reason": "Saved organisation field; confirm against the advertisement."})
+    relationship = re.search(r"(?im)^.*\b(?:on behalf of|our clients?|representing)\b[^\n]*", text)
+    reliable = [c for c in candidates if c["confidence"] == "high" and not re.fullmatch(r"(?i)wa\s+gov", c["name"])]
+    advertiser = next((c["name"] for c in reliable if c["kind"] in {"advertiser", "recruiter", "agency"}), "")
+    hiring = next((c["name"] for c in reliable if c["kind"] in {"employer", "hiring organisation", "hiring organization"}), "")
+    # ponytail: unlabelled prose does not establish an employer/client identity;
+    # retain its exact relationship excerpt for review instead of guessing a department.
+    display = advertiser or hiring or next((c["name"] for c in reliable), "")
+    return {"advertiser": advertiser, "hiring_organisation": hiring,
+            "recruitment_relationship": relationship[0].strip() if relationship else "",
+            "organisation_display_name": display, "name_candidates": candidates,
+            "selection_reason": "Use the explicit recruiter or employer name; otherwise use a name present in the advertisement." if display else "No reliable name; use a neutral greeting until confirmed."}
+
+
+def advertised_skill_tags(text: str) -> list[dict]:
+    tags = []
+    for block in re.finditer(r"(?im)^[ \t]*(?:advertised skill tags|skill tags|skills? (?:listed|tags)|key skills)[ \t]*(?::[ \t]*([^\n]+)|:?[ \t]*\n((?:[ \t]*[-•]?[ \t]*[A-Za-z][A-Za-z /&-]{2,55}\n?){1,12}))", text):
+        for name in re.split(r"[,|;•\n]", block[1] or block[2]):
+            name = name.strip()
+            if name and name.casefold() not in {item["text"].casefold() for item in tags}:
+                tags.append({"text": name, "criteria_id": _criterion_id(name), "source_text": block[0].strip(),
+                             "source_start": block.start(), "source_end": block.end(), "page_region": "skill_tags",
+                             "source_type": "advertisement", "match_type": "gap", "conflict_note": "Body requirements take precedence over page labels."})
+    return tags
+
+
+def match_advertised_tags(model: dict, matches: dict, ckb: list[dict]) -> list[dict]:
+    by_id = {str(item.get("evidence_id")): item for item in ckb}
+    matched = {item.get("criteria_id"): item for item in matches.get("matches") or []}
+    result = []
+    for tag in model.get("advertised_skill_tags") or []:
+        match = matched.get(tag["criteria_id"], {})
+        ids = [str(value) for value in match.get("matched_evidence") or [] if str(value) in by_id]
+        classification = {"direct": "direct", "inferred": "adjacent"}.get(match.get("match_type"), "gap") if ids else "gap"
+        source = " ".join(str(by_id[value].get("source_text") or "") for value in ids)
+        if tag["text"].casefold() == "contract management" and not re.search(r"(?i)\bcontract(?:s|ual)?\b", source):
+            classification = "adjacent" if ids else "gap"
+        result.append({**tag, "match_type": classification, "evidence_ids": ids,
+                       "allowed_in_key_skills": classification == "direct", "source_detail": source,
+                       "reason": str(match.get("reasoning") or "No verified supporting fact."),
+                       "wording_rule": "Use the supported capability." if classification == "direct" else "Use only narrower source wording." if classification == "adjacent" else "Omit from candidate skills."})
+    return result
+
+
 def is_selection_instruction(text: str) -> bool:
     cleaned = _clean(text)
     return bool(
@@ -172,10 +226,18 @@ def build_job_model(
             "source": "selection_criteria" if requirement_mode == "explicit_selection_criteria" else "job_description",
         })
     limits = parse_word_limits(f"{job_description}\n{selection_text}")
+    tags = advertised_skill_tags(job_description)
+    for tag in tags:
+        if not any(item["criteria_id"] == tag["criteria_id"] for item in criteria):
+            criteria.append({"criteria_id": tag["criteria_id"], "criteria_text": tag["text"], "criteria_type": "inferred",
+                             "criterion_categories": _categories(tag["text"]), "primary_category": _categories(tag["text"])[0],
+                             "key_competencies": _competencies(tag["text"]), "source": "advertised_skill_tag"})
     return {
         "schema_version": JOB_MODEL_SCHEMA_VERSION,
         "position_title": position_title.strip(),
         "organisation": company.strip(),
+        "job_identity": job_identity(job_description, company),
+        "advertised_skill_tags": tags,
         "role_summary": _clean(job_description)[:800],
         "organisation_context": _organisation_context(job_description, company),
         "requirement_mode": requirement_mode,

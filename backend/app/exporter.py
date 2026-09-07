@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import re
+from .career_modern import create_modern, export_content, TOKENS as CAREER_MODERN_TOKENS
 
 from docx import Document
 from docx.enum.section import WD_SECTION
@@ -21,6 +22,7 @@ ACCENT = RGBColor(8, 117, 101)
 MUTED = RGBColor(95, 107, 122)
 
 EXPORT_THEMES = {
+    "career_modern": {"font": "Arial", "body_size": 10.5, "margin": .7, "line_spacing": 1.16, "accent": RGBColor(8, 126, 139), "pdf_font": "Helvetica", "pdf_bold": "Helvetica-Bold", "token_version": CAREER_MODERN_TOKENS["version"]},
     "classic": {"font": "Calibri", "body_size": 11, "margin": 1.0, "line_spacing": 1.10, "accent": ACCENT, "pdf_font": "Helvetica", "pdf_bold": "Helvetica-Bold"},
     "modern": {"font": "Arial", "body_size": 10.5, "margin": 0.85, "line_spacing": 1.08, "accent": RGBColor(37, 99, 135), "pdf_font": "Helvetica", "pdf_bold": "Helvetica-Bold"},
     "traditional": {"font": "Georgia", "body_size": 11, "margin": 1.0, "line_spacing": 1.12, "accent": RGBColor(52, 63, 82), "pdf_font": "Times-Roman", "pdf_bold": "Times-Bold"},
@@ -81,11 +83,11 @@ def _add_page_number(paragraph, theme: dict) -> None:
     run._r.extend([begin, instruction, end])
 
 
-def _add_bottom_border(paragraph, color: RGBColor) -> None:
+def _add_bottom_border(paragraph, color: RGBColor, width: float = .75) -> None:
     properties = paragraph._p.get_or_add_pPr()
     borders = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
-    bottom.set(qn("w:val"), "single"); bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:val"), "single"); bottom.set(qn("w:sz"), str(round(width * 8)))
     bottom.set(qn("w:space"), "1")
     bottom.set(qn("w:color"), str(color))
     borders.append(bottom); properties.append(borders)
@@ -126,6 +128,8 @@ def _add_inline_markdown(paragraph, text: str, theme: dict) -> None:
 
 
 def create_docx(content: str, title: str, template: str = "classic", market: str | None = None, page_size: str | None = None) -> bytes:
+    if template == "career_modern":
+        return create_modern(content, title, "docx")
     theme = export_theme(template)
     document = Document()
     is_resume = title.casefold() in {"resume", "tailored resume"}
@@ -193,6 +197,8 @@ def create_docx(content: str, title: str, template: str = "classic", market: str
 
 
 def create_pdf(content: str, title: str, template: str = "classic", market: str | None = None, page_size: str | None = None) -> bytes:
+    if template == "career_modern":
+        return create_modern(content, title, "pdf")
     theme = export_theme(template)
     accent_hex = "#" + "".join(f"{channel:02X}" for channel in theme["accent"])
     stream = BytesIO()

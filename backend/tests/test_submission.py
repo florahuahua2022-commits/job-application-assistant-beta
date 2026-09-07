@@ -99,7 +99,7 @@ class SubmissionRecordTests(unittest.TestCase):
         self.assertIn("## Professional Summary", polished)
         self.assertIn("## Key Skills", polished)
         self.assertIn("## Work Experience", polished)
-        self.assertIn("## References\nAvailable upon request", polished)
+        self.assertNotIn("Available upon request", polished)
 
     def test_online_user_cannot_list_or_update_another_users_application(self):
         owner_id = uuid4()

@@ -195,7 +195,7 @@ class ApplicantProfilePayload(SQLModel):
     postcode: str | None = None
     country: str = "Australia"
     work_rights: str = "permanent_resident"
-    availability_notice: str = "not_specified"
+    availability_notice: Literal["not_specified", "immediate", "two_weeks", "one_month", "negotiable"] = "not_specified"
     target_direction: str | None = None
     motivation: str | None = None
     writing_tone: str = "natural_professional"
@@ -351,7 +351,7 @@ class GeneratedDocumentUpdate(SQLModel):
 
 class AtsCheckRequest(SQLModel):
     format: Literal["docx", "pdf"]
-    template: Literal["classic", "modern", "traditional"] = "classic"
+    template: Literal["classic", "modern", "traditional", "career_modern"] = "classic"
 
 
 class AccountDeletionRequest(SQLModel):

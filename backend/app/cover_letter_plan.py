@@ -152,40 +152,39 @@ def build_cover_letter_plan(
         evidence_candidates.extend(value for value in matched_ids if value not in evidence_candidates)
 
     allocation_by_id = {str(item.get("evidence_id")): item for item in (evidence_allocation or {}).get("items") or []}
-    if allocation_by_id:
-        order = {"primary": 0, "secondary": 1, "allowed_if_needed": 2, "avoid": 3}
-        eligible = [
-            value for value in evidence_candidates
-            if allocation_by_id.get(value, {}).get("cover_letter")
-            and allocation_by_id[value]["cover_letter"].get("use") != "avoid"
-        ]
-        ranked = sorted(eligible, key=lambda value: order.get(allocation_by_id[value]["cover_letter"].get("use"), 3))
-        primary = [value for value in ranked if allocation_by_id[value]["cover_letter"].get("use") == "primary"]
-        selected_ids = primary[:2] if primary else ranked[:1]
-        if len(selected_ids) == 1 and primary:
-            def routes(evidence_id: str) -> list[dict[str, Any]]:
-                item = allocation_by_id[evidence_id]
-                return item.get("selection_criteria") or item.get("cover_requirements") or []
-
-            covered = {
-                str(item.get("criteria_id"))
-                for item in routes(selected_ids[0])
-            }
-            bridge = next((
-                value for value in ranked
-                if value not in selected_ids
-                and allocation_by_id[value]["cover_letter"].get("purpose") == "bridge"
-                and any(str(item.get("criteria_id")) not in covered for item in routes(value))
-            ), None)
-            if bridge:
-                selected_ids.append(bridge)
-    else:
-        fresh = [value for value in evidence_candidates if value not in detailed]
-        repeated = [value for value in evidence_candidates if value in detailed]
-        selected_ids = (fresh + repeated)[:2]
-    # Allocation must not starve the letter of its own strongest matched cases.
-    if not selected_ids:
-        selected_ids = evidence_candidates[:2]
+    comparisons = []
+    covered_priorities = set()
+    chosen_groups = set()
+    ranked_ids = []
+    remaining = list(evidence_candidates)
+    while remaining and len(chosen_groups) < 3:
+        def rank(evidence_id):
+            item = evidence_by_id[evidence_id]
+            direct = {p["criteria_id"] for p in priorities if evidence_id in p["candidate_evidence_ids"] and p["match_type"] == "direct"}
+            coverage = {p["criteria_id"] for p in priorities if evidence_id in p["candidate_evidence_ids"] and p["match_type"] != "insufficient"}
+            period = item.get("time_period") or {}
+            end = str(period.get("end") or "")
+            recent = date.today().toordinal() if re.fullmatch(r"(?i)present|current|ongoing|now", end) else (_employment_end(end) or date.min).toordinal()
+            detail = str(item.get("action") or item.get("source_text") or "")
+            return (len(direct), len(coverage - covered_priorities), recent, len(detail.split()), evidence_id not in detailed)
+        winner = max(remaining, key=rank)
+        item = evidence_by_id[winner]
+        group = item.get("source_group_id") or item.get("source_section") or winner
+        coverage = {p["criteria_id"] for p in priorities if winner in p["candidate_evidence_ids"] and p["match_type"] != "insufficient"}
+        if len(chosen_groups) >= 2 and not coverage - covered_priorities:
+            break
+        chosen_groups.add(group)
+        covered_priorities.update(coverage)
+        members = [value for value in remaining if (evidence_by_id[value].get("source_group_id") or evidence_by_id[value].get("source_section") or value) == group]
+        ranked_ids.extend(members)
+        remaining = [value for value in remaining if value not in members]
+    selected_ids = ranked_ids
+    for evidence_id in evidence_candidates:
+        item = evidence_by_id[evidence_id]
+        comparisons.append({"evidence_id": evidence_id, "selected": evidence_id in selected_ids,
+                            "source_section": item.get("source_section"), "time_period": item.get("time_period"),
+                            "direct_priorities": [p["criteria_id"] for p in priorities if evidence_id in p["candidate_evidence_ids"] and p["match_type"] == "direct"],
+                            "reason": "Direct priority support and complementary case coverage, then recency and source detail." if evidence_id in selected_ids else "Stronger selected cases cover these priorities; adding this case would repeat their coverage."})
     selected_evidence = [{
         "evidence_id": evidence_id,
         "source_section": str(evidence_by_id[evidence_id].get("source_section") or "Master Resume"),
@@ -207,6 +206,8 @@ def build_cover_letter_plan(
         "schema_version": COVER_LETTER_PLAN_SCHEMA_VERSION,
         "priorities": priorities,
         "selected_evidence": selected_evidence,
+        "candidate_comparison": comparisons,
+        "job_identity": job_model.get("job_identity") or {},
         "evidence_gaps": [item["criteria_id"] for item in priorities if item["match_type"] == "insufficient"],
         "declared_intent": intent,
         "narrative_plan": [

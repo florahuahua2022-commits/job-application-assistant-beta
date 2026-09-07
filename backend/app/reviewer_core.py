@@ -19,6 +19,13 @@ ISSUE_SEVERITY = {
     "declared_evidence_unused": "major",
     "unknown_reviewer_issue": "major",
     "style_only": "advisory",
+    "unsupported_availability_claim": "major",
+    "availability_conflict": "major",
+    "generation_under_utilized": "major",
+    "insufficient_source_detail": "major",
+    "concise_but_relevant": "advisory",
+    "source_parsing_uncertain": "advisory",
+    "resume_repetitive_opening": "advisory",
 }
 SHARED_REVIEW_ISSUE_TYPES = set(ISSUE_SEVERITY)
 

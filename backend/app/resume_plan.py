@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 from .ckb import evidence_density
 from .resume_timeline import apply_timeline, timeline_text
+from .job_model import match_advertised_tags
 
 
 RESUME_PLAN_SCHEMA_VERSION = "2.0"
@@ -82,21 +83,59 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
     issues = []
     target_words = int(plan.get("target_words") or 0)
     word_count = len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE))
-    if target_words and word_count < target_words * .7:
-        eligible = [item for item in plan.get("selected_evidence") or [] if item.get("evidence_type") == "experience"]
-        thin = [item for item in eligible if item.get("evidence_thin") is True]
-        source_is_thin = bool(eligible) and len(thin) / len(eligible) > .5
+    for group in plan.get("source_groups") or []:
+        detail = str(group.get("source_detail") or "").strip()
+        # ponytail: recognise only wholly generic source statements deterministically;
+        # the source-aware semantic reviewer handles other sparse paraphrases.
+        if re.fullmatch(r"(?i)(?:(?:responsible for |provided |performed |handled )?(?:daily |routine |general )?(?:administrative (?:work|support|duties)|administration|office duties)|负责日常行政工作)[.!。\s]*", detail):
+            issues.append({
+                "type": "insufficient_source_detail", "severity": "major", "blocks_release": True,
+                "description": f"{group['source_section']} contains only a generic duty, so the CV cannot show what you did.",
+                "location": group["source_section"], "evidence": detail, "owner": "user_add_source_detail",
+                "recommended_action": "Add the actual tasks, people, tools or scope for this role. Numbers are optional.",
+            })
+    if target_words and word_count < target_words * .7 and not issues:
         issues.append({
-            "type": "insufficient_source_detail" if source_is_thin else "concise_but_relevant",
-            "severity": "major" if source_is_thin else "advisory", "blocks_release": source_is_thin,
-            "description": "Relevant source evidence is too thin to support a useful tailored CV." if source_is_thin else
-                           f"The CV contains {word_count} words. Length alone does not establish missing content.",
-            "recommended_action": "Add confirmed actions, objects, tools or scope to the relevant experiences: " +
-                                  "; ".join(sorted({item["source_section"] for item in thin})) if source_is_thin else
-                                  "Keep the concise draft; do not expand low or timeline-only roles for length.",
+            "type": "concise_but_relevant", "severity": "advisory", "blocks_release": False,
+            "description": f"The CV contains {word_count} words. Length alone does not establish missing content.",
+            "recommended_action": "Keep it concise if the source-aware review confirms relevant fact coverage.",
         })
 
     work_section = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", content)
+    entries = re.split(r"(?m)^###\s+", work_section.group(1) if work_section else "")[1:]
+    generic_words = set("a an the and or for of to in with by i my provided supported assisted maintained coordinated collated liaised performed delivered managed administrative administration support daily routine general duties work activities services".split())
+    def fact_tokens(text):
+        return set(re.findall(r"[a-z0-9]+", text.casefold())) - generic_words
+    repeated = []
+    # ponytail: pairwise token similarity over resume-sized bullet sets; semantic
+    # review remains responsible for paraphrases with little lexical overlap.
+    for index, entry in enumerate(entries):
+        for sentence in re.findall(r"(?m)^\s*[-*]\s+(.+)$", entry):
+            signature = fact_tokens(sentence)
+            peers = {index}
+            if signature:
+                for other_index, other in enumerate(entries):
+                    if other_index == index:
+                        continue
+                    for other_sentence in re.findall(r"(?m)^\s*[-*]\s+(.+)$", other):
+                        other_tokens = fact_tokens(other_sentence)
+                        if len(signature & other_tokens) / max(len(signature | other_tokens), 1) >= .7:
+                            peers.add(other_index)
+            if len(peers) >= 3:
+                repeated.append((sentence, peers))
+    if repeated:
+        sentence, peers = max(repeated, key=lambda value: len(value[1]))
+        unused = []
+        for group in plan.get("source_groups") or []:
+            marker = _normalise_identity_text(_role_marker(group["source_section"]))
+            entry = next((entries[i] for i in peers if _contains_identity(_normalise_identity_text(entries[i].splitlines()[0]), marker)), "")
+            if entry and len(fact_tokens(group["source_detail"]) - fact_tokens(entry)) >= 3:
+                unused.append(group)
+        if len(unused) >= 3:
+            issues.append({"type": "generation_under_utilized", "severity": "major", "blocks_release": True,
+                           "description": "Three or more roles repeat a generic duty while their sources contain unused distinguishing details.",
+                           "location": sentence, "evidence": "\n".join(g["source_section"] + ": " + g["source_detail"] for g in unused),
+                           "owner": "system_rewrite", "recommended_action": "Restore each role's own actions, tools and scope; changing opening verbs alone is not a repair."})
     bullets = re.findall(r"(?im)^\s*[-*]\s+([A-Za-z][A-Za-z'-]*)\b", work_section.group(1) if work_section else "")
     if len(bullets) >= 3:
         counts = {verb.lower(): sum(item.lower() == verb.lower() for item in bullets) for verb in bullets}
@@ -351,6 +390,16 @@ def build_resume_curation_plan(
     ineligible = {section for section in role_groups if next(role for role in roles if role["source_section"] == section)["display_mode"] in {"timeline_only", "hidden"}}
     selected = [item for item in selected if item["source_section"] not in ineligible]
     selected_set = {item["evidence_id"] for item in selected}
+    source_groups = {}
+    for item in ckb:
+        if item.get("evidence_type") != "experience" or str(item.get("evidence_id")) not in selected_set:
+            continue
+        key = item.get("source_group_id") or (str(item.get("source_section")), json.dumps(item.get("time_period") or {}, sort_keys=True))
+        group = source_groups.setdefault(key, {"source_section": item.get("source_section"), "parts": [], "evidence_ids": []})
+        group["parts"].append(evidence_density(item)["source_detail"])
+        group["evidence_ids"].append(item["evidence_id"])
+    for group in source_groups.values():
+        group["source_detail"] = "\n".join(dict.fromkeys(group.pop("parts")))
     return {
         "schema_version": RESUME_PLAN_SCHEMA_VERSION,
         "timeline": timeline,
@@ -360,6 +409,8 @@ def build_resume_curation_plan(
         "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],
         "roles": roles,
         "selected_evidence": selected,
+        "source_groups": list(source_groups.values()),
+        "advertised_skill_tags": match_advertised_tags(job_model, matches, ckb),
         "omitted_evidence_ids": sorted(set(evidence_by_id) - selected_set),
         "omission_reasons": {evidence_id: (
             "duplicate" if re.sub(r"\s+", " ", str(item.get("source_text") or "").strip().lower()) in seen_content
@@ -367,6 +418,7 @@ def build_resume_curation_plan(
         ) for evidence_id, item in evidence_by_id.items() if evidence_id not in selected_set},
         "section_budget": {"professional_summary": 80, "key_skills": 90, "work_experience": max(target_words - 220, 250), "education_qualifications_references": 50},
         "rules": [
+            "Relevant roles normally use 4–6 distinct bullets and condensed roles 0–2; these are guidance, never a reason to omit a unique fact.",
             "Preserve role chronology from authoritative CKB source order; relevance controls only content budget.",
             "max_bullets null means no mechanical ceiling. One evidence record may support multiple distinct actions; never repeat an action to fill space.",
             "Word and page targets are guidance; employer limits take priority. Preserve distinctive relevant facts before compressing generic duties.",

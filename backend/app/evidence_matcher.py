@@ -1,5 +1,6 @@
 import json
 from typing import Any
+from .job_model import match_advertised_tags
 
 
 MATCH_SCHEMA_VERSION = "1.0"
@@ -50,6 +51,7 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
     return {
         "schema_version": MATCH_SCHEMA_VERSION,
         "matches": normalised,
+        "advertised_skill_tags": match_advertised_tags(job_model, {"matches": normalised}, ckb),
         "unused_evidence": sorted(valid_evidence - used),
     }
 

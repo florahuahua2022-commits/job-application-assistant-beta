@@ -18,7 +18,7 @@ from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_se
 from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
 from .ats_verification import verify_resume_artifact, verify_document_export
-from .applicant_profile import applicant_profile_prompt
+from .applicant_profile import applicant_profile_prompt, confirmed_availability_wording, availability_issues, polish_availability
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
@@ -27,7 +27,7 @@ from .config import settings
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .evidence_allocation import apply_selection_allocation, build_evidence_allocation
 from .database import create_db_and_tables, get_session
-from .exporter import create_docx, create_pdf, safe_filename
+from .exporter import create_docx, create_pdf, safe_filename, export_theme
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, normalise_resume_experiences, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
@@ -273,7 +273,7 @@ def serialise_job_model(job_description: str, selection_criteria: str | None, po
 
 def add_resume_quality_status(review: dict, content: str, plan: dict) -> dict:
     findings = [issue for result in review.get("results") or [] for issue in result.get("issues") or []]
-    content_types = {"requirement_omission", "ai_tone", "jd_wording_repeated", "declared_evidence_unused"}
+    content_types = {"requirement_omission", "ai_tone", "jd_wording_repeated", "declared_evidence_unused", "generation_under_utilized", "insufficient_source_detail"}
     factual_status = "fail" if any(item.get("blocks_release", item.get("severity") != "advisory") and item.get("type") not in content_types for item in findings) else "pass"
     if review.get("status") != "pass" and not findings:
         factual_status = str(review.get("status") or "pending")
@@ -858,15 +858,6 @@ def enforce_profile_contact(content: str, profile: ApplicantProfile, document_ty
     return corrected
 
 
-def confirmed_availability_wording(value: str) -> str:
-    return {
-        "two_weeks": "Available following two weeks' notice",
-        "one_month": "Available following one month's notice",
-        "negotiable": "Start date negotiable",
-        "not_specified": "Do not state availability",
-    }.get(value, "Do not state availability")
-
-
 def auto_polish_cover_letter(
     content: str,
     profile: ApplicantProfile | None,
@@ -900,26 +891,12 @@ def auto_polish_cover_letter(
             polished,
         )
 
-    if profile:
-        availability = confirmed_availability_wording(profile.availability_notice)
-        availability_sentence = {
-            "two_weeks": "I am available following two weeks' notice.",
-            "one_month": "I am available following one month's notice.",
-            "negotiable": "My start date is negotiable.",
-        }.get(profile.availability_notice)
-        if availability_sentence:
-            polished = re.sub(
-                r"(?i)I am available to commence[^.]*\.",
-                availability_sentence,
-                polished,
-            )
-        elif availability == "Do not state availability":
-            polished = re.sub(r"(?i)I am available to commence[^.]*\.\s*", "", polished)
+    polished = polish_availability(polished, profile.availability_notice if profile else "not_specified")
 
     return re.sub(r"\n{3,}", "\n\n", polished).strip()
 
 
-def auto_polish_tailored_resume(content: str) -> str:
+def auto_polish_tailored_resume(content: str, include_references: bool = False) -> str:
     polished = content
     heading_variants = (
         (r"professional summary|professional profile|career profile|profile|summary", "Professional Summary"),
@@ -935,12 +912,39 @@ def auto_polish_tailored_resume(content: str) -> str:
         )
     polished = re.sub(
         r"(?im)^\s*(?:references?|referees?)\s+(?:are\s+)?available (?:on|upon) request\.?\s*$",
-        "Available upon request",
+        "## References\nAvailable upon request",
         polished,
     )
-    if not re.search(r"(?im)^## References\s*$", polished):
+    if include_references and not re.search(r"(?im)^## References\s*$", polished):
         polished = f"{polished.rstrip()}\n\n## References\nAvailable upon request"
+    if not include_references:
+        polished = re.sub(r"(?im)^## References\s*\n\s*(?:References?\s+)?Available (?:upon|on) request\.?\s*(?=^## |\Z)", "", polished)
+    seen_skills = set()
+    section = ""
+    lines = []
+    for line in polished.splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip().casefold()
+        if section in {"key skills", "technical skills"} and line.strip().startswith("- "):
+            key = re.sub(r"[^\w]+", " ", line.strip()[2:].casefold()).strip()
+            if key in seen_skills:
+                continue
+            seen_skills.add(key)
+        lines.append(line)
+    polished = "\n".join(lines)
     return re.sub(r"\n{3,}", "\n\n", polished).strip()
+
+
+def record_export(document, format, template, integrity, payload, session):
+    trace = load_release_state(document.trace_json)
+    trace.setdefault("exports", []).append({
+        "created_at": datetime.utcnow().isoformat(), "document_id": document.id,
+        "content_sha256": fingerprint(document.content), "artifact_sha256": sha256(payload).hexdigest(),
+        "format": format, "template": template, "token_version": export_theme(template).get("token_version", "legacy.1"),
+        "checks": integrity,
+    })
+    document.trace_json = json.dumps(trace, ensure_ascii=False)
+    session.add(document)
 
 
 @app.get("/profile", response_model=ApplicantProfileResponse | None)
@@ -2118,18 +2122,10 @@ def quality_check(
                 message="A job requirement may be presented as direct experience. Rephrase it as transferable capability unless the Master Resume confirms the duty.",
                 document_type=document_type,
             ))
-        if "available to commence immediately" in lowered or "available to commence promptly" in lowered:
-            availability = profile.availability_notice if profile else "not_specified"
-            expected = {
-                "two_weeks": "two weeks' notice",
-                "one_month": "one month's notice",
-                "negotiable": "a negotiable start date",
-                "not_specified": "no confirmed start date",
-            }.get(availability, "the saved availability preference")
+        for finding in availability_issues(content, profile.availability_notice if profile else "not_specified"):
             issues.append(QualityCheckIssue(
-                severity="warning",
-                code="unconfirmed_availability",
-                message=f"The document states immediate or prompt availability, but the profile indicates {expected}. Confirm or revise this statement.",
+                severity="error", code=finding["type"],
+                message=finding["description"] + " " + finding["recommended_action"],
                 document_type=document_type,
             ))
         for code, message in find_writing_quality_issues(content):
@@ -2276,7 +2272,7 @@ def confirm_release_details(
 def release_checklist(
     application_id: int,
     format: str = Query(default="docx", pattern="^(docx|pdf)$"),
-    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional|career_modern)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
@@ -2325,7 +2321,7 @@ def release_checklist(
         "pack_review": {"ready": pack_current, "current": (state.get("pack_review") or {}).get("fingerprint") == pack_key, "result": stored_pack},
         "ats": {"ready": ats_current, "document_id": resume.id if resume else None, "format": format, "template": template, "result": stored_ats if ats_current else None},
     }
-    if any((load_release_state(item.trace_json).get("versions") or {}).get("prompt") == "2.0" for item in latest.values()):
+    if any((load_release_state(item.trace_json).get("versions") or {}).get("prompt") in {"2.0", "3.0"} for item in latest.values()):
         exports = state.get("exports") or {}
         exported = exports.get("documents") or {}
         checks["exports"] = {"ready": exports.get("format") == format and exports.get("template") == template and all(
@@ -2535,7 +2531,7 @@ def review_edited_document(
 def export_generated_document(
     document_id: int,
     format: str = Query(pattern="^(docx|pdf)$"),
-    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional|career_modern)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
@@ -2562,6 +2558,8 @@ def export_generated_document(
     integrity = verify_document_export(document.content, payload, format)
     if not integrity["ready"]:
         raise HTTPException(409, "Export integrity check failed. Your saved text is unchanged; try another format or correct the document.")
+    record_export(document, format, template, integrity, payload, session)
+    session.commit()
     return Response(payload, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'})
 
 
@@ -2631,6 +2629,7 @@ def ats_check_generated_resume(
             render = create_docx if payload.format == "docx" else create_pdf
             artifact = render(selected_document.content, title, payload.template, profile.country)
             integrity = verify_document_export(selected_document.content, artifact, payload.format)
+            record_export(selected_document, payload.format, payload.template, integrity, artifact, session)
         except Exception:
             integrity = {"ready": False, "message": "Export could not be completed."}
         exports[kind] = {"document_id": selected_document.id, "content_sha256": fingerprint(selected_document.content), "result": integrity}
@@ -2662,7 +2661,7 @@ def export_document_trace(
 def export_application_pack(
     application_id: int,
     format: str = Query(pattern="^(docx|pdf)$"),
-    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional|career_modern)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
@@ -2688,9 +2687,12 @@ def export_application_pack(
             document = latest[document_type]
             label = labels[document_type]
             payload = create_docx(document.content, label.replace("_", " "), template, market) if format == "docx" else create_pdf(document.content, label.replace("_", " "), template, market)
-            if not verify_document_export(document.content, payload, format)["ready"]:
+            integrity = verify_document_export(document.content, payload, format)
+            if not integrity["ready"]:
                 raise HTTPException(409, f"{label.replace('_', ' ')} export failed its integrity check. Saved documents are unchanged.")
+            record_export(document, format, template, integrity, payload, session)
             archive.writestr(f"{safe_filename(application.position_title)}_{label}_Draft_v{document.id}.{format}", payload)
+    session.commit()
     filename = safe_filename(f"{application.position_title}_Application_Pack_{format.upper()}")
     return Response(archive_stream.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}.zip"'})
 
@@ -2879,10 +2881,12 @@ def generate_document(
                 json.dumps(cover_letter_plan or {}, ensure_ascii=False),
                 json.dumps(resume_plan or {}, ensure_ascii=False),
             )
+        raw_draft = content
+        availability_corrections = availability_issues(content, profile.availability_notice if profile else "not_specified")
         if profile and payload.document_type in {"tailored_resume", "cover_letter"}:
             content = enforce_profile_contact(content, profile, payload.document_type)
         if payload.document_type == "tailored_resume":
-            content = auto_polish_tailored_resume(content)
+            content = polish_availability(auto_polish_tailored_resume(content, include_references=bool(re.search(r"(?i)\b(?:references|referees)\b", application.job_description + " " + (profile.preferences_notes or "" if profile else "")))), "not_specified")
         if payload.document_type == "cover_letter":
             content = auto_polish_cover_letter(content, profile, application.job_description)
     except (RuntimeError, ValueError) as error:
@@ -2922,8 +2926,7 @@ def generate_document(
             ]
     if payload.document_type == "tailored_resume":
         validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
-        if not validation["valid"]:
-            raise HTTPException(502, validation["issues"][0]["message"] + " Please regenerate it.")
+        # Structural failures remain inspectable drafts; the final review blocks release.
     generation_provider = provider_response_telemetry()
     run_id = str(uuid4())
     provider = generation_provider.get("provider") or settings.ai_provider.strip().lower()
@@ -2939,8 +2942,9 @@ def generate_document(
         latency_ms=round((perf_counter() - generation_started) * 1000),
         input_fingerprint=started_fingerprint,
     )
-    trace["inputs"] = {"resume": master_resume.source_text, "ckb": current_ckb, "job_model": json.loads(job_model_json), "profile": profile_text}
-    trace["draft"] = content
+    trace["inputs"] = {"resume": master_resume.source_text, "ckb": current_ckb, "job_model": json.loads(job_model_json), "profile": profile_text, "profile_snapshot": {"id": profile.id if profile else None, "updated_at": str(profile.updated_at) if profile else None, "availability_notice": profile.availability_notice if profile else "not_specified"}}
+    trace["draft"] = raw_draft
+    trace["availability_corrections"] = availability_corrections
     trace["runtime"]["generation_provider"] = generation_provider
     trace["runtime"]["status"] = "review_pending"
     trace["runtime"]["ckb_status"] = ckb_status
@@ -2990,7 +2994,8 @@ def generate_document(
                 content = enforce_profile_contact(content, profile, "tailored_resume")
             repaired_validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
             if not repaired_validation["valid"]:
-                raise HTTPException(502, repaired_validation["issues"][0]["message"] + " Please regenerate it.")
+                resume_review["status"] = "fail"
+                resume_review.setdefault("results", []).append({"criteria_id": "resume_structure", "status": "fail", "issues": [{"type": "evidence_mismatch", "severity": "major", "blocks_release": True, "description": issue["message"], "recommended_action": "Repair this draft using its saved Resume Plan."} for issue in repaired_validation["issues"]]})
         except ValueError as error:
             raise HTTPException(400, str(error))
         except AIServiceError as error:
@@ -3048,6 +3053,7 @@ def generate_document(
     initial_trace = json.loads(document.trace_json or "{}")
     trace["inputs"] = initial_trace.get("inputs", {})
     trace["draft"] = initial_trace.get("draft", "")
+    trace["availability_corrections"] = initial_trace.get("availability_corrections", [])
     trace["runtime"]["generation_provider"] = generation_provider
     trace["runtime"]["ckb_status"] = ckb_status
     if provider != settings.ai_provider.strip().lower():
@@ -3131,7 +3137,7 @@ def save_selection_confirmations(
 def prepare_submission(
     application_id: int,
     format: str = Query(default="docx", pattern="^(docx|pdf)$"),
-    template: str = Query(default="classic", pattern="^(classic|modern|traditional)$"),
+    template: str = Query(default="classic", pattern="^(classic|modern|traditional|career_modern)$"),
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):

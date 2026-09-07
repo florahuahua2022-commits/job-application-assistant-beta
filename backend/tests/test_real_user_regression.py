@@ -249,7 +249,7 @@ Prepared reports, coordinated meetings and maintained accurate project records.
     def test_current_empty_date_states_are_reused_without_rebuild(self):
         for status in ("uncertain", "not_provided"):
             with self.subTest(status=status), Session(self.engine) as session:
-                ckb = [{"schema_version": "2.0", "evidence_type": "experience", "time_period": {"start": None, "end": None}, "time_period_status": status}]
+                ckb = [{"schema_version": "2.0", "evidence_type": "experience", "source_group_id": "role", "time_period": {"start": None, "end": None}, "time_period_status": status}]
                 resume = Resume(source_text="Authoritative source", experiences_json="[]", ckb_json=json.dumps(ckb))
                 session.add(resume); session.commit(); session.refresh(resume)
                 with patch("app.main.serialise_ckb", side_effect=AssertionError("current CKB must not rebuild")):
@@ -371,11 +371,14 @@ Other grounded work."""
                 ):
                     response = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
 
-                self.assertEqual(response.status_code, expected_status, response.text)
+                self.assertEqual(response.status_code, 200, response.text)
                 if expected_status == 200:
                     self.assertEqual(json.loads(response.json()["trace_json"])["runtime"]["ckb_status"], "reused_current")
                 if expected_status == 502:
-                    self.assertIn(expected_error, response.json()["detail"])
+                    review = json.loads(response.json()["reviewer_json"])
+                    self.assertNotEqual(review["status"], "pass")
+                    self.assertIn(expected_error, str(review["results"]))
+                    self.assertTrue(response.json()["content"])
 
     def test_resume_name_is_restored_after_automatic_repair(self):
         application_id = self.seed(required=("resume",))

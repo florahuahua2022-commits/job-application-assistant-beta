@@ -6,7 +6,8 @@ from typing import Any
 from docx import Document
 from pypdf import PdfReader
 
-from .exporter import create_docx, create_pdf, resolve_page_size, _ascii_punctuation
+from .exporter import create_docx, create_pdf, resolve_page_size, _ascii_punctuation, export_theme
+from .career_modern import export_content
 
 
 def _plain(value: str) -> str:
@@ -45,10 +46,12 @@ def verify_document_export(content: str, payload: bytes, format: str) -> dict:
     """Check every source token survives, including repeated words and dates."""
     try:
         extracted, metadata = extract_artifact(payload, format)
-        source = re.sub(r"(?m)^\s*\d+\.\s+", "", _ascii_punctuation(content))
+        source = re.sub(r"(?m)^\s*\d+\.\s+", "", _ascii_punctuation(export_content(content)))
         missing = Counter(_words(source)) - Counter(_words(extracted))
+        remaining = iter(_words(extracted))
+        ordered = all(any(actual == expected for actual in remaining) for expected in _words(source))
         internal = bool(re.search(r"GENERATION_META|<!--|\bEV[A-F0-9]{12}\b", extracted))
-        return {"ready": not missing and not internal, "missing_token_count": sum(missing.values()),
+        return {"ready": not missing and not internal and ordered, "text_order_preserved": ordered, "missing_token_count": sum(missing.values()),
                 "internal_markers": internal, **metadata}
     except Exception:
         return {"ready": False, "message": "The exported document could not be checked."}
@@ -224,7 +227,7 @@ def _result(format: str, template: str, checks: list[dict], metadata: dict | Non
     metadata = metadata or {"page_count": None, "page_size": None}
     return {
         "schema_version": "1.0", "status": "pass" if ready else "fail", "ready": ready,
-        "format": format, "template": template,
+        "format": format, "template": template, "token_version": export_theme(template).get("token_version", "legacy.1"),
         "artifact": {"extraction_status": "extracted" if text else "failed", **metadata,
                      "character_count": len(text), "word_count": len(_words(text)), "content_retention_ratio": ratio},
         "checks": checks, "keywords": [],

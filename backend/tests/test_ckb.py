@@ -31,7 +31,7 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         self.assertEqual(EVIDENCE_TYPES, expected)
 
     def test_currentness_uses_date_status_not_an_empty_period_heuristic(self):
-        base = {"schema_version": "2.0", "evidence_type": "experience", "time_period": {"start": None, "end": None}}
+        base = {"schema_version": "2.0", "evidence_type": "experience", "source_group_id": "role", "time_period": {"start": None, "end": None}}
         self.assertFalse(career_knowledge_base_is_current([base]))
         for status in ("verified", "uncertain", "not_provided"):
             with self.subTest(status=status):

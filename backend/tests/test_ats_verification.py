@@ -215,7 +215,10 @@ class AtsVerificationEndpointTests(unittest.TestCase):
             response = self.client.post(f"/documents/{self.document_id}/ats-check", json={"format": "docx", "template": "classic"})
         self.assertEqual(response.status_code, 200); self.assertTrue(response.json()["ready"])
         with Session(self.engine) as session:
-            self.assertEqual(session.get(GeneratedDocument, self.document_id).model_dump(), before)
+            after = session.get(GeneratedDocument, self.document_id).model_dump()
+            self.assertTrue(json.loads(after["trace_json"])["exports"])
+            self.assertEqual({key: value for key, value in after.items() if key != "trace_json"},
+                             {key: value for key, value in before.items() if key != "trace_json"})
             state = json.loads(session.exec(select(JobApplication)).first().release_state_json)
             self.assertEqual(state["ats"]["document_id"], self.document_id)
             self.assertEqual(state["ats"]["format"], "docx")

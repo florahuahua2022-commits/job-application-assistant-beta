@@ -137,7 +137,8 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
         len(lines),
     )
     work_lines = lines[section_start:section_end]
-    date_indexes = [index for index, line in enumerate(work_lines) if EMPLOYMENT_PERIOD_PATTERN.search(line)]
+    date_indexes = [index for index, line in enumerate(work_lines) if EMPLOYMENT_PERIOD_PATTERN.search(line)
+                    and not re.match(r"(?i)^(?:prepared|supported|assisted|managed|coordinated|maintained|processed|reviewed|delivered|developed|provided|responsible|led|collated)\b", line)]
     if not date_indexes:
         # ponytail: only explicit short role/company header pairs are inferred;
         # unusual layouts remain in source_text for user correction, not guessed identities.

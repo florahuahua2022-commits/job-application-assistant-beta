@@ -10,27 +10,28 @@ EVIDENCE_THIN_WORD_THRESHOLD = 20
 
 def evidence_density(item: dict[str, Any]) -> dict[str, Any]:
     """Measure source detail without counting employer/title/date headers twice."""
-    source = str(item.get("source_text") or "").strip()
+    source = str(item.get("source_paragraph") or item.get("source_text") or "").strip()
     headers = {part.strip().casefold() for part in str(item.get("source_section") or "").split(">")}
     headers.update(str(item.get(key) or "").strip().casefold() for key in ("role_title", "organization", "time_period_text"))
     if source:
-        detail = "\n".join(line for line in source.splitlines() if line.strip().casefold() not in headers
-                           and not EMPLOYMENT_PERIOD_PATTERN.search(line))
+        detail = "\n".join(line for line in source.splitlines()
+                           if line.strip().casefold() not in headers and not EMPLOYMENT_PERIOD_PATTERN.fullmatch(line.strip()))
     else:
         detail = "\n".join(dict.fromkeys(str(item.get(key) or "").strip() for key in ("action", "responsibility", "task", "result", "detail")))
     count = len(re.findall(r"\b[\w'-]+\b", detail))
     # ponytail: word length is an English-oriented proxy, not proof of informative content; calibrate with reviewed sources.
     return {"source_detail_words": count, "evidence_thin": count < EVIDENCE_THIN_WORD_THRESHOLD,
+            "source_detail": detail.strip(),
             "density_threshold_words": EVIDENCE_THIN_WORD_THRESHOLD}
 EVIDENCE_TYPES = {
     "experience", "project", "volunteer", "education", "qualification", "award", "publication", "skill",
 }
 
 EMPLOYMENT_PERIOD_PATTERN = re.compile(
-    r"(?i)\b((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
-    r"sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:19|20)\d{2})\s*(?:-|–|—|to)\s*"
-    r"((?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
-    r"sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:19|20)\d{2}|present|current|now))\b"
+    r"(?i)\b((?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}(?:-\d{2}(?:-\d{2})?)?)\s*(?:-|–|—|to)\s*"
+    r"((?:(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}(?:-\d{2}(?:-\d{2})?)?|present|current|ongoing|now))\b"
 )
 
 
@@ -40,6 +41,9 @@ def stable_evidence_id(evidence_type: str, source_text: str) -> str:
 
 
 def split_time_period(value: str) -> dict[str, str | None]:
+    matched = EMPLOYMENT_PERIOD_PATTERN.fullmatch(value.strip())
+    if matched:
+        return {"start": matched[1], "end": matched[2]}
     parts = re.split(r"\s*(?:-|–|—|to)\s*", value.strip(), maxsplit=1, flags=re.IGNORECASE)
     if len(parts) == 2:
         return {"start": parts[0] or None, "end": parts[1] or None}
@@ -86,6 +90,10 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         "evidence_type": evidence_type,
         "source_section": str(item.get("source_section") or f"Work Experience > {organisation or 'Unknown organisation'} > {role or 'Unknown role'}"),
         "source_text": source_text,
+        "source_paragraph": str(item.get("source_paragraph") or raw_source or source_text),
+        "source_group_id": str(item.get("source_group_id") or stable_evidence_id("role", f"{organisation}|{role}|{supplied_period}")),
+        "source_location": item.get("source_location"),
+        "parsing_confidence": "high" if raw_source and date_status == "verified" else "uncertain",
         "time_period": supplied_period,
         "time_period_status": date_status,
         "situation": situation,
@@ -117,7 +125,7 @@ def _experience_evidence_items(item: dict[str, Any]) -> list[dict[str, Any]]:
     evidence_items = []
     header = "\n".join(lines[:date_index + 1]) if date_index >= 0 else "\n".join(str(item.get(key) or "") for key in ("role_title", "organization", "time_period_text"))
     for duty in duties:
-        detail = {**item, "evidence_id": "", "responsibility": duty, "source_text": f"{header}\n{duty}"}
+        detail = {**item, "evidence_id": "", "responsibility": duty, "source_paragraph": raw_source, "source_text": f"{header}\n{duty}"}
         evidence = experience_to_evidence(detail)
         if evidence:
             evidence["source_paragraph"] = raw_source
@@ -184,6 +192,10 @@ def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") 
     evidence.extend(_detail_evidence(source_text))
     unique: dict[str, dict[str, Any]] = {}
     for item in evidence:
+        if item.get("source_paragraph") and item.get("source_location") is None:
+            start = source_text.find(item["source_paragraph"])
+            if start >= 0:
+                item["source_location"] = {"start": start, "end": start + len(item["source_paragraph"])}
         unique.setdefault(item["evidence_id"], item)
     return list(unique.values())
 
@@ -191,7 +203,7 @@ def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") 
 def career_knowledge_base_is_current(items: Any) -> bool:
     return isinstance(items, list) and all(isinstance(item, dict) for item in items) and all(
         item.get("schema_version") == CKB_SCHEMA_VERSION and (item.get("evidence_type") != "experience" or (
-            "time_period_status" in item and len(_experience_evidence_items(item)) <= 1
+            "time_period_status" in item and "source_group_id" in item and len(_experience_evidence_items(item)) <= 1
         ))
         for item in items
     )

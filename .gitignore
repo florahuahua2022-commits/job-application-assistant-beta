@@ -13,3 +13,6 @@ uploads/
 *.sqlite
 *.sqlite3
 docs/END_TO_END_VALIDATION_*.md
+.codex/
+output/
+tmp/
