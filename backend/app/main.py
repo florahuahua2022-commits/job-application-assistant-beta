@@ -9,9 +9,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, update
 from sqlmodel import Session, delete, select
 from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
@@ -2717,31 +2717,71 @@ def save_generation_request(session, application_id, key, value, *, reserve=Fals
     raise HTTPException(409, "Another application update is in progress. Please retry.")
 
 
+def finish_generation_request(payload, session, user_id, key):
+    try:
+        document = generate_document(payload, session, user_id)
+    except Exception as error:
+        session.rollback()
+        detail = getattr(error, "detail", None)
+        message = (detail.get("message") if isinstance(detail, dict) else detail) if isinstance(error, HTTPException) else None
+        save_generation_request(session, payload.application_id, key, {
+            "status": "failed", "document_id": detail.get("document_id") if isinstance(detail, dict) else None,
+            "message": message or "Generation failed. Existing drafts are saved; please retry.",
+        })
+        raise
+    document_id = document.id
+    save_generation_request(session, payload.application_id, key, {"status": "completed", "document_id": document_id})
+    return get_for_user(session, GeneratedDocument, document_id, user_id)
+
+
+def run_generation_request(payload, user_id, key, bind):
+    # ponytail: in-process beta worker; a durable queue is needed to resume across server restarts.
+    with Session(bind) as session:
+        try:
+            finish_generation_request(payload, session, user_id, key)
+        except Exception:
+            operations.exception("Generation failed: application=%s type=%s request=%s", payload.application_id, payload.document_type, key)
+
+
+@app.get("/applications/{application_id}/generation-requests/{pack_id}/{document_type}")
+def generation_request_status(application_id: int, pack_id: UUID, document_type: str, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+    application = get_for_user(session, JobApplication, application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    state = load_release_state(application.release_state_json).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
+    if not state:
+        raise HTTPException(404, "Generation request not found.")
+    result = dict(state)
+    if state.get("document_id"):
+        document = get_for_user(session, GeneratedDocument, state["document_id"], user_id)
+        if document:
+            result["document"] = document
+    return result
+
+
 @app.post("/generate", response_model=GeneratedDocument)
-def generate(payload: GenerateRequest, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+def generate(payload: GenerateRequest, background_tasks: BackgroundTasks, background: bool = False, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
     if payload.pack_id is None:
+        if background:
+            raise HTTPException(400, "A generation pack identifier is required.")
         return generate_document(payload, session, user_id)
     key = f"{payload.pack_id}:{payload.document_type}"
     previous = save_generation_request(session, application.id, key, {"status": "running", "started_at": datetime.utcnow().isoformat()}, reserve=True)
+    if background:
+        if not previous:
+            background_tasks.add_task(run_generation_request, payload, user_id, key, session.get_bind())
+        return JSONResponse({"status": (previous or {}).get("status", "running")}, status_code=202)
     if previous:
         if previous.get("document_id"):
             saved = get_for_user(session, GeneratedDocument, previous["document_id"], user_id)
             if saved:
                 return saved
         raise HTTPException(409, "This generation request is running or was interrupted. Existing drafts are kept; use Retry to start a new request.")
-    try:
-        document = generate_document(payload, session, user_id)
-    except Exception as error:
-        session.rollback()
-        detail = getattr(error, "detail", {})
-        save_generation_request(session, payload.application_id, key, {"status": "failed", "document_id": detail.get("document_id") if isinstance(detail, dict) else None})
-        raise
-    document_id = document.id
-    save_generation_request(session, payload.application_id, key, {"status": "completed", "document_id": document_id})
-    return get_for_user(session, GeneratedDocument, document_id, user_id)
+    return finish_generation_request(payload, session, user_id, key)
+
 
 
 def generate_document(

@@ -1,5 +1,6 @@
 "use client";
 
+import { requestGeneratedDocument } from "./generationRequest";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, Session } from "@supabase/supabase-js";
 import {
@@ -886,12 +887,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         const documentType = generationTypes[index];
         generatingType = documentType;
         showPackNotice(`Creating application pack: ${index + 1} of ${generationTypes.length} — ${labels[documentType]}…`);
-        const response = await authenticatedFetch(`${api}/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ application_id: selectedApplication, document_type: documentType, pack_id: packId }),
-          signal: AbortSignal.timeout(360_000),
-        });
+        const response = await requestGeneratedDocument(api, authenticatedFetch, { application_id: selectedApplication, document_type: documentType, pack_id: packId }, sessionStorage);
         const result = await response.json();
         if (!response.ok) {
           if (result.detail?.document_id) {
@@ -925,12 +921,16 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       }
       await loadReleaseChecklist();
     } catch (error) {
-      const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
-      if (documentsResponse.ok) setDocuments(await documentsResponse.json());
-      else if (created.length) setDocuments([...created].reverse());
+      try {
+        const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
+        if (documentsResponse.ok) setDocuments(await documentsResponse.json());
+        else if (created.length) setDocuments([...created].reverse());
+      } catch {
+        if (created.length) setDocuments([...created].reverse());
+      }
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
       setGenerationFailure({ documentType: generatingType, message: detail });
-      showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. The failed attempt has not used today's completed-pack allowance.`);
+      showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. Existing drafts are kept. A connection error alone does not confirm whether generation has finished.`);
     } finally {
       setBusy(false);
     }
@@ -942,12 +942,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setBusy(true);
     setPackNotice(`Retrying ${labels[documentType]}…`);
     try {
-      const response = await authenticatedFetch(`${api}/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ application_id: selectedApplication, document_type: documentType, pack_id: crypto.randomUUID() }),
-        signal: AbortSignal.timeout(360_000),
-      });
+      const response = await requestGeneratedDocument(api, authenticatedFetch, { application_id: selectedApplication, document_type: documentType, pack_id: crypto.randomUUID() }, sessionStorage);
       const result = await response.json();
       if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`);
       setDocuments((current) => [result, ...current]);
