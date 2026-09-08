@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.ai import _repair_document
 from app.ats_verification import verify_document_export
@@ -16,7 +16,7 @@ from app.ckb import build_career_knowledge_base
 from app.database import get_session
 from app.evidence_matcher import normalise_match_result
 from app.main import app
-from app.models import GeneratedDocument, JobApplication
+from app.models import GeneratedDocument, JobApplication, Resume
 from app.resume_plan import build_resume_curation_plan
 
 
@@ -105,6 +105,92 @@ class MaterialVersionTests(unittest.TestCase):
             self.assertEqual(session.get(GeneratedDocument, original_id).content, "Original")
         history = self.client.get(f"/applications/{self.a['id']}/document-history")
         self.assertEqual(len(history.json()), 2)
+
+    def test_stale_snapshot_requires_update_and_clears_downstream_state(self):
+        old = json.dumps({"source_text": "Utility\nSodex", "experiences_json": json.dumps([{
+            "role_title": "utility/retail", "organization": "Sodex", "responsibility": "Service work",
+        }]), "ckb_json": "[]"})
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.a["id"])
+            application.resume_snapshot_json = old
+            application.evidence_matches_json = '{"matches":[1]}'
+            application.application_decision_json = '{"status":"ready"}'
+            application.selection_plan_json = '{"items":[1]}'
+            application.selection_confirmations_json = '["C1"]'
+            application.release_state_json = '{"pack_review":{"result":{"status":"pass"}},"ats":{"result":{"ready":true}}}'
+            resume = session.exec(select(Resume)).first()
+            resume.source_text = "Retail Assistant\nSodex\n2023 - 2024\nProvided customer service."
+            resume.experiences_json = json.dumps([{"role_title": "Retail Assistant", "organization": "Sodex", "time_period_text": "2023 - 2024", "responsibility": "Provided customer service."}])
+            session.add(GeneratedDocument(application_id=application.id, document_type="cover_letter", content="Old draft", trace_json='{"input_fingerprint":"old"}'))
+            session.add(application); session.add(resume); session.commit()
+
+        blocked = self.client.get(f"/applications/{self.a['id']}/decision")
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.json()["detail"]["code"], "application_resume_snapshot_outdated")
+        self.assertTrue(blocked.json()["detail"]["can_update"])
+
+        updated = self.client.put(f"/applications/{self.a['id']}/resume", json={
+            "use_latest_master": True, "expected_snapshot": old,
+        })
+        self.assertEqual(updated.status_code, 200, updated.text)
+        body = updated.json()
+        self.assertEqual(body["evidence_matches_json"], "{}")
+        self.assertEqual(body["application_decision_json"], "{}")
+        self.assertEqual(body["selection_plan_json"], "{}")
+        self.assertEqual(body["selection_confirmations_json"], "[]")
+        release = json.loads(body["release_state_json"])
+        self.assertTrue(release["generation_contract_required"])
+        self.assertNotIn("pack_review", release)
+        self.assertNotIn("ats", release)
+        self.assertEqual(self.client.get(f"/applications/{self.a['id']}/document-history").json()[0]["quality_state"], "outdated")
+
+    def test_latest_invalid_resume_cannot_replace_snapshot_and_names_mismatch(self):
+        with Session(self.engine) as session:
+            resume = session.exec(select(Resume)).first()
+            resume.source_text = "Utility\nSodex"
+            resume.experiences_json = json.dumps([{"role_title": "utility/retail", "organization": "Sodex"}])
+            session.add(resume); session.commit()
+        response = self.client.put(f"/applications/{self.a['id']}/resume", json={
+            "use_latest_master": True, "expected_snapshot": self.a["resume_snapshot_json"],
+        })
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "latest_master_resume_incomplete")
+        self.assertIn('role title: "utility/retail"', response.json()["detail"]["mismatches"])
+
+    def test_pristine_application_automatically_adopts_latest_resume(self):
+        with Session(self.engine) as session:
+            resume = session.exec(select(Resume)).first()
+            resume.source_text = "Retail Assistant\nSodex\n2023 - 2024"
+            resume.experiences_json = json.dumps([{"role_title": "Retail Assistant", "organization": "Sodex", "time_period_text": "2023 - 2024"}])
+            resume.ckb_json = "[]"
+            session.add(resume); session.commit()
+        with patch("app.main.match_evidence_batch", return_value={"matches": []}):
+            response = self.client.post(f"/applications/{self.a['id']}/decision")
+        self.assertEqual(response.status_code, 200, response.text)
+        with Session(self.engine) as session:
+            resume = session.exec(select(Resume)).first()
+            snapshot = json.loads(session.get(JobApplication, self.a["id"]).resume_snapshot_json)
+            self.assertEqual(snapshot["source_text"], "Retail Assistant\nSodex\n2023 - 2024")
+            self.assertNotEqual(snapshot["ckb_json"], "[]")
+            self.assertEqual(resume.ckb_json, "[]")
+
+    def test_diagnosed_application_requires_explicit_resume_update(self):
+        original = json.dumps({"source_text": "Utility\nSodex", "experiences_json": json.dumps([{
+            "role_title": "utility/retail", "organization": "Sodex",
+        }]), "ckb_json": "[]"})
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.a["id"])
+            application.resume_snapshot_json = original
+            application.application_decision_json = '{"status":"ready"}'
+            resume = session.exec(select(Resume)).first()
+            resume.source_text = "Retail Assistant\nSodex\n2023 - 2024"
+            resume.experiences_json = json.dumps([{"role_title": "Retail Assistant", "organization": "Sodex", "time_period_text": "2023 - 2024"}])
+            session.add(application); session.add(resume); session.commit()
+        response = self.client.get(f"/applications/{self.a['id']}/decision")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "application_resume_snapshot_outdated")
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(JobApplication, self.a["id"]).resume_snapshot_json, original)
 
     def test_duplicate_request_returns_same_document(self):
         def generated(payload, session, user_id):

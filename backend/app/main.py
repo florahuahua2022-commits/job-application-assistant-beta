@@ -121,12 +121,47 @@ def latest_application_documents(session: Session, application_id: int, user_id:
     return latest
 
 
-def application_master_resume(session: Session, application: JobApplication, user_id: UUID | None) -> Resume | None:
+def resume_snapshot(resume: Resume, ckb_json: str | None = None) -> dict:
+    return {
+        "resume_id": resume.id, "title": resume.title, "source_text": resume.source_text,
+        "experiences_json": resume.experiences_json, "ckb_json": ckb_json if ckb_json is not None else resume.ckb_json,
+    }
+
+
+def apply_resume_snapshot(application: JobApplication, resume: Resume, ckb_json: str | None = None) -> None:
+    snapshot = resume_snapshot(resume, ckb_json)
+    snapshot.update(material_version=str(uuid4()), updated_at=datetime.utcnow().isoformat())
+    application.resume_snapshot_json = json.dumps(snapshot, ensure_ascii=False)
+    application.evidence_matches_json = "{}"
+    application.application_decision_json = "{}"
+    application.selection_plan_json = "{}"
+    application.selection_confirmations_json = "[]"
+    require_current_generation_contract(application)
+    application.updated_at = datetime.utcnow()
+    if application.status == "ready_to_apply":
+        application.status = "draft"
+
+
+def application_master_resume(
+    session: Session, application: JobApplication, user_id: UUID | None, auto_update_pristine: bool = False,
+) -> Resume | None:
     try:
         snapshot = json.loads(application.resume_snapshot_json or "{}")
     except (json.JSONDecodeError, TypeError):
         snapshot = {}
     if snapshot.get("source_text"):
+        latest = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+        has_documents = session.exec(
+            select_for_user(GeneratedDocument, user_id).where(GeneratedDocument.application_id == application.id)
+        ).first() is not None
+        has_diagnosis = application.application_decision_json not in {"", "{}", None}
+        if auto_update_pristine and latest and not has_documents and not has_diagnosis and (
+            snapshot.get("source_text") != latest.source_text
+            or snapshot.get("experiences_json", "[]") != latest.experiences_json
+        ) and not master_resume_integrity_issue(latest):
+            apply_resume_snapshot(application, latest, serialise_ckb(latest.source_text, latest.experiences_json))
+            session.add(application); session.commit()
+            snapshot = json.loads(application.resume_snapshot_json)
         return Resume(
             id=snapshot.get("resume_id"), title=snapshot.get("title") or "Master Resume",
             source_text=snapshot["source_text"], experiences_json=snapshot.get("experiences_json") or "[]",
@@ -349,7 +384,7 @@ def prepare_application_decision(
 ) -> dict:
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
-        raise HTTPException(409, integrity_issue)
+        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     job_model = json.loads(application.job_model_json or "{}")
     if job_model.get("requirement_mode") == "inferred_requirements":
@@ -443,6 +478,47 @@ def master_resume_integrity_issue(resume: Resume) -> str | None:
     if experiences and unsupported:
         return "The saved Master Resume text does not contain all structured employment records. Re-upload the complete Resume before diagnosing or generating documents."
     return None
+
+
+def master_resume_integrity_mismatches(resume: Resume) -> list[str]:
+    try:
+        experiences = json.loads(resume.experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return ["employment records"]
+    mismatches: list[str] = []
+    for item in experiences if isinstance(experiences, list) else []:
+        if not isinstance(item, dict):
+            continue
+        for key, label in (("role_title", "role title"), ("organization", "organisation")):
+            value = str(item.get(key) or "").strip()
+            if not _resume_value_is_supported(value, resume.source_text):
+                mismatches.append(f'{label}: "{value or "(blank)"}"')
+    return mismatches
+
+
+def stale_resume_snapshot_detail(session: Session, application: JobApplication, user_id: UUID | None) -> dict | None:
+    latest = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    if not latest:
+        return None
+    try:
+        snapshot = json.loads(application.resume_snapshot_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        snapshot = {}
+    if not snapshot.get("source_text"):
+        return None
+    if snapshot.get("source_text") == latest.source_text and snapshot.get("experiences_json", "[]") == latest.experiences_json:
+        return None
+    mismatches = master_resume_integrity_mismatches(latest)
+    if mismatches:
+        return {
+            "code": "latest_master_resume_incomplete", "can_update": False,
+            "message": "The latest Master Resume still has structured employment fields that are not supported by its text: " + "; ".join(mismatches) + ". Correct the Master Resume before updating this application.",
+            "mismatches": mismatches,
+        }
+    return {
+        "code": "application_resume_snapshot_outdated", "can_update": True,
+        "message": "This application is linked to an older Master Resume snapshot that no longer passes validation. Update this application to the latest Master Resume, then diagnose and generate again.",
+    }
 
 
 def build_resume_content_check(
@@ -1176,27 +1252,24 @@ def update_application_resume(
         resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
         if not resume or not resume.source_text.strip():
             raise HTTPException(409, "Save a usable Master Resume first.")
+        mismatches = master_resume_integrity_mismatches(resume)
+        if mismatches:
+            raise HTTPException(409, {
+                "code": "latest_master_resume_incomplete", "can_update": False,
+                "message": "The latest Master Resume still has structured employment fields that are not supported by its text: " + "; ".join(mismatches) + ". Correct the Master Resume before updating this application.",
+                "mismatches": mismatches,
+            })
         ckb, _ = get_or_refresh_current_ckb(session, resume, user_id)
-        snapshot = {"resume_id": resume.id, "title": resume.title, "source_text": resume.source_text,
-                    "experiences_json": resume.experiences_json, "ckb_json": json.dumps(ckb, ensure_ascii=False)}
+        ckb_json = json.dumps(ckb, ensure_ascii=False)
     else:
         source = (payload.source_text or "").strip()
         if not source:
             raise HTTPException(422, "Add the resume source text for this application.")
         experiences = json.dumps(extract_resume_experiences(source), ensure_ascii=False)
-        snapshot = {"title": "Application Resume", "source_text": source, "experiences_json": experiences,
-                    "ckb_json": serialise_ckb(source, experiences)}
-    snapshot["material_version"] = str(uuid4())
-    snapshot["updated_at"] = datetime.utcnow().isoformat()
-    application.resume_snapshot_json = json.dumps(snapshot, ensure_ascii=False)
-    application.evidence_matches_json = "{}"
-    application.application_decision_json = "{}"
-    application.selection_plan_json = "{}"
-    application.selection_confirmations_json = "[]"
-    require_current_generation_contract(application)
-    application.updated_at = datetime.utcnow()
-    if application.status == "ready_to_apply":
-        application.status = "draft"
+        resume = Resume(title="Application Resume", source_text=source, experiences_json=experiences,
+                        ckb_json=serialise_ckb(source, experiences))
+        ckb_json = resume.ckb_json
+    apply_resume_snapshot(application, resume, ckb_json)
     session.add(application)
     session.commit(); session.refresh(application)
     return application
@@ -1416,7 +1489,7 @@ def get_application_decision(
         raise HTTPException(400, "Create a Master Resume first.")
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
-        raise HTTPException(409, integrity_issue)
+        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     ckb, _ = application_ckb(session, application, master_resume, user_id)
     decision = json.loads(application.application_decision_json or "{}")
@@ -1436,7 +1509,7 @@ def diagnose_application(
     user_id: UUID | None = Depends(get_current_user),
 ):
     application = get_for_user(session, JobApplication, application_id, user_id)
-    master_resume = application_master_resume(session, application, user_id) if application else None
+    master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True) if application else None
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
@@ -2809,14 +2882,14 @@ def generate_document(
     generation_started = perf_counter()
     generation_started_at = datetime.utcnow()
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
-    master_resume = application_master_resume(session, application, user_id) if application else None
+    master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True) if application else None
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
     if not application.job_description.strip():
         raise HTTPException(400, "Add a job description before generating documents.")
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
-        raise HTTPException(409, integrity_issue)
+        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
     application.company = expand_abbreviated_company(application.company, application.job_description)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     used_experiences = "[]"

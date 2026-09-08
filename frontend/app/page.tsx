@@ -102,6 +102,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [documents, setDocuments] = useState<GeneratedDocument[]>([]);
   const [documentHistory, setDocumentHistory] = useState<GeneratedDocument[]>([]);
   const [generationFailure, setGenerationFailure] = useState<{ documentType: typeof packTypes[number]; message: string } | null>(null);
+  const [resumeUpdateAvailable, setResumeUpdateAvailable] = useState(false);
   const [activeType, setActiveType] = useState<string>("tailored_resume");
   const [draftText, setDraftText] = useState("");
   const [qualityResult, setQualityResult] = useState<QualityResult | null>(null);
@@ -737,6 +738,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setSelectedApplication(id);
     setDocumentHistory([]);
     setPackNotice("");
+    setResumeUpdateAvailable(false);
     setConfirmedApplication(null);
     setQualityResult(null);
     setApplicationDecision(null);
@@ -890,6 +892,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         const response = await requestGeneratedDocument(api, authenticatedFetch, { application_id: selectedApplication, document_type: documentType, pack_id: packId }, sessionStorage);
         const result = await response.json();
         if (!response.ok) {
+          setResumeUpdateAvailable(result.detail?.code === "application_resume_snapshot_outdated" && result.detail?.can_update === true);
           if (result.detail?.document_id) {
             const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
             if (documentsResponse.ok) setDocuments(await documentsResponse.json());
@@ -974,19 +977,25 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
 
   async function updateApplicationResume(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected) return;
     const form = new FormData(event.currentTarget);
     const useLatest = form.get("source") === "master";
+    await saveApplicationResume(useLatest, useLatest ? null : String(form.get("source_text") || ""));
+  }
+
+  async function saveApplicationResume(useLatest: boolean, sourceText: string | null = null) {
+    if (!selected) return;
     try {
       const response = await authenticatedFetch(`${api}/applications/${selected.id}/resume`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ use_latest_master: useLatest,
-          source_text: useLatest ? null : form.get("source_text"),
+          source_text: sourceText,
           expected_snapshot: selected.resume_snapshot_json || "{}" }),
       });
-      if (!response.ok) { const error = await response.json(); throw new Error(error.detail || "Could not update application materials."); }
+      if (!response.ok) { const error = await response.json(); throw new Error(typeof error.detail === "string" ? error.detail : error.detail?.message || "Could not update application materials."); }
       const updated = await response.json();
       setApplications((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setResumeUpdateAvailable(false);
+      setGenerationFailure(null);
       await openApplication(updated.id);
       setNotice("Application materials updated. Previous documents are kept as older versions. Generate new drafts when ready.");
     } catch (error) { setNotice(error instanceof Error ? error.message : "Could not update application materials."); }
@@ -1080,7 +1089,10 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/decision`, { method: "POST" });
     const result = await response.json();
     setDecisionBusy(false);
-    if (!response.ok) return setPackNotice(result.detail || "Could not diagnose this application.");
+    if (!response.ok) {
+      setResumeUpdateAvailable(result.detail?.code === "application_resume_snapshot_outdated" && result.detail?.can_update === true);
+      return setPackNotice(typeof result.detail === "string" ? result.detail : result.detail?.message || "Could not diagnose this application.");
+    }
     setApplicationDecision(result);
     setApplicationDecisionCurrent(true);
     setPackNotice(result.status === "ready" ? "Diagnosis ready. Review it before generating." : "Diagnosis needs your confirmation.");
@@ -1578,6 +1590,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
               </details>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
+              {resumeUpdateAvailable && <button type="button" onClick={() => saveApplicationResume(true)}>Update to latest Master Resume</button>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
                 <div><strong>Check application details</strong><p>Applicant name for every document: {profile ? `${profile.first_name} ${profile.last_name}` : "No saved profile"}<br />Use this name even if an older resume or preferred name differs. To use another name, update Profile before confirming.<br />Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}<br />Work rights: {profile?.work_rights.replaceAll("_", " ") || "Not confirmed"}<br />Availability: {({not_specified: "Do not state in documents", immediate: "Available immediately", two_weeks: "Two weeks’ notice", one_month: "One month’s notice", negotiable: "Start date negotiable"} as Record<string, string>)[profile?.availability_notice || "not_specified"]} — edit in Profile</p></div>
                 <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={confirmReleaseDetails}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
