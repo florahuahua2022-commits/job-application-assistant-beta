@@ -11,7 +11,7 @@ from .selection_logic import SELECTION_PLAN_SCHEMA_VERSION
 
 
 GENERATION_TRACE_SCHEMA_VERSION = "1.0"
-DOCUMENT_PROMPT_VERSION = "3.0"
+DOCUMENT_PROMPT_VERSION = "3.1"
 
 
 def _json_value(value: str, fallback: Any) -> Any:

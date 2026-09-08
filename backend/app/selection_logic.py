@@ -122,6 +122,8 @@ def hard_validate_response(
 ) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
     final_response = str(response.get("final_response") or "")
+    from .delivery_checks import delivery_issues
+    issues.extend(delivery_issues(final_response, "selection_criteria"))
     actual = actual_word_count(final_response)
     allocated = int(plan_item.get("allocated_word_limit") or 0)
     allowed_evidence = set(plan_item.get("matched_evidence") or [])

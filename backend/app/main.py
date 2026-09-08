@@ -19,6 +19,7 @@ from .application_requirements import confirm_application_requirements, correct_
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
 from .ats_verification import verify_resume_artifact, verify_document_export
 from .applicant_profile import applicant_profile_prompt, confirmed_availability_wording, availability_issues, polish_availability
+from .delivery_checks import delivery_issues, aggregate_experience, profile_missing_fields, apply_delivery_review
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
@@ -1849,6 +1850,10 @@ def quality_check(
                 document_type="tailored_resume",
             ))
     current_ckb, _ = application_ckb(session, application, master_resume, user_id) if master_resume else ([], "reused_current")
+    aggregate = aggregate_experience(current_ckb)
+    if profile_missing_fields(profile):
+        issues.append(QualityCheckIssue(severity="error", code="canonical_profile_incomplete",
+            message="Complete and confirm your applicant name, email and phone before finalising documents."))
     current_documents = current_required_documents(session, application, user_id, master_resume, profile)
     decision = json.loads(application.application_decision_json or "{}")
     decision_current = False
@@ -2069,6 +2074,9 @@ def quality_check(
     )
     for document_type, content in content_to_check.items():
         lowered = content.lower()
+        for finding in delivery_issues(content, document_type, profile, aggregate, current_ckb):
+            issues.append(QualityCheckIssue(severity="error", code=finding["code"],
+                message=finding["message"] + (" " + finding["location"] if finding["location"] else ""), document_type=document_type))
         if any(placeholder in lowered for placeholder in placeholders):
             issues.append(QualityCheckIssue(
                 severity="error",
@@ -2258,7 +2266,7 @@ def confirm_release_details(
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     if not application:
         raise HTTPException(404, "Application not found.")
-    if not profile or not application.company.strip() or not application.position_title.strip():
+    if profile_missing_fields(profile) or not application.company.strip() or not application.position_title.strip():
         raise HTTPException(409, "Complete the applicant, job and contact details before confirming them.")
     state = load_release_state(application.release_state_json)
     state["schema_version"] = "1.0"
@@ -2321,7 +2329,7 @@ def release_checklist(
         "pack_review": {"ready": pack_current, "current": (state.get("pack_review") or {}).get("fingerprint") == pack_key, "result": stored_pack},
         "ats": {"ready": ats_current, "document_id": resume.id if resume else None, "format": format, "template": template, "result": stored_ats if ats_current else None},
     }
-    if any((load_release_state(item.trace_json).get("versions") or {}).get("prompt") in {"2.0", "3.0"} for item in latest.values()):
+    if any((load_release_state(item.trace_json).get("versions") or {}).get("prompt") in {"2.0", "3.0", "3.1"} for item in latest.values()):
         exports = state.get("exports") or {}
         exported = exports.get("documents") or {}
         checks["exports"] = {"ready": exports.get("format") == format and exports.get("template") == template and all(
@@ -2491,6 +2499,8 @@ def review_edited_document(
             structured = _selection_bundle_with_edited_content(structured, document.content)
             review = review_selection_criteria_batch(ckb_json, json.dumps(structured.get("selection_plan") or {}), structured)
             document.structured_content_json = json.dumps(structured, ensure_ascii=False)
+        apply_delivery_review(review, delivery_issues(document.content, document.document_type, profile,
+                              aggregate_experience(json.loads(ckb_json)), json.loads(ckb_json)))
         document.reviewer_json = json.dumps(review, ensure_ascii=False)
         trace = json.loads(document.trace_json or "{}")
         trace["review"] = {
@@ -2813,6 +2823,8 @@ def generate_document(
     used_closing_styles = "[]"
     profile_text = applicant_profile_prompt(profile) if profile else None
     current_ckb, ckb_status = application_ckb(session, application, master_resume, user_id)
+    aggregate = aggregate_experience(current_ckb)
+    profile_text = (profile_text or "") + "\nCALCULATED EMPLOYMENT AGGREGATE (only allowed total; never infer relevant years):\n" + json.dumps(aggregate, ensure_ascii=False)
     ckb_source_json = json.dumps(current_ckb, ensure_ascii=False)
     stored_requirements = load_application_requirements(
         application.application_requirements_json, application.selection_criteria
@@ -2893,6 +2905,10 @@ def generate_document(
         cover_letter_review = None
         resume_review = None
         if payload.document_type == "selection_criteria":
+            missing_evidence = [item.get("criteria_id") for item in json.loads(selection_plan_json).get("items", []) if not item.get("matched_evidence")]
+            if missing_evidence:
+                raise HTTPException(409, detail={"status": "insufficient_evidence", "criteria_ids": missing_evidence,
+                    "message": "Add or confirm supporting experience for these criteria, then diagnose again. No placeholder document was generated."})
             selection_bundle = generate_selection_criteria_bundle(ckb_source_json, selection_plan_json)
             selection_bundle = persist_selection_contract(
                 selection_bundle, json.loads(selection_plan_json), evidence_allocation
@@ -2985,6 +3001,7 @@ def generate_document(
     trace["inputs"] = {"resume": master_resume.source_text, "ckb": current_ckb, "job_model": json.loads(job_model_json), "profile": profile_text, "profile_snapshot": {"id": profile.id if profile else None, "updated_at": str(profile.updated_at) if profile else None, "availability_notice": profile.availability_notice if profile else "not_specified"}}
     trace["draft"] = raw_draft
     trace["availability_corrections"] = availability_corrections
+    trace["aggregate_experience"] = aggregate
     trace["runtime"]["generation_provider"] = generation_provider
     trace["runtime"]["status"] = "review_pending"
     trace["runtime"]["ckb_status"] = ckb_status
@@ -3072,7 +3089,12 @@ def generate_document(
                 "message": "The document was generated, but its automatic review could not be completed. Your draft has been kept. Retry Review before continuing.",
                 "document_id": document.id, "document_type": document.document_type,
             }) from error
+    if payload.document_type == "selection_criteria" and profile:
+        content = f"{profile.first_name} {profile.last_name}\n{profile.phone} | {profile.email}\n\n{content}"
+        selection_bundle["content"] = content
     review_result = selection_review or cover_letter_review or resume_review or {}
+    hard_findings = delivery_issues(content, payload.document_type, profile, aggregate, current_ckb)
+    apply_delivery_review(review_result, hard_findings)
     if payload.document_type == "tailored_resume":
         review_result = add_resume_quality_status(review_result, content, resume_plan or {})
     retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
@@ -3094,6 +3116,7 @@ def generate_document(
     trace["inputs"] = initial_trace.get("inputs", {})
     trace["draft"] = initial_trace.get("draft", "")
     trace["availability_corrections"] = initial_trace.get("availability_corrections", [])
+    trace["aggregate_experience"] = aggregate
     trace["runtime"]["generation_provider"] = generation_provider
     trace["runtime"]["ckb_status"] = ckb_status
     if provider != settings.ai_provider.strip().lower():

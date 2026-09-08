@@ -80,6 +80,7 @@ def is_selection_instruction(text: str) -> bool:
         or re.search(r"(?i)\b(?:maximum|limit|no more than|not exceed|up to)\b.*\b(?:words?|pages?)\b", cleaned)
         or re.search(r"(?i)^(?:these|the following)\s+(?:criteria|responses?).*\b(?:addressed|answered|pages?|words?)\b", cleaned)
         or re.search(r"(?i)\bcover(?:ing)? letter\b.{0,100}\b(?:address|respond|criteria)\b", cleaned)
+        or re.search(r"(?i)^(?:the following|these)\s+work[- ]related requirements\b.*\b(?:read|context)\b", cleaned)
     )
 
 
@@ -89,9 +90,35 @@ def _meaningful_lines(value: str) -> list[str]:
         cleaned = _clean(re.sub(r"^\s*(?:\d+[.)]|[a-z][.)])\s*", "", raw, flags=re.IGNORECASE))
         if is_selection_instruction(cleaned):
             continue
-        if len(cleaned) >= 12 and not re.fullmatch(r"(?i)(?:essential|desirable|selection criteria|requirements|responsibilities):?", cleaned):
+        if len(cleaned) >= 12 and not re.fullmatch(r"(?i)(?:(?:essential|desirable)(?: selection)?(?: criteria| requirements)?|selection criteria|requirements|responsibilities):?", cleaned):
             lines.append(cleaned)
     return lines
+
+
+def formal_criteria(value: str) -> list[dict]:
+    """Keep numbered criteria intact across wrapped lines; retain source spans."""
+    heading = re.compile(r"(?im)^[ \t]*(essential(?: selection)?(?: criteria| requirements)?|desirable(?: selection)?(?: criteria| requirements)?|selection criteria|work[- ]related requirements)[ \t]*:?[ \t]*$")
+    stops = re.compile(r"(?im)^[ \t]*(?:how to apply|application instructions?|qualifications?|certification|approval)[ \t]*:?[ \t]*$")
+    boundary = stops.search(value)
+    end = boundary.start() if boundary else len(value)
+    markers = list(re.finditer(r"(?m)^[ \t]*(\d+)[.)][ \t]+", value[:end]))
+    result = []
+    for index, marker in enumerate(markers):
+        finish = markers[index + 1].start() if index + 1 < len(markers) else end
+        next_heading = heading.search(value, marker.end(), finish)
+        if next_heading:
+            finish = next_heading.start()
+        raw = value[marker.end():finish]
+        raw = re.sub(r"(?im)^[ \t]*(?:page\s+)?\d+\s+(?:of|/)\s+\d+[ \t]*$", "", raw)
+        raw = "\n".join(line for line in raw.splitlines() if not is_selection_instruction(line))
+        text = _clean(raw)
+        if not text or is_selection_instruction(text):
+            continue
+        preceding = list(heading.finditer(value, 0, marker.start()))
+        kind = "desirable" if (preceding and preceding[-1][1].lower().startswith("desirable")) or re.match(r"(?i)desirable\s*:", text) else "essential"
+        result.append({"criteria_text": text, "source_reference": marker[1], "source_start": marker.start(),
+                       "source_end": finish, "criteria_type": kind})
+    return result
 
 
 def _infer_requirement_lines(job_description: str) -> list[str]:
@@ -200,7 +227,8 @@ def build_job_model(
     company: str = "",
 ) -> dict[str, Any]:
     selection_text = (selection_criteria or "").strip()
-    explicit_lines = _meaningful_lines(selection_text)
+    formal = formal_criteria(selection_text)
+    explicit_lines = [item["criteria_text"] for item in formal] if formal else _meaningful_lines(selection_text)
     looks_like_formal_criteria = bool(re.search(r"(?im)^\s*(?:selection criteria|\d+[.)]|essential\b|desirable\b)", selection_text))
     brief_guidance = bool(selection_text) and not looks_like_formal_criteria and len(selection_text) <= 220 and len(explicit_lines) <= 3
     if selection_text and not brief_guidance:
@@ -223,8 +251,12 @@ def build_job_model(
             "criterion_categories": categories,
             "primary_category": categories[0],
             "key_competencies": _competencies(line),
-            "source": "selection_criteria" if requirement_mode == "explicit_selection_criteria" else "job_description",
+          "source": "selection_criteria" if requirement_mode == "explicit_selection_criteria" else "job_description",
         })
+    for criterion in criteria:
+        source = next((item for item in formal if item["criteria_text"] == criterion["criteria_text"]), None)
+        if source:
+            criterion.update(source)
     limits = parse_word_limits(f"{job_description}\n{selection_text}")
     tags = advertised_skill_tags(job_description)
     for tag in tags:

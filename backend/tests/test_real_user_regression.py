@@ -419,7 +419,7 @@ Other grounded work."""
                 "requirements": [], "questions": [], "blocking_issues": [],
             })
             session.add(application); session.commit()
-        draft = "Application for Office Administrator\n\n" + "Grounded administration support. " * 40
+        draft = "Alex Morgan\n0400000000 | alex@example.com\nApplication for Office Administrator\n\n" + "Grounded administration support. " * 40
         with patch("app.main.match_evidence_batch", return_value={"schema_version": "1.0", "matches": [], "unused_evidence": []}), patch(
             "app.main.generate_draft", return_value=draft
         ), patch("app.main.repair_cover_letter", side_effect=AIServiceError("Unterminated string at line 144")):
@@ -558,7 +558,7 @@ Other grounded work."""
         application_id = self.seed(required=("cover_letter",))
         with Session(self.engine) as session:
             document = GeneratedDocument(
-                application_id=application_id, document_type="cover_letter", content="Edited grounded letter.",
+                application_id=application_id, document_type="cover_letter", content="Alex Morgan\n0400000000 | alex@example.com\nEdited grounded letter.",
                 reviewer_json="{}", structured_content_json='{"priorities":["administration"]}',
             )
             session.add(document); session.commit(); session.refresh(document); document_id = document.id

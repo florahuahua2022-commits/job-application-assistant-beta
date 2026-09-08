@@ -105,6 +105,16 @@ class ReleaseGateTests(unittest.TestCase):
         app.dependency_overrides[get_current_user] = lambda: uuid4()
         self.assertEqual(self.client.get(f"/applications/{self.application_id}/release-checklist").status_code, 404)
 
+    def test_empty_canonical_fields_cannot_be_confirmed(self):
+        with Session(self.engine) as session:
+            profile = session.exec(select(ApplicantProfile)).first()
+            profile.email = " "
+            session.add(profile); session.commit()
+        self.assertEqual(self.client.post(f"/applications/{self.application_id}/release-confirmation").status_code, 409)
+        result = self.client.get(f"/applications/{self.application_id}/quality-check").json()
+        self.assertFalse(result["ready"])
+        self.assertIn("canonical_profile_incomplete", {i["code"] for i in result["issues"]})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 import re
 
 from .application_requirements import parse_application_requirements, parse_criteria_references
-from .job_model import build_job_model
+from .job_model import build_job_model, formal_criteria
 
 
 SEMANTIC_TYPES = {"primary_advertisement", "job_description_attachment", "application_instruction_attachment"}
@@ -12,7 +12,7 @@ def _value(source, field: str, default=""):
 
 
 def _numbered_criteria(text: str) -> dict[str, str]:
-    heading = re.search(r"(?im)^\s*(?:selection criteria|essential requirements|work related requirements)\s*:?[ \t]*$", text)
+    heading = re.search(r"(?im)^\s*(?:selection criteria|essential(?: selection)?(?: criteria| requirements)?|work[- ]related requirements)\s*:?[ \t]*$", text)
     if not heading:
         return {}
     section = text[heading.end():]
@@ -20,10 +20,9 @@ def _numbered_criteria(text: str) -> dict[str, str]:
     if next_heading:
         section = section[:next_heading.start()]
     result: dict[str, str] = {}
-    for match in re.finditer(r"(?ms)^\s*(\d+)\s*[.)]\s*(.+?)(?=^\s*\d+\s*[.)]\s|\Z)", section):
-        text_value = re.sub(r"\s+", " ", match.group(2)).strip()
-        if text_value:
-            result[match.group(1)] = text_value
+    for item in formal_criteria(section):
+        if item["criteria_type"] == "essential":
+            result[item["source_reference"]] = item["criteria_text"]
     return result
 
 
@@ -93,6 +92,10 @@ def build_source_aware_models(application, sources: list) -> tuple[dict, dict]:
         match = provenance.get(criterion["criteria_text"])
         if match:
             reference, source = match
+            source_item = next((item for item in formal_criteria(_value(source, "extracted_text"))
+                                if item["source_reference"] == reference and item["criteria_text"] == criterion["criteria_text"]), None)
+            if source_item:
+                criterion.update(source_start=source_item["source_start"], source_end=source_item["source_end"])
             criterion.update(
                 source="job_description_attachment",
                 source_id=_value(source, "source_id"),

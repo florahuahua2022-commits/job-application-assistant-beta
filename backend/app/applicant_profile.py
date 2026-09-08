@@ -24,7 +24,7 @@ def availability_claims(content: str) -> list[dict]:
     for match in re.finditer(r"[^\n.!?]+(?:[.!?]|$)", content):
         sentence = match.group().strip()
         text = sentence.casefold().replace("’", "'")
-        if not re.search(r"(?:^(?:[-*]\s*)?available\b|\bi(?: am|'m)\s+(?:not\s+)?available\b|\bmy availability\b|\bavailability\s*[:=]|\bimmediate availability\b|\b(?:my |a )?notice period\b|\b(?:my )?start date\b|\bi (?:can|could|will|am able to) (?:start|commence|join)\b|\b(?:two|2) weeks?'? notice\b|\b(?:one|1|a) month'?s? notice\b)", text):
+        if not re.search(r"(?:^(?:[-*]\s*)?available\b|\b(?:will|would) be available\b|\bi(?: am|'m)\s+(?:not\s+)?available\b|\bmy availability\b|\bavailability\s*[:=]|\bimmediate availability\b|\b(?:my |a )?notice period\b|\b(?:my )?start date\b|\bi (?:can|could|will|am able to) (?:start|commence|join)\b|\b(?:two|2) weeks?'? notice\b|\b(?:one|1|a) month'?s? notice\b)", text):
             continue
         if re.search(r"\bavailable (?:upon request|for (?:an? )?(?:interview|discussion)|to discuss)\b", text):
             continue
@@ -74,6 +74,7 @@ def applicant_profile_prompt(profile: Any) -> str:
     return "\n".join([
         f"APPLICANT_PROFILE_SCHEMA_v{APPLICANT_PROFILE_SCHEMA_VERSION}",
         "IDENTITY AND DECLARED DETAILS (use exactly where relevant):",
+        "Use the confirmed first and last name below in every heading and signature. Do not substitute a preferred name or an older resume identity.",
         f"Name: {' '.join(filter(None, [profile.title, profile.first_name, profile.last_name]))}",
         f"Phone: {profile.phone}",
         f"Email: {profile.email}",

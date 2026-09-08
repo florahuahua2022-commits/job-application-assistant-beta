@@ -8,6 +8,7 @@ from pypdf import PdfReader
 
 from .exporter import create_docx, create_pdf, resolve_page_size, _ascii_punctuation, export_theme
 from .career_modern import export_content
+from .delivery_checks import delivery_issues
 
 
 def _plain(value: str) -> str:
@@ -34,12 +35,14 @@ def extract_artifact(payload: bytes, format: str) -> tuple[str, dict[str, Any]]:
         text = "\n".join(paragraph.text for paragraph in document.paragraphs)
         return text, {"page_count": None, "page_size": None}
     reader = PdfReader(BytesIO(payload))
-    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    pages = [page.extract_text() or "" for page in reader.pages]
+    text = "\n".join(pages)
     page_size = None
     if reader.pages:
         box = reader.pages[0].mediabox
         page_size = f"{float(box.width):.0f} x {float(box.height):.0f} pt"
-    return text, {"page_count": len(reader.pages), "page_size": page_size}
+    return text, {"page_count": len(reader.pages), "page_size": page_size,
+                  "blank_pages": [i + 1 for i, page in enumerate(pages) if not _words(page)]}
 
 
 def verify_document_export(content: str, payload: bytes, format: str) -> dict:
@@ -51,7 +54,8 @@ def verify_document_export(content: str, payload: bytes, format: str) -> dict:
         remaining = iter(_words(extracted))
         ordered = all(any(actual == expected for actual in remaining) for expected in _words(source))
         internal = bool(re.search(r"GENERATION_META|<!--|\bEV[A-F0-9]{12}\b", extracted))
-        return {"ready": not missing and not internal and ordered, "text_order_preserved": ordered, "missing_token_count": sum(missing.values()),
+        structural = [issue for issue in delivery_issues(content, "") if issue["code"] != "aggregate_claim_unverified"]
+        return {"ready": not missing and not internal and ordered and not structural and not metadata.get("blank_pages"), "issues": structural, "text_order_preserved": ordered, "missing_token_count": sum(missing.values()),
                 "internal_markers": internal, **metadata}
     except Exception:
         return {"ready": False, "message": "The exported document could not be checked."}
