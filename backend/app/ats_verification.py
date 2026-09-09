@@ -8,7 +8,7 @@ from pypdf import PdfReader
 
 from .exporter import create_docx, create_pdf, resolve_page_size, _ascii_punctuation, export_theme
 from .career_modern import export_content
-from .delivery_checks import delivery_issues
+from .delivery_checks import delivery_issues, output_placeholder_issues
 
 
 def _plain(value: str) -> str:
@@ -55,6 +55,7 @@ def verify_document_export(content: str, payload: bytes, format: str) -> dict:
         ordered = all(any(actual == expected for actual in remaining) for expected in _words(source))
         internal = bool(re.search(r"GENERATION_META|<!--|\bEV[A-F0-9]{12}\b", extracted))
         structural = [issue for issue in delivery_issues(content, "") if issue["code"] != "aggregate_claim_unverified"]
+        structural.extend(issue for issue in output_placeholder_issues(extracted) if issue not in structural)
         return {"ready": not missing and not internal and ordered and not structural and not metadata.get("blank_pages"), "issues": structural, "text_order_preserved": ordered, "missing_token_count": sum(missing.values()),
                 "internal_markers": internal, **metadata}
     except Exception:
@@ -139,6 +140,13 @@ def verify_resume_artifact(
     except Exception as error:
         checks.append(_check("artifact_extraction", "unavailable", f"Artifact extraction failed: {error}", True))
         return _result(format, template, checks)
+
+    placeholders = output_placeholder_issues(extracted)
+    checks.append(_check(
+        "unresolved_placeholder", "fail" if placeholders else "pass",
+        "The exported document contains unresolved placeholder text." if placeholders else "No unresolved placeholder text was found.",
+        bool(placeholders),
+    ))
 
     if format == "pdf" and len(_words(extracted)) < 5:
         checks.append(_check("pdf_text_layer", "fail", "The generated PDF has no usable text layer.", True))

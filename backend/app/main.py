@@ -382,6 +382,7 @@ def prepare_application_decision(
     session: Session, application: JobApplication, master_resume: Resume,
     profile: ApplicantProfile | None, user_id: UUID | None,
 ) -> dict:
+    require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
         raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
@@ -517,8 +518,14 @@ def stale_resume_snapshot_detail(session: Session, application: JobApplication, 
         }
     return {
         "code": "application_resume_snapshot_outdated", "can_update": True,
-        "message": "This application is linked to an older Master Resume snapshot that no longer passes validation. Update this application to the latest Master Resume, then diagnose and generate again.",
+        "message": "Your Master Resume has changed since this application was last updated. Update this application to use the latest Master Resume before checking or generating documents.",
     }
+
+
+def require_current_resume_snapshot(session: Session, application: JobApplication, user_id: UUID | None) -> None:
+    detail = stale_resume_snapshot_detail(session, application, user_id)
+    if detail:
+        raise HTTPException(409, detail=detail)
 
 
 def build_resume_content_check(
@@ -1484,9 +1491,10 @@ def get_application_decision(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
-    master_resume = application_master_resume(session, application, user_id)
+    master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True)
     if not master_resume:
         raise HTTPException(400, "Create a Master Resume first.")
+    require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
         raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
@@ -1871,6 +1879,8 @@ def quality_check(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
+    application_master_resume(session, application, user_id, auto_update_pristine=True)
+    require_current_resume_snapshot(session, application, user_id)
     documents = session.exec(
         select_for_user(GeneratedDocument, user_id)
         .where(GeneratedDocument.application_id == application_id)
@@ -2887,6 +2897,7 @@ def generate_document(
         raise HTTPException(400, "Create a Master Resume and job application first.")
     if not application.job_description.strip():
         raise HTTPException(400, "Add a job description before generating documents.")
+    require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
         raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)

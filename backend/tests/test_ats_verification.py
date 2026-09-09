@@ -60,6 +60,12 @@ class AtsVerificationUnitTests(unittest.TestCase):
         self.assertEqual(pdf["artifact"]["page_size"], "595 x 842 pt")
         self.assertEqual(pdf["artifact"]["expected_page_size"], "A4")
 
+    def test_unresolved_placeholder_blocks_both_resume_artifacts(self):
+        for format in ("docx", "pdf"):
+            result = self.check(format, content=CONTENT + "\n[Insert detail here]")
+            self.assertFalse(result["ready"])
+            self.assertEqual(next(x for x in result["checks"] if x["code"] == "unresolved_placeholder")["state"], "fail")
+
     def test_empty_pdf_text_layer_blocks_without_ocr(self):
         with patch("app.ats_verification.extract_artifact", return_value=("", {"page_count": 1, "page_size": "612 x 792 pt"})):
             result = self.check("pdf")

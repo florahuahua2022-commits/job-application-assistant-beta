@@ -94,6 +94,19 @@ class DeliveryChecksTests(unittest.TestCase):
         response = {"final_response": "Unable to provide a response.", "star": dict.fromkeys(("situation", "task", "action", "result"), "")}
         self.assertFalse(hard_validate_response(response, {})["valid"])
 
+    def test_output_placeholder_variants_block_generated_and_exported_documents(self):
+        placeholders = ("[Insert detail here]", "[YOUR NAME]", "<enter date>", "{{ company }}", "TBD", "tbc", "To Be Confirmed")
+        for kind in ("tailored_resume", "cover_letter", "selection_criteria"):
+            for placeholder in placeholders:
+                issues = delivery_issues(f"Completed content. {placeholder}", kind)
+                self.assertIn("unresolved_placeholder", {issue["code"] for issue in issues})
+        self.assertFalse(delivery_issues("Used Python [NumPy] and completed all confirmed details.", "tailored_resume"))
+        for render, fmt in ((create_docx, "docx"), (create_pdf, "pdf")):
+            content = "Completed content. [Insert detail here]"
+            result = verify_document_export(content, render(content, "Tailored Resume"), fmt)
+            self.assertFalse(result["ready"])
+            self.assertIn("unresolved_placeholder", {issue["code"] for issue in result["issues"]})
+
     def test_work_rights_change_invalidates_confirmation(self):
         app = SimpleNamespace(company="Agency", position_title="Officer", job_url="")
         before = details_fingerprint(app, self.profile)

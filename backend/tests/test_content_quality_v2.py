@@ -192,6 +192,42 @@ class MaterialVersionTests(unittest.TestCase):
         with Session(self.engine) as session:
             self.assertEqual(session.get(JobApplication, self.a["id"]).resume_snapshot_json, original)
 
+    def test_valid_snapshot_blocks_all_entry_points_after_structured_period_edit(self):
+        old_experiences = json.dumps([{
+            "role_title": "Utility", "organization": "Sodex",
+            "time_period_text": "January 2016 - August 2017",
+        }])
+        old_snapshot = json.dumps({
+            "source_text": "Utility\nSodex\nJanuary 2016 - August 2017",
+            "experiences_json": old_experiences, "ckb_json": "[]",
+        })
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.a["id"])
+            application.resume_snapshot_json = old_snapshot
+            application.application_decision_json = '{"status":"ready"}'
+            resume = session.exec(select(Resume)).first()
+            resume.source_text = "Utility\nSodex\nJanuary 2016 - August 2017"
+            resume.experiences_json = json.dumps([{
+                "role_title": "Utility", "organization": "Sodex",
+                "time_period_text": "January 2016 - August 2019",
+            }])
+            session.add(application); session.add(resume); session.commit()
+
+        for method, path, payload in (
+            (self.client.get, f"/applications/{self.a['id']}/decision", None),
+            (self.client.post, f"/applications/{self.a['id']}/decision", None),
+            (self.client.get, f"/applications/{self.a['id']}/quality-check", None),
+            (self.client.post, "/generate", {"application_id": self.a["id"], "document_type": "tailored_resume"}),
+        ):
+            response = method(path, **({"json": payload} if payload else {}))
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "application_resume_snapshot_outdated")
+
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, self.a["id"])
+            self.assertEqual(json.loads(application.resume_snapshot_json)["experiences_json"], old_experiences)
+            self.assertEqual(application.application_decision_json, '{"status":"ready"}')
+
     def test_duplicate_request_returns_same_document(self):
         def generated(payload, session, user_id):
             document = GeneratedDocument(application_id=payload.application_id, document_type=payload.document_type, content="Saved draft")

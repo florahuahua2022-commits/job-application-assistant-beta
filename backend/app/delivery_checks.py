@@ -6,6 +6,14 @@ from .resume_timeline import month_value
 
 
 HONORIFIC_PREFIX = re.compile(r"^(?:mr|mrs|ms|miss|dr)\.?\s+", re.I)
+OUTPUT_PLACEHOLDER = re.compile(
+    r"(?ix)"
+    r"\[\s*(?:(?:insert|enter|add|provide|replace|your)\b[^\]\r\n]{0,80}|"
+    r"(?:company|organisation|organization|date|name|detail|address|phone|email)(?:\s+[^\]\r\n]{0,40})?)\s*\]"
+    r"|<\s*(?:insert|enter|add|provide|replace|your)\b[^>\r\n]{0,80}>"
+    r"|\{\{\s*[^{}\r\n]{1,80}\s*\}\}"
+    r"|\b(?:TBD|TBC|TODO|to\s+be\s+confirmed)\b"
+)
 
 
 def apply_delivery_review(review, findings):
@@ -20,6 +28,11 @@ def apply_delivery_review(review, findings):
 def profile_missing_fields(profile):
     return [key for key in ("first_name", "last_name", "email", "phone")
             if not str(getattr(profile, key, "") or "").strip()]
+
+
+def output_placeholder_issues(content):
+    return [{"code": "unresolved_placeholder", "message": "Remove unresolved placeholder text before finalising.",
+             "location": match[0]} for match in OUTPUT_PLACEHOLDER.finditer(content)]
 
 
 def aggregate_experience(ckb, today=None):
@@ -61,7 +74,7 @@ def aggregate_experience(ckb, today=None):
 
 
 def delivery_issues(content, document_type, profile=None, aggregate=None, ckb=None):
-    issues = []
+    issues = output_placeholder_issues(content)
     def add(code, message, location=""):
         issues.append({"code": code, "message": message, "location": location})
     text = content.replace("’", "'")
