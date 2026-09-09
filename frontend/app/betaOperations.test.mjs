@@ -63,3 +63,14 @@ test("pasted JD replaces stale identity and has a confirmed local reset", () => 
   assert.doesNotMatch(reset, /authenticatedFetch/);
   assert.match(page, /onClick=\{deleteJobInput\} disabled=\{adParseState === "parsing" \|\| jobImportState === "importing"\}/);
 });
+
+test("stale Resume snapshots use the same recovery UI from open, check and generate", () => {
+  const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  const open = page.slice(page.indexOf("async function openApplication("), page.indexOf("async function loadReleaseChecklist("));
+  const generate = page.slice(page.indexOf("async function generatePack()"), page.indexOf("async function retryFailedDocument("));
+  const diagnose = page.slice(page.indexOf("async function diagnoseApplication()"), page.indexOf("async function answerDecisionQuestion("));
+  for (const path of [open, generate, diagnose]) assert.ok(path.includes("handleResumeSnapshotError(result)"));
+  assert.match(page, /detail\?\.code !== "application_resume_snapshot_outdated"/);
+  assert.match(page, /detail\?\.can_update !== true/);
+  assert.match(page, /Update to latest Master Resume/);
+});

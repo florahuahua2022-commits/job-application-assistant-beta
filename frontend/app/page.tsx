@@ -734,6 +734,14 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     await saveApplicationRequirementsCorrections(draft);
   }
 
+  function handleResumeSnapshotError(result: any) {
+    const detail = result?.detail;
+    if (detail?.code !== "application_resume_snapshot_outdated" || detail?.can_update !== true) return false;
+    setResumeUpdateAvailable(true);
+    setPackNotice(detail.message);
+    return true;
+  }
+
   async function openApplication(id: number) {
     setSelectedApplication(id);
     setDocumentHistory([]);
@@ -754,13 +762,17 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     ]);
     const loaded = response.ok ? await response.json() : [];
     setDocuments(loaded);
+    const result = await decisionResponse.json() as {
+      decision?: ApplicationDecision;
+      current?: boolean;
+      detail?: string | { code?: string; can_update?: boolean; message?: string };
+    };
     if (decisionResponse.ok) {
-      const result = await decisionResponse.json() as { decision: ApplicationDecision; current: boolean };
       if (result.decision?.status) {
         setApplicationDecision(result.decision);
-        setApplicationDecisionCurrent(result.current);
+        setApplicationDecisionCurrent(Boolean(result.current));
       }
-    }
+    } else handleResumeSnapshotError(result);
     const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
     setActiveType(firstAvailable || "tailored_resume");
     await loadReleaseChecklist(id, submissionFormat, exportTemplate);
@@ -884,6 +896,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setActiveType("tailored_resume");
     const created: GeneratedDocument[] = [];
     let generatingType: typeof packTypes[number] = "tailored_resume";
+    let resumeSnapshotFailure = false;
     try {
       for (let index = 0; index < generationTypes.length; index += 1) {
         const documentType = generationTypes[index];
@@ -892,7 +905,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         const response = await requestGeneratedDocument(api, authenticatedFetch, { application_id: selectedApplication, document_type: documentType, pack_id: packId }, sessionStorage);
         const result = await response.json();
         if (!response.ok) {
-          setResumeUpdateAvailable(result.detail?.code === "application_resume_snapshot_outdated" && result.detail?.can_update === true);
+          resumeSnapshotFailure = handleResumeSnapshotError(result);
           if (result.detail?.document_id) {
             const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
             if (documentsResponse.ok) setDocuments(await documentsResponse.json());
@@ -933,7 +946,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       }
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
       setGenerationFailure({ documentType: generatingType, message: detail });
-      showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. Existing drafts are kept. A connection error alone does not confirm whether generation has finished.`);
+      if (!resumeSnapshotFailure) showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. Existing drafts are kept. A connection error alone does not confirm whether generation has finished.`);
     } finally {
       setBusy(false);
     }
@@ -1090,7 +1103,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     const result = await response.json();
     setDecisionBusy(false);
     if (!response.ok) {
-      setResumeUpdateAvailable(result.detail?.code === "application_resume_snapshot_outdated" && result.detail?.can_update === true);
+      if (handleResumeSnapshotError(result)) return;
       return setPackNotice(typeof result.detail === "string" ? result.detail : result.detail?.message || "Could not diagnose this application.");
     }
     setApplicationDecision(result);
