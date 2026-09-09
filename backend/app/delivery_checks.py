@@ -5,6 +5,9 @@ from datetime import date
 from .resume_timeline import month_value
 
 
+HONORIFIC_PREFIX = re.compile(r"^(?:mr|mrs|ms|miss|dr)\.?\s+", re.I)
+
+
 def apply_delivery_review(review, findings):
     if findings:
         review["status"] = "fail"
@@ -94,8 +97,11 @@ def delivery_issues(content, document_type, profile=None, aggregate=None, ckb=No
         identity_lines = [text.splitlines()[0].strip(" #*")] if text.strip() else []
         if closing:
             identity_lines += [line.strip(" #*") for line in text[closing.end():].splitlines() if line.strip()][:1]
-        for line in identity_lines:
-            if re.fullmatch(r"[A-Za-z'-]+(?: [A-Za-z'-]+){1,3}", line) and line.endswith(profile.last_name) and line != name:
+        for line in dict.fromkeys(identity_lines):
+            comparable_name = HONORIFIC_PREFIX.sub("", line)
+            if (re.fullmatch(r"[A-Za-z'-]+(?: [A-Za-z'-]+){1,3}", comparable_name)
+                    and comparable_name.rsplit(" ", 1)[-1].casefold() == profile.last_name.casefold()
+                    and comparable_name.casefold() != name.casefold()):
                 add("canonical_name_conflict", "The heading or signature uses a different applicant name.", line)
     if ckb:
         attribution_text = text

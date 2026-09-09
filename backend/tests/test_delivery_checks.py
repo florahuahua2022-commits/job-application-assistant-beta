@@ -56,6 +56,21 @@ class DeliveryChecksTests(unittest.TestCase):
         self.assertFalse(availability_issues("I am available following one month's notice.", "one_month"))
         self.assertTrue(availability_issues("I'm an Australian permanent resident and will be available for Perth-based work from 11 September 2026.", "one_month"))
 
+    def test_identity_honorifics_are_normalized_without_relaxing_name_match(self):
+        profile = SimpleNamespace(first_name="Hua", last_name="Zhong", email="flora@example.com", phone="0400123456")
+        for kind in ("tailored_resume", "cover_letter", "selection_criteria"):
+            for heading in ("Ms Hua Zhong", "MS. HUA ZHONG", "mr hua zhong", "MRS. Hua Zhong", "Miss Hua Zhong", "dR. Hua Zhong"):
+                content = f"{heading}\n0400123456 | flora@example.com"
+                self.assertNotIn("canonical_name_conflict", {i["code"] for i in delivery_issues(content, kind, profile)})
+
+            wrong_name = "Ms Flora Zhong\nHua Zhong\n0400123456 | flora@example.com\n\nRegards,\nMs Flora Zhong"
+            conflicts = [i for i in delivery_issues(wrong_name, kind, profile) if i["code"] == "canonical_name_conflict"]
+            self.assertEqual(conflicts, [{
+                "code": "canonical_name_conflict",
+                "message": "The heading or signature uses a different applicant name.",
+                "location": "Ms Flora Zhong",
+            }])
+
     def test_finance_duties_cannot_move_to_support_role(self):
         evidence = [{"source_section": "Work Experience > Department of Communities > Finance Officer",
                      "source_text": "Used Dayforce; processed journals and reconciliation."},
