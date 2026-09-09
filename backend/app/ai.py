@@ -10,7 +10,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding
-from .resume_plan import resume_evidence_pack, evaluate_resume_quality, validate_resume_content
+from .resume_plan import reorder_resume_role_blocks, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
@@ -708,18 +708,22 @@ def classify_resume_review_errors(review: dict) -> list[dict]:
                 continue
             description = str(issue.get("description") or "")
             lowered = description.lower()
-            partial_support = issue.get("type") == "unsupported_inference" or any(marker in lowered for marker in (
-                "duration", "tenure", "qualifier", "overstated", "stronger than", "upgrade",
-            ))
-            complete_absence = not partial_support and any(marker in lowered for marker in (
-                "not mentioned", "not present", "no evidence", "not in the ckb", "does not appear",
-            ))
+            if "role headers do not follow reverse chronological resume plan order" in lowered:
+                fix_type = "reorder_roles"
+            else:
+                partial_support = issue.get("type") == "unsupported_inference" or any(marker in lowered for marker in (
+                    "duration", "tenure", "qualifier", "overstated", "stronger than", "upgrade",
+                ))
+                complete_absence = not partial_support and any(marker in lowered for marker in (
+                    "not mentioned", "not present", "no evidence", "not in the ckb", "does not appear",
+                ))
+                fix_type = "restore_supported_detail" if issue.get("type") in {"requirement_omission", "generation_under_utilized"} else "remove" if complete_absence else "remove_or_soften"
             errors.append({
                 "id": f"err_{len(errors) + 1}",
                 "location": str(issue.get("location") or "Tailored CV"),
                 "claim": str(issue.get("location") or description),
                 "issue": description,
-                "fix_type": "restore_supported_detail" if issue.get("type") in {"requirement_omission", "generation_under_utilized"} else "remove" if complete_absence else "remove_or_soften",
+                "fix_type": fix_type,
             })
     return errors
 
@@ -733,6 +737,14 @@ def auto_fix_tailored_resume(
 ) -> str:
     if not errors:
         return content
+    if any(error.get("fix_type") == "reorder_roles" for error in errors):
+        try:
+            content = reorder_resume_role_blocks(content, json.loads(resume_plan_json or "{}"))
+        except json.JSONDecodeError:
+            pass
+        errors = [error for error in errors if error.get("fix_type") != "reorder_roles"]
+        if not errors:
+            return content
     selected_evidence = resume_evidence_pack(ckb_json, resume_plan_json)
     if resume_plan_json.strip() in {"", "{}"}:
         try:
@@ -771,7 +783,7 @@ Rules:
 - For fix_type "remove", delete the unsupported claim entirely. Do not replace it with another unverified claim.
 - For fix_type "remove_or_soften", rewrite using only what CKB source_text actually supports.
 - Do not introduce any new claim not present in source_text.
-- Do not re-curate the Resume. Do not reorder roles, change promote/keep/compress/omit, exceed max_bullets, fill unused bullet capacity or introduce omitted/unselected evidence.
+- Do not re-curate the Resume. Preserve the current plan.roles order, promote/keep/compress/omit actions and max_bullets; do not fill unused bullet capacity or introduce omitted/unselected evidence.
 - Preserve a visible role header even when max_bullets is zero wherever include_role_header is true. An omit role may remain omitted.
 - Do not convert adjacent evidence into direct ownership wording.
 - Do not turn continuity_only evidence into a JD capability claim.

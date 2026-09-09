@@ -121,10 +121,51 @@ class GenerateDraftTests(unittest.TestCase):
         prompt = provider.call_args.args[0]
         self.assertIn("Transferable coordination", prompt)
         self.assertNotIn("Advanced payroll", prompt)
-        self.assertIn("Do not reorder roles", prompt)
+        self.assertIn("Preserve the current plan.roles order", prompt)
         self.assertIn("Do not convert adjacent evidence into direct ownership", prompt)
         self.assertIn("continuity_only", prompt)
         self.assertIn("visible role header even when max_bullets is zero", prompt)
+
+    def test_resume_role_order_fix_moves_complete_kenya_block_only(self):
+        content = """## Work Experience
+### Executive Assistant | Avaintec
+Nov 2017 - Jan 2019
+- Managed the executive diary.
+
+### Project Administration Officer | CCCC Kenya
+Jan 2016 - Aug 2019
+- Coordinated project records.
+
+## Education
+Confirmed qualification.
+"""
+        plan = {"roles": [
+            {"employer_marker": "CCCC Kenya", "role_marker": "Project Administration Officer", "include_role_header": True},
+            {"employer_marker": "Avaintec", "role_marker": "Executive Assistant", "include_role_header": True},
+        ]}
+        errors = ai.classify_resume_review_errors({"results": [{"issues": [{
+            "type": "evidence_mismatch", "severity": "major",
+            "description": "The CV role headers do not follow reverse chronological Resume Plan order.",
+            "location": "Resume structure",
+        }]}]})
+
+        with patch.object(ai, "_selection_provider_response") as provider:
+            fixed = ai.auto_fix_tailored_resume(content, errors, "[]", resume_plan_json=json.dumps(plan))
+
+        self.assertEqual(errors[0]["fix_type"], "reorder_roles")
+        self.assertEqual(fixed, """## Work Experience
+### Project Administration Officer | CCCC Kenya
+Jan 2016 - Aug 2019
+- Coordinated project records.
+
+### Executive Assistant | Avaintec
+Nov 2017 - Jan 2019
+- Managed the executive diary.
+
+## Education
+Confirmed qualification.
+""")
+        provider.assert_not_called()
 
     def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
         plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'

@@ -78,6 +78,31 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
     return {"valid": not issues, "word_count": word_count, "issues": issues}
 
 
+def reorder_resume_role_blocks(content: str, plan: dict[str, Any]) -> str:
+    """Reorder complete role blocks without changing their contents."""
+    lines = content.splitlines(keepends=True)
+    nonempty_indexes = [index for index, line in enumerate(lines) if _normalise_identity_text(line)]
+    normalised = [_normalise_identity_text(lines[index]) for index in nonempty_indexes]
+    roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
+    positions = []
+    for role in roles:
+        found = _role_identity_positions(normalised, role)
+        if len(found) != 1:
+            return content
+        positions.append(nonempty_indexes[found[0]])
+    if len(positions) < 2 or positions == sorted(positions):
+        return content
+    ordered_starts = sorted(positions)
+    section_end = next((index for index in range(ordered_starts[-1] + 1, len(lines))
+                        if re.match(r"^##\s+", lines[index])), len(lines))
+    blocks = {
+        start: lines[start:ordered_starts[index + 1] if index + 1 < len(ordered_starts) else section_end]
+        for index, start in enumerate(ordered_starts)
+    }
+    reordered = [line for start in positions for line in blocks[start]]
+    return "".join(lines[:ordered_starts[0]] + reordered + lines[section_end:])
+
+
 def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any]:
     """Apply cheap, objective quality checks after factual review."""
     issues = []
@@ -419,7 +444,7 @@ def build_resume_curation_plan(
         "section_budget": {"professional_summary": 80, "key_skills": 90, "work_experience": max(target_words - 220, 250), "education_qualifications_references": 50},
         "rules": [
             "Relevant roles normally use 4–6 distinct bullets and condensed roles 0–2; these are guidance, never a reason to omit a unique fact.",
-            "Preserve role chronology from authoritative CKB source order; relevance controls only content budget.",
+            "Preserve the reverse chronological order in plan.roles; relevance controls only content budget.",
             "max_bullets null means no mechanical ceiling. One evidence record may support multiple distinct actions; never repeat an action to fill space.",
             "Word and page targets are guidance; employer limits take priority. Preserve distinctive relevant facts before compressing generic duties.",
             "Adjacent and continuity-only evidence must not be presented as direct JD capability evidence.",

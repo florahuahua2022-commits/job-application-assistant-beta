@@ -25,6 +25,20 @@ class ResumeCurationPlanTests(unittest.TestCase):
         self.assertEqual(plan["roles"][1]["curation_action"], "promote")
         self.assertEqual(plan["roles"][0]["display_period"], "2023 - 2025")
 
+    def test_updated_kenya_period_reorders_plan_ahead_of_avaintec(self):
+        ckb = [
+            evidence("A", "Work Experience > Avaintec > Executive Assistant", period={"start": "Nov 2017", "end": "Jan 2019"}),
+            evidence("K", "Work Experience > CCCC Kenya > Project Administration Officer", period={"start": "Jan 2016", "end": "Aug 2019"}),
+        ]
+        plan = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]},
+            {"matches": [{"criteria_id": "C1", "matched_evidence": ["A", "K"], "match_type": "direct"}]},
+            ckb,
+        )
+
+        self.assertEqual([role["employer_marker"] for role in plan["roles"]], ["CCCC Kenya", "Avaintec"])
+        self.assertEqual([role["display_period"] for role in plan["roles"]], ["Jan 2016 - Aug 2019", "Nov 2017 - Jan 2019"])
+
     def test_unknown_dates_keep_source_fallback_and_reliable_period_is_validated(self):
         ckb = [evidence("A", "Work > First"), evidence("B", "Work > Second")]
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, ckb)
