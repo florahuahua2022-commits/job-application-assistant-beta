@@ -15,12 +15,21 @@ from app.auth import get_current_user
 from app.ckb import build_career_knowledge_base
 from app.database import get_session
 from app.evidence_matcher import normalise_match_result
-from app.main import app
+from app.main import add_resume_quality_status, app
 from app.models import GeneratedDocument, JobApplication, Resume
 from app.resume_plan import build_resume_curation_plan
 
 
 class ContentQualityTests(unittest.TestCase):
+    def test_deterministic_role_failure_forces_factual_status_to_fail(self):
+        review = {"status": "fail", "results": [{"issues": [{
+            "type": "role_order_mismatch", "severity": "critical", "blocks_release": True,
+        }]}]}
+
+        result = add_resume_quality_status(review, "", {})
+
+        self.assertEqual(result["factual_status"], "fail")
+
     def test_undated_explicit_role_preserves_actions(self):
         text = "Work Experience\nProject Officer\nExample Agency\nCoordinated supplier visits. Prepared project reports."
         records = extract_resume_experiences(text)

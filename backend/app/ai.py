@@ -10,7 +10,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding
-from .resume_plan import reorder_resume_role_blocks, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
+from .resume_plan import repair_resume_role_blocks, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
@@ -687,7 +687,7 @@ Use pass with an empty issues array when there is no material issue."""
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             raw["issues"] = list(raw.get("issues") or []) + evaluate_resume_quality(content, plan)["issues"] + availability_issues(content, profile_availability_from_prompt(applicant_profile))
-            raw["issues"] += [{"type": "evidence_mismatch", "description": issue["message"],
+            raw["issues"] += [{"type": issue["code"] if issue["code"] in {"role_order_mismatch", "omitted_role_expanded"} else "evidence_mismatch", "description": issue["message"],
                                "location": "Resume structure", "evidence": "Authoritative Resume Plan",
                                "recommended_action": "Restore the required headings, role order and dates from the plan."}
                               for issue in validate_resume_content(content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []])["issues"]]
@@ -708,8 +708,8 @@ def classify_resume_review_errors(review: dict) -> list[dict]:
                 continue
             description = str(issue.get("description") or "")
             lowered = description.lower()
-            if "role headers do not follow reverse chronological resume plan order" in lowered:
-                fix_type = "reorder_roles"
+            if issue.get("type") in {"role_order_mismatch", "omitted_role_expanded"}:
+                fix_type = issue["type"]
             else:
                 partial_support = issue.get("type") == "unsupported_inference" or any(marker in lowered for marker in (
                     "duration", "tenure", "qualifier", "overstated", "stronger than", "upgrade",
@@ -737,12 +737,20 @@ def auto_fix_tailored_resume(
 ) -> str:
     if not errors:
         return content
-    if any(error.get("fix_type") == "reorder_roles" for error in errors):
+    role_fixes = {error.get("fix_type") for error in errors} & {"role_order_mismatch", "omitted_role_expanded"}
+    if role_fixes:
         try:
-            content = reorder_resume_role_blocks(content, json.loads(resume_plan_json or "{}"))
+            plan = json.loads(resume_plan_json or "{}")
+            repaired = repair_resume_role_blocks(
+                content, plan, "omitted_role_expanded" in role_fixes,
+            )
+            remaining = {issue["code"] for issue in validate_resume_content(repaired, plan, [])["issues"]}
+            if remaining & role_fixes:
+                return content
+            content = repaired
         except json.JSONDecodeError:
-            pass
-        errors = [error for error in errors if error.get("fix_type") != "reorder_roles"]
+            return content
+        errors = [error for error in errors if error.get("fix_type") not in role_fixes]
         if not errors:
             return content
     selected_evidence = resume_evidence_pack(ckb_json, resume_plan_json)

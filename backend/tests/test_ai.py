@@ -144,7 +144,7 @@ Confirmed qualification.
             {"employer_marker": "Avaintec", "role_marker": "Executive Assistant", "include_role_header": True},
         ]}
         errors = ai.classify_resume_review_errors({"results": [{"issues": [{
-            "type": "evidence_mismatch", "severity": "major",
+            "type": "role_order_mismatch", "severity": "critical",
             "description": "The CV role headers do not follow reverse chronological Resume Plan order.",
             "location": "Resume structure",
         }]}]})
@@ -152,7 +152,7 @@ Confirmed qualification.
         with patch.object(ai, "_selection_provider_response") as provider:
             fixed = ai.auto_fix_tailored_resume(content, errors, "[]", resume_plan_json=json.dumps(plan))
 
-        self.assertEqual(errors[0]["fix_type"], "reorder_roles")
+        self.assertEqual(errors[0]["fix_type"], "role_order_mismatch")
         self.assertEqual(fixed, """## Work Experience
 ### Project Administration Officer | CCCC Kenya
 Jan 2016 - Aug 2019
@@ -166,6 +166,34 @@ Nov 2017 - Jan 2019
 Confirmed qualification.
 """)
         provider.assert_not_called()
+
+    def test_deterministic_role_checks_override_ai_pass_and_remove_omitted_block(self):
+        content = """## Work Experience
+### Omitted Officer | Old Employer
+Jan 2015 - Dec 2015
+- Old duty.
+
+### Current Officer | Current Employer
+Jan 2020 - Present
+- Current duty.
+"""
+        plan = {"selected_evidence": [{"evidence_id": "CURRENT"}], "roles": [
+            {"employer_marker": "Current Employer", "role_marker": "Current Officer", "include_role_header": True},
+            {"employer_marker": "Old Employer", "role_marker": "Omitted Officer", "include_role_header": False},
+        ]}
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        findings = [issue for result in review["results"] for issue in result["issues"]]
+        self.assertEqual(review["status"], "fail")
+        self.assertEqual({issue["type"] for issue in findings}, {"role_order_mismatch", "omitted_role_expanded"})
+
+        fixed = ai.auto_fix_tailored_resume(content, ai.classify_resume_review_errors(review), "[]", resume_plan_json=json.dumps(plan))
+        self.assertEqual(fixed, """## Work Experience
+### Current Officer | Current Employer
+Jan 2020 - Present
+- Current duty.
+""")
 
     def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
         plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'

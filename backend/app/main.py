@@ -3136,7 +3136,7 @@ def generate_document(
             repaired_validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
             if not repaired_validation["valid"]:
                 resume_review["status"] = "fail"
-                resume_review.setdefault("results", []).append({"criteria_id": "resume_structure", "status": "fail", "issues": [{"type": "evidence_mismatch", "severity": "major", "blocks_release": True, "description": issue["message"], "recommended_action": "Repair this draft using its saved Resume Plan."} for issue in repaired_validation["issues"]]})
+                resume_review.setdefault("results", []).append({"criteria_id": "resume_structure", "status": "fail", "issues": [{"type": issue["code"] if issue["code"] in {"role_order_mismatch", "omitted_role_expanded"} else "evidence_mismatch", "severity": "critical" if issue["code"] in {"role_order_mismatch", "omitted_role_expanded"} else "major", "blocks_release": True, "description": issue["message"], "recommended_action": "Repair this draft using its saved Resume Plan."} for issue in repaired_validation["issues"]]})
         except ValueError as error:
             raise HTTPException(400, str(error))
         except AIServiceError as error:

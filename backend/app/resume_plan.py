@@ -52,10 +52,10 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
     normalised_lines = [_normalise_identity_text(line) for line in content.splitlines()]
     normalised_lines = [line for line in normalised_lines if line]
-    visible_roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
-    candidates = {id(role): _role_identity_positions(normalised_lines, role) for role in visible_roles}
-    positions = {id(role): values[0] if len(values) == 1 else -1 for role in visible_roles for values in [candidates[id(role)]]}
-    role_positions = []
+    all_roles = plan.get("roles") or []
+    visible_roles = [role for role in all_roles if role.get("include_role_header")]
+    candidates = {id(role): _role_identity_positions(normalised_lines, role) for role in all_roles}
+    positions = {id(role): values[0] if len(values) == 1 else -1 for role in all_roles for values in [candidates[id(role)]]}
     for role in visible_roles:
         marker = str(role.get("role_marker") or "").strip()
         position = positions[id(role)] if marker else -1
@@ -63,35 +63,39 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
             issues.append({"code": "ambiguous_role_header", "message": f"The CV contains an ambiguous employment header for {marker}."})
         elif marker and position < 0:
             issues.append({"code": "missing_role_header", "message": f"The CV is missing the required role header: {role['role_marker']}."})
-        elif position >= 0:
-            role_positions.append(position)
         period = _normalise_identity_text(role.get("display_period"))
         later_positions = [value for value in positions.values() if value > position]
         role_block = " ".join(normalised_lines[position:min(later_positions, default=len(normalised_lines))]) if position >= 0 else ""
         if period and not _contains_identity(role_block, period):
             issues.append({"code": "missing_role_period", "message": f"The CV is missing the authoritative employment period for {role.get('role_marker') or role.get('source_section')}."})
+    for role in all_roles:
+        if not role.get("include_role_header") and candidates[id(role)]:
+            issues.append({"code": "omitted_role_expanded", "message": f"The CV includes a role omitted by the Resume Plan: {role.get('role_marker') or role.get('source_section')}."})
     expected_timeline = timeline_text(plan)
     if expected_timeline and _normalise_identity_text(expected_timeline) not in _normalise_identity_text(content):
         issues.append({"code": "missing_timeline", "message": "The CV omits required timeline-only employment dates. Restore the Additional Experience lines from the plan."})
-    if len(role_positions) > 1 and role_positions != sorted(role_positions):
+    present_positions = [positions[id(role)] for role in all_roles if positions[id(role)] >= 0]
+    if len(present_positions) > 1 and present_positions != sorted(present_positions):
         issues.append({"code": "role_order_mismatch", "message": "The CV role headers do not follow reverse chronological Resume Plan order."})
     return {"valid": not issues, "word_count": word_count, "issues": issues}
 
 
-def reorder_resume_role_blocks(content: str, plan: dict[str, Any]) -> str:
-    """Reorder complete role blocks without changing their contents."""
+def repair_resume_role_blocks(content: str, plan: dict[str, Any], remove_omitted: bool = False) -> str:
+    """Remove omitted roles and reorder complete role blocks without rewriting them."""
     lines = content.splitlines(keepends=True)
     nonempty_indexes = [index for index, line in enumerate(lines) if _normalise_identity_text(line)]
     normalised = [_normalise_identity_text(lines[index]) for index in nonempty_indexes]
-    roles = [role for role in plan.get("roles") or [] if role.get("include_role_header")]
-    positions = []
+    roles = plan.get("roles") or []
+    positioned_roles = []
     for role in roles:
         found = _role_identity_positions(normalised, role)
-        if len(found) != 1:
+        if len(found) > 1:
             return content
-        positions.append(nonempty_indexes[found[0]])
-    if len(positions) < 2 or positions == sorted(positions):
+        if found:
+            positioned_roles.append((role, nonempty_indexes[found[0]]))
+    if not positioned_roles:
         return content
+    positions = [position for _role, position in positioned_roles]
     ordered_starts = sorted(positions)
     section_end = next((index for index in range(ordered_starts[-1] + 1, len(lines))
                         if re.match(r"^##\s+", lines[index])), len(lines))
@@ -99,7 +103,9 @@ def reorder_resume_role_blocks(content: str, plan: dict[str, Any]) -> str:
         start: lines[start:ordered_starts[index + 1] if index + 1 < len(ordered_starts) else section_end]
         for index, start in enumerate(ordered_starts)
     }
-    reordered = [line for start in positions for line in blocks[start]]
+    reordered = [line for role, start in positioned_roles
+                 if role.get("include_role_header") or not remove_omitted
+                 for line in blocks[start]]
     return "".join(lines[:ordered_starts[0]] + reordered + lines[section_end:])
 
 

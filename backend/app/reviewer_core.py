@@ -26,6 +26,8 @@ ISSUE_SEVERITY = {
     "concise_but_relevant": "advisory",
     "source_parsing_uncertain": "advisory",
     "resume_repetitive_opening": "advisory",
+    "role_order_mismatch": "critical",
+    "omitted_role_expanded": "critical",
 }
 SHARED_REVIEW_ISSUE_TYPES = set(ISSUE_SEVERITY)
 

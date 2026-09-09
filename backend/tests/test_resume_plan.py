@@ -155,6 +155,23 @@ Oct 2007 - Aug 2012
         self.assertIn("missing_role_header", [item["code"] for item in omitted["issues"]])
         self.assertIn("ambiguous_role_header", [item["code"] for item in repeated["issues"]])
 
+    def test_omitted_role_and_full_plan_order_are_checked_deterministically(self):
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [
+            {"employer_marker": "CCCC Kenya", "role_marker": "Project Administration Officer", "include_role_header": True},
+            {"employer_marker": "Avaintec", "role_marker": "Executive Assistant", "include_role_header": True},
+            {"employer_marker": "Old Employer", "role_marker": "Omitted Officer", "include_role_header": False},
+        ]}
+        content = """Avaintec | Executive Assistant
+Nov 2017 - Jan 2019
+CCCC Kenya | Project Administration Officer
+Jan 2016 - Aug 2019
+Old Employer | Omitted Officer
+Jan 2010 - Dec 2010"""
+
+        codes = {issue["code"] for issue in validate_resume_content(content, plan, [])["issues"]}
+
+        self.assertEqual(codes, {"role_order_mismatch", "omitted_role_expanded"})
+
     def test_date_uncertainty_is_explicit_and_no_date_is_fabricated(self):
         uncertain = build_career_knowledge_base("", json.dumps([{
             "role_title": "Officer", "organization": "Example", "responsibility": "Administration",
