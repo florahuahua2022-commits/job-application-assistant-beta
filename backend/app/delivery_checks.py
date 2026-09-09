@@ -6,6 +6,7 @@ from .resume_timeline import month_value
 
 
 HONORIFIC_PREFIX = re.compile(r"^(?:mr|mrs|ms|miss|dr)\.?\s+", re.I)
+AGGREGATE_EXPERIENCE_RULE = "employment_calendar_complete_months_v2"
 OUTPUT_PLACEHOLDER = re.compile(
     r"(?ix)"
     r"\[\s*(?:(?:insert|enter|add|provide|replace|your)\b[^\]\r\n]{0,80}|"
@@ -53,20 +54,20 @@ def aggregate_experience(ckb, today=None):
                 or re.fullmatch(r"\d{4}", str(period.get("end") or ""))):
             uncertain = True
         else:
-            intervals.append((start + 1, end))
+            intervals.append((start, end))
         sources.append({key: item.get(key) for key in
                         ("evidence_id", "source_group_id", "source_section", "organization", "role_title", "time_period", "source_text")})
     merged = []
     for start, end in sorted(set(intervals)):
         if end <= start:
             continue
-        if merged and start <= merged[-1][1]:
+        if merged and start <= merged[-1][1] + 1:
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
     months = sum(end - start for start, end in merged)
     years = months // 12 if sources and not uncertain else None
-    return {"rule": "employment_calendar_complete_months_v1", "as_of": today.isoformat(),
+    return {"rule": AGGREGATE_EXPERIENCE_RULE, "as_of": today.isoformat(),
             "scope": "All experience records, including part-time as calendar tenure, excluding projects, volunteering and education; overlaps counted once; no FTE or relevant-experience inference.",
             "sources": sources, "excluded_evidence_ids": excluded, "merged_intervals": merged,
             "complete_months": months, "years": years,

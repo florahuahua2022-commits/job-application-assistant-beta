@@ -36,14 +36,33 @@ class DeliveryChecksTests(unittest.TestCase):
         records = [evidence("a", "Jan 2010", "Jan 2020"), evidence("b", "Jan 2015", "Jan 2021"),
                    evidence("v", "Jan 1990", "Jan 2025", "volunteer")]
         result = aggregate_experience(records, date(2026, 9, 8))
-        self.assertEqual(result["years"], 10)
+        self.assertEqual(result["years"], 11)
         self.assertEqual(result["excluded_evidence_ids"], ["v"])
         self.assertEqual(len(result["merged_intervals"]), 1)
         self.assertFalse(delivery_issues(result["allowed_claim"], "tailored_resume", aggregate=result))
-        for claim in ("15 years of experience", "10+ years of finance experience", "over ten years' experience"):
+        for claim in ("15 years of experience", "11+ years of finance experience", "over ten years' experience"):
             self.assertIn("aggregate_claim_unverified", {x["code"] for x in delivery_issues(claim, "cover_letter", aggregate=result)})
         records.append(evidence("unknown", "2019", "2024"))
         self.assertIsNone(aggregate_experience(records)["allowed_claim"])
+
+    def test_aggregate_merges_before_counting_complete_months(self):
+        def evidence(id, start, end):
+            return {"evidence_id": id, "evidence_type": "experience", "source_group_id": id,
+                    "time_period": {"start": start, "end": end}, "source_text": "Work"}
+
+        cases = (
+            ([evidence("a", "Jan 2010", "Aug 2015"), evidence("b", "Aug 2015", "Jan 2020")], 120, 10),
+            ([evidence("a", "Jan 2010", "Dec 2018"), evidence("b", "Jan 2015", "Jan 2020")], 120, 10),
+            ([evidence("a", "Jan 2010", "Dec 2014"), evidence("b", "Feb 2015", "Jan 2020")], 118, 9),
+            ([evidence("a", "Oct 2007", "Aug 2012"), evidence("b", "Aug 2012", "Dec 2015"),
+              evidence("c", "Jan 2016", "Aug 2019"), evidence("d", "Nov 2017", "Jan 2019"),
+              evidence("e", "Feb 2026", "Aug 2026")], 148, 12),
+        )
+        for records, months, years in cases:
+            with self.subTest(records=records):
+                result = aggregate_experience(records, date(2026, 9, 8))
+                self.assertEqual(result["complete_months"], months)
+                self.assertEqual(result["years"], years)
 
     def test_identity_and_availability_all_document_types(self):
         for kind in ("tailored_resume", "cover_letter", "selection_criteria"):

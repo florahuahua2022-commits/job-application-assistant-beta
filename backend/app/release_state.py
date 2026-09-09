@@ -2,6 +2,8 @@ from hashlib import sha256
 import json
 from typing import Any
 
+from .delivery_checks import AGGREGATE_EXPERIENCE_RULE
+
 
 def load_release_state(value: str | None) -> dict[str, Any]:
     try:
@@ -23,6 +25,7 @@ def generation_inputs_fingerprint(application: Any, resume: Any, profile: Any | 
         "selection_criteria": getattr(application, "selection_criteria", None),
         "application_requirements": application.application_requirements_json,
         "application_decision": application.application_decision_json,
+        "aggregate_experience_rule": AGGREGATE_EXPERIENCE_RULE,
         "ckb": resume.ckb_json,
         "source_text": getattr(resume, "source_text", ""),
         "resume_snapshot": getattr(application, "resume_snapshot_json", "{}"),
