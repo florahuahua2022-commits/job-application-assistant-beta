@@ -563,11 +563,16 @@ Other grounded work."""
             )
             session.add(document); session.commit(); session.refresh(document); document_id = document.id
 
-        with patch("app.main.review_cover_letter", return_value={"status": "pass", "results": []}):
+        aggregate = {"allowed_claim": "12+ years of total employment experience"}
+        with patch("app.main.aggregate_experience", return_value=aggregate) as calculate, \
+             patch("app.main.review_cover_letter", return_value={"status": "pass", "results": []}) as reviewer:
             response = self.client.post(f"/documents/{document_id}/review")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.json()["reviewer_json"])["status"], "pass")
+        calculate.assert_called_once_with([])
+        self.assertIn(aggregate["allowed_claim"], reviewer.call_args.args[3])
+        self.assertEqual(json.loads(response.json()["trace_json"])["aggregate_experience"], aggregate)
 
     def test_failed_tailored_resume_can_be_re_reviewed_without_regeneration(self):
         application_id = self.seed()
@@ -580,12 +585,17 @@ Other grounded work."""
             )
             session.add(document); session.commit(); session.refresh(document); document_id = document.id
 
-        with patch("app.main.review_tailored_resume", return_value={"status": "pass", "results": []}):
+        aggregate = {"allowed_claim": "12+ years of total employment experience"}
+        with patch("app.main.aggregate_experience", return_value=aggregate) as calculate, \
+             patch("app.main.review_tailored_resume", return_value={"status": "pass", "results": []}) as reviewer:
             response = self.client.post(f"/documents/{document_id}/review")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], document_id)
         self.assertEqual(json.loads(response.json()["reviewer_json"])["status"], "pass")
+        calculate.assert_called_once_with([])
+        self.assertIn(aggregate["allowed_claim"], reviewer.call_args.args[4])
+        self.assertEqual(json.loads(response.json()["trace_json"])["aggregate_experience"], aggregate)
 
     def test_manual_selection_criteria_edit_preserves_plan_for_re_review(self):
         application_id = self.seed(required=("selection_criteria",))

@@ -2569,7 +2569,9 @@ def review_edited_document(
     try:
         structured = json.loads(document.structured_content_json or "{}")
         ckb_json = master_resume.ckb_json or "[]"
-        profile_text = applicant_profile_prompt(profile) if profile else None
+        current_ckb = json.loads(ckb_json)
+        aggregate = aggregate_experience(current_ckb)
+        profile_text = (applicant_profile_prompt(profile) if profile else "") + "\nCALCULATED EMPLOYMENT AGGREGATE (only allowed total; never infer relevant years):\n" + json.dumps(aggregate, ensure_ascii=False)
         if document.document_type == "tailored_resume":
             review = review_tailored_resume(ckb_json, application.job_model_json, json.dumps(structured), document.content, profile_text)
             review = add_resume_quality_status(review, document.content, structured)
@@ -2582,10 +2584,10 @@ def review_edited_document(
             structured = _selection_bundle_with_edited_content(structured, document.content)
             review = review_selection_criteria_batch(ckb_json, json.dumps(structured.get("selection_plan") or {}), structured)
             document.structured_content_json = json.dumps(structured, ensure_ascii=False)
-        apply_delivery_review(review, delivery_issues(document.content, document.document_type, profile,
-                              aggregate_experience(json.loads(ckb_json)), json.loads(ckb_json)))
+        apply_delivery_review(review, delivery_issues(document.content, document.document_type, profile, aggregate, current_ckb))
         document.reviewer_json = json.dumps(review, ensure_ascii=False)
         trace = json.loads(document.trace_json or "{}")
+        trace["aggregate_experience"] = aggregate
         trace["review"] = {
             "status": str(review.get("status") or "not_run"),
             "factual_status": str(review.get("factual_status") or review.get("status") or "not_run"),
