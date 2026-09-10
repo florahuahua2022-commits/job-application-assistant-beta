@@ -569,6 +569,24 @@ Other grounded work."""
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.json()["reviewer_json"])["status"], "pass")
 
+    def test_failed_tailored_resume_can_be_re_reviewed_without_regeneration(self):
+        application_id = self.seed()
+        with Session(self.engine) as session:
+            document = GeneratedDocument(
+                application_id=application_id, document_type="tailored_resume",
+                content="Alex Morgan\n0400000000 | alex@example.com\n## Work Experience\nGrounded administration.",
+                reviewer_json='{"status":"fail","results":[{"issues":[{"type":"evidence_mismatch","description":"Old false positive"}]}]}',
+                structured_content_json='{"roles":[]}',
+            )
+            session.add(document); session.commit(); session.refresh(document); document_id = document.id
+
+        with patch("app.main.review_tailored_resume", return_value={"status": "pass", "results": []}):
+            response = self.client.post(f"/documents/{document_id}/review")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], document_id)
+        self.assertEqual(json.loads(response.json()["reviewer_json"])["status"], "pass")
+
     def test_manual_selection_criteria_edit_preserves_plan_for_re_review(self):
         application_id = self.seed(required=("selection_criteria",))
         plan = {"items": [{"criteria_id": "C1", "criteria_text": "Communication", "matched_evidence": [], "allocated_word_limit": 100}]}

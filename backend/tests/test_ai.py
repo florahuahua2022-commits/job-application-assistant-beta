@@ -101,7 +101,10 @@ class GenerateDraftTests(unittest.TestCase):
 
         prompt = provider.call_args.args[0]
         self.assertIn("factual and relevance Reviewer", prompt)
-        self.assertIn("role order differs from the plan", prompt)
+        self.assertIn("role headers do not follow the plan order", prompt)
+        self.assertIn("Use missing_role_header", prompt)
+        self.assertIn("role_order_mismatch", prompt)
+        self.assertIn("omitted_role_expanded", prompt)
         self.assertIn("include_role_header", prompt)
         self.assertIn("adjacent", prompt)
         self.assertIn("continuity_only", prompt)
@@ -194,6 +197,83 @@ Jan 2020 - Present
 Jan 2020 - Present
 - Current duty.
 """)
+
+    def test_deterministic_role_pass_discards_explicit_ai_structure_failure(self):
+        content, plan = self._correct_two_role_resume()
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "missing_role_header", "description": "Avaintec is absent from the CV.",
+        }]})
+
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
+    def test_deterministic_role_pass_discards_legacy_omission_format(self):
+        content, plan = self._correct_two_role_resume()
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "requirement_omission",
+            "description": "The Avaintec role was left out of the Work Experience section.",
+            "recommended_action": "Add the Avaintec role and its selected evidence bullets.",
+        }]})
+
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        self.assertEqual(review["status"], "pass")
+
+    def test_deterministic_role_pass_discards_reworded_legacy_order_format(self):
+        content, plan = self._correct_two_role_resume()
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "evidence_mismatch",
+            "description": "The Avaintec position is misplaced in the employment chronology.",
+        }]})
+
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        self.assertEqual(review["status"], "pass")
+
+    def test_deterministic_role_failure_overrides_ai_pass_with_missing_header(self):
+        content, plan = self._correct_two_role_resume()
+        content = content.split("### Executive Assistant", 1)[0]
+
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        findings = [issue for result in review["results"] for issue in result["issues"]]
+        self.assertEqual(review["status"], "fail")
+        self.assertIn("missing_role_header", {issue["type"] for issue in findings})
+
+    def test_role_named_fabricated_responsibility_is_not_discarded(self):
+        content, plan = self._correct_two_role_resume()
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "evidence_mismatch",
+            "description": "The Avaintec role claims responsibility for payroll that its source does not support.",
+        }]})
+
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        findings = [issue for result in review["results"] for issue in result["issues"]]
+        self.assertEqual(review["status"], "fail")
+        self.assertEqual([issue["type"] for issue in findings], ["evidence_mismatch"])
+
+    @staticmethod
+    def _correct_two_role_resume():
+        return """## Work Experience
+### Project Administration Officer | CCCC Kenya
+January 2016 - August 2019
+- Coordinated project records.
+
+### Executive Assistant | Avaintec
+November 2017 - January 2019
+- Prepared meeting documents.
+""", {"selected_evidence": [{"evidence_id": "CURRENT"}], "roles": [
+            {"employer_marker": "CCCC Kenya", "role_marker": "Project Administration Officer", "include_role_header": True},
+            {"employer_marker": "Avaintec", "role_marker": "Executive Assistant", "include_role_header": True},
+        ]}
 
     def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
         plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'

@@ -652,8 +652,11 @@ Check only these issue types:
 - jd_wording_repeated
 - ai_tone
 - style_only
+- missing_role_header
+- role_order_mismatch
+- omitted_role_expanded
 
-Treat the Resume Plan as authoritative curation. Report evidence_mismatch when role order differs from the plan, a role with include_role_header true is absent, an omit role is expanded, promote/keep/compress is overridden, or a non-null max_bullets is exceeded. A null max_bullets allows distinct supported actions to be split or combined naturally. Timeline-only entries in plan.timeline are permitted identity/date context despite being outside selected_evidence; they must not contain duties, bullets, achievements or skill claims. Report unmatched_evidence_used for omitted or unselected evidence. Evidence framed as adjacent must remain transferable rather than direct ownership, and continuity_only evidence must not become a JD capability claim. A visible role header must remain present even when max_bullets is zero. Check these constraints; do not re-curate the Resume.
+Treat the Resume Plan as authoritative curation. Use missing_role_header when a role with include_role_header true is absent, role_order_mismatch when role headers do not follow the plan order, and omitted_role_expanded when an omitted role is expanded. Use evidence_mismatch when promote/keep/compress is overridden or a non-null max_bullets is exceeded. Do not report role presence or order under evidence_mismatch or requirement_omission. A null max_bullets allows distinct supported actions to be split or combined naturally. Timeline-only entries in plan.timeline are permitted identity/date context despite being outside selected_evidence; they must not contain duties, bullets, achievements or skill claims. Report unmatched_evidence_used for omitted or unselected evidence. Evidence framed as adjacent must remain transferable rather than direct ownership, and continuity_only evidence must not become a JD capability claim. A visible role header must remain present even when max_bullets is zero. Check these constraints; do not re-curate the Resume.
 
 Check that roles, employers, dates, responsibilities, skills and outcomes remain traceable to CKB source_text. Check whether the curation reflects the Resume Plan and selected evidence. Check each selected relevant source fact against the actual prose. Report generation_under_utilized with the evidence ID, source passage, affected paragraph and system rewrite action when a distinctive action, tool, scope or case is lost or replaced by generic duties. Compare action plus object/context across roles: three or more generic near-duplicate entries with unused distinctive source facts are generation_under_utilized. Shared opening verbs with different facts are acceptable. Report insufficient_source_detail only when the complete original role group lacks useful actions, objects, tools, scope and context; name the role and ask for specific source additions. Never use a thin-record ratio or word threshold as proof. If source grouping cannot be reconstructed report source_parsing_uncertain as advisory. Do not fail on word count, missing numbers, low job match or repeated opening verbs alone. A null max_bullets is not a one-bullet limit. A style_only preference must never cause failure by itself. Do not calculate exact word counts or required headings; application logic already checks them.
 
@@ -679,7 +682,7 @@ FINAL TAILORED CV:
 {content}
 
 Return JSON only:
-{{"status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"CV phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+{{"status":"pass|fail","issues":[{{"type":"unsupported_claim|missing_role_header|role_order_mismatch|omitted_role_expanded|...","description":"...","evidence":"source detail","location":"CV phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
 
 Use pass with an empty issues array when there is no material issue."""
     last_error = ""
@@ -687,16 +690,62 @@ Use pass with an empty issues array when there is no material issue."""
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             raw["issues"] = list(raw.get("issues") or []) + evaluate_resume_quality(content, plan)["issues"] + availability_issues(content, profile_availability_from_prompt(applicant_profile))
-            raw["issues"] += [{"type": issue["code"] if issue["code"] in {"role_order_mismatch", "omitted_role_expanded"} else "evidence_mismatch", "description": issue["message"],
-                               "location": "Resume structure", "evidence": "Authoritative Resume Plan",
-                               "recommended_action": "Restore the required headings, role order and dates from the plan."}
-                              for issue in validate_resume_content(content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []])["issues"]]
             result = normalise_document_review(raw, "tailored_resume")
+            result = reconcile_resume_structure_findings(
+                result, plan, validate_resume_content(
+                    content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []],
+                )["issues"],
+            )
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
         except (OpenAIError, ValueError) as error:
             last_error = str(error)
     raise AIServiceError(f"Resume Reviewer failed validation: {last_error or 'unknown error'}")
+
+
+ROLE_STRUCTURE_TYPES = {"missing_role_header", "role_order_mismatch", "omitted_role_expanded"}
+
+
+def _role_structure_finding(issue: dict, roles: list[dict]) -> bool:
+    if issue.get("type") in ROLE_STRUCTURE_TYPES:
+        return True
+    if issue.get("type") not in {"evidence_mismatch", "requirement_omission", "internal_inconsistency"}:
+        return False
+    text = re.sub(r"[^\w]+", " ", " ".join(
+        str(issue.get(key) or "") for key in ("description", "evidence", "location", "recommended_action")
+    ).casefold()).strip()
+    description = re.sub(r"[^\w]+", " ", str(issue.get("description") or "").casefold()).strip()
+    identities = {
+        re.sub(r"[^\w]+", " ", str(role.get(key) or "").casefold()).strip()
+        for role in roles for key in ("role_marker", "employer_marker", "source_section")
+        if role.get(key)
+    }
+    return (
+        any(identity and identity in text for identity in identities)
+        and any(term in text for term in ("role", "position", "employment", "work experience", "header", "section"))
+        and any(term in text for term in ("omit", "missing", "absent", "left out", "not included", "order", "sequence", "chronolog", "misplac", "reorder"))
+        and not any(term in description for term in ("bullet", "duty", "duties", "responsibil", "task", "claim", "fact", "tool", "result", "achievement"))
+    )
+
+
+def reconcile_resume_structure_findings(review: dict, plan: dict, validation_issues: list[dict]) -> dict:
+    """Make deterministic role structure checks authoritative over AI findings."""
+    roles = plan.get("roles") or []
+    for result in review.get("results") or []:
+        result["issues"] = [issue for issue in result.get("issues") or [] if not _role_structure_finding(issue, roles)]
+        result["status"] = "fail" if any(issue.get("blocks_release") for issue in result["issues"]) else "pass"
+    if validation_issues:
+        review.setdefault("results", []).append({
+            "criteria_id": "resume_structure", "status": "fail", "issues": [
+                {"type": issue["code"] if issue["code"] in ROLE_STRUCTURE_TYPES else "evidence_mismatch",
+                 "severity": "critical" if issue["code"] in ROLE_STRUCTURE_TYPES else "major", "blocks_release": True,
+                 "description": issue["message"], "evidence": "Authoritative Resume Plan",
+                 "location": "Resume structure", "recommended_action": "Restore the required headings and role order from the plan."}
+                for issue in validation_issues
+            ], "recommendation": "Repair this draft using its saved Resume Plan.",
+        })
+    review["status"] = "fail" if any(result.get("status") == "fail" for result in review.get("results") or []) else "pass"
+    return review
 
 
 def classify_resume_review_errors(review: dict) -> list[dict]:
