@@ -11,7 +11,7 @@ from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding
 from .resume_plan import repair_resume_role_blocks, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
-from .applicant_profile import availability_issues, profile_availability_from_prompt
+from .applicant_profile import availability_issues, confirmed_availability_wording, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
 
@@ -497,6 +497,8 @@ Check only these issue types:
 - declared_evidence_unused
 - style_only
 
+Confirmed availability wording is a constraint, not a required statement. The letter may omit availability entirely. Only when the letter makes an availability, notice-period or start-date claim must it match the confirmed Profile value. Never report an omission merely because the confirmed availability wording is absent.
+
 The Applicant Profile intent may support motivation or values alignment, but it is not employment evidence. A style_only preference must never cause failure by itself. Do not calculate exact word counts; application logic handles mechanical constraints.
 
 Check whether the selected cases retain their distinctive supported actions, tools and scope, and explain their relevance. Report requirement_omission for materially missing case detail, quoting its source and the affected paragraph; sparse sources alone are not a failure. Assess requirement coverage only against COVER LETTER PLAN priorities. A Cover Letter is a concise companion document, not a second Selection Criteria response. Never flag omission of a Shared Job Model criterion that is not a Cover Letter Plan priority. When a separate Selection Criteria document is required, detailed coverage belongs there.
@@ -532,8 +534,10 @@ Use pass with an empty issues array when there is no material issue."""
     for attempt in range(2):
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
-            raw["issues"] = list(raw.get("issues") or []) + contract_issues + availability_issues(content, profile_availability_from_prompt(applicant_profile))
+            availability_value = profile_availability_from_prompt(applicant_profile)
+            raw["issues"] = list(raw.get("issues") or []) + contract_issues + availability_issues(content, availability_value)
             result = normalise_document_review(raw, "cover_letter")
+            result = reconcile_availability_findings(result, confirmed_availability_wording(availability_value))
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
         except (OpenAIError, ValueError) as error:
@@ -656,6 +660,8 @@ Check only these issue types:
 - role_order_mismatch
 - omitted_role_expanded
 
+Confirmed availability wording is a constraint, not a required statement. The CV may omit availability entirely. Only when the CV makes an availability, notice-period or start-date claim must it match the confirmed Profile value. Never report an omission merely because the confirmed availability wording is absent.
+
 Treat the Resume Plan as authoritative curation. Use missing_role_header when a role with include_role_header true is absent, role_order_mismatch when role headers do not follow the plan order, and omitted_role_expanded when an omitted role is expanded. Use evidence_mismatch when promote/keep/compress is overridden or a non-null max_bullets is exceeded. Do not report role presence or order under evidence_mismatch or requirement_omission. A null max_bullets allows distinct supported actions to be split or combined naturally. Timeline-only entries in plan.timeline are permitted identity/date context despite being outside selected_evidence; they must not contain duties, bullets, achievements or skill claims. Report unmatched_evidence_used for omitted or unselected evidence. Evidence framed as adjacent must remain transferable rather than direct ownership, and continuity_only evidence must not become a JD capability claim. A visible role header must remain present even when max_bullets is zero. Check these constraints; do not re-curate the Resume.
 
 Check that roles, employers, dates, responsibilities, skills and outcomes remain traceable to CKB source_text. Check whether the curation reflects the Resume Plan and selected evidence. Check each selected relevant source fact against the actual prose. Report generation_under_utilized with the evidence ID, source passage, affected paragraph and system rewrite action when a distinctive action, tool, scope or case is lost or replaced by generic duties. Compare action plus object/context across roles: three or more generic near-duplicate entries with unused distinctive source facts are generation_under_utilized. Shared opening verbs with different facts are acceptable. Report insufficient_source_detail only when the complete original role group lacks useful actions, objects, tools, scope and context; name the role and ask for specific source additions. Never use a thin-record ratio or word threshold as proof. If source grouping cannot be reconstructed report source_parsing_uncertain as advisory. Do not fail on word count, missing numbers, low job match or repeated opening verbs alone. A null max_bullets is not a one-bullet limit. A style_only preference must never cause failure by itself. Do not calculate exact word counts or required headings; application logic already checks them.
@@ -689,8 +695,10 @@ Use pass with an empty issues array when there is no material issue."""
     for attempt in range(2):
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
-            raw["issues"] = list(raw.get("issues") or []) + evaluate_resume_quality(content, plan)["issues"] + availability_issues(content, profile_availability_from_prompt(applicant_profile))
+            availability_value = profile_availability_from_prompt(applicant_profile)
+            raw["issues"] = list(raw.get("issues") or []) + evaluate_resume_quality(content, plan)["issues"] + availability_issues(content, availability_value)
             result = normalise_document_review(raw, "tailored_resume")
+            result = reconcile_availability_findings(result, confirmed_availability_wording(availability_value))
             result = reconcile_resume_structure_findings(
                 result, plan, validate_resume_content(
                     content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []],
@@ -704,6 +712,39 @@ Use pass with an empty issues array when there is no material issue."""
 
 
 ROLE_STRUCTURE_TYPES = {"missing_role_header", "role_order_mismatch", "omitted_role_expanded"}
+
+
+def _availability_omission_finding(issue: dict, confirmed_wording: str) -> bool:
+    text = re.sub(r"[^\w]+", " ", " ".join(
+        str(issue.get(key) or "") for key in ("description", "evidence", "location", "recommended_action")
+    ).casefold()).strip()
+    wording = re.sub(r"[^\w]+", " ", confirmed_wording.casefold()).strip()
+    availability_reference = (
+        bool(wording and wording != "do not state availability" and wording in text)
+        or any(term in text for term in (
+            "confirmed availability", "availability wording", "availability statement", "notice period",
+            "start date", "available to start", "available to commence",
+        ))
+    )
+    omission = any(term in text for term in (
+        "missing", "omitted", "absent", "does not include", "does not mention", "does not state",
+        "fails to include", "fails to mention", "fails to state", "must include", "must mention",
+        "must state", "should include", "should mention", "should state", "needs to include",
+        "needs to mention", "needs to state", "add the", "include the", "state the",
+    ))
+    return availability_reference and omission
+
+
+def reconcile_availability_findings(review: dict, confirmed_wording: str) -> dict:
+    """Availability may be omitted; deterministic claim checks remain authoritative."""
+    for result in review.get("results") or []:
+        result["issues"] = [
+            issue for issue in result.get("issues") or []
+            if not _availability_omission_finding(issue, confirmed_wording)
+        ]
+        result["status"] = "fail" if any(issue.get("blocks_release") for issue in result["issues"]) else "pass"
+    review["status"] = "fail" if any(result.get("status") == "fail" for result in review.get("results") or []) else "pass"
+    return review
 
 
 def _role_structure_finding(issue: dict, roles: list[dict]) -> bool:

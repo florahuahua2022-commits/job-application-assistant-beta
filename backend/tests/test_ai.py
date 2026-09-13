@@ -112,6 +112,7 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("does not prove current employment", prompt)
         self.assertIn("government employer", prompt)
         self.assertIn("Work rights: permanent resident", prompt)
+        self.assertIn("The CV may omit availability entirely", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
@@ -275,6 +276,85 @@ November 2017 - January 2019
             {"employer_marker": "Avaintec", "role_marker": "Executive Assistant", "include_role_header": True},
         ]}
 
+    def test_resume_may_omit_confirmed_availability(self):
+        content, plan = self._correct_two_role_resume()
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "requirement_omission",
+            "description": "The CV does not include the confirmed availability wording Available immediately.",
+            "recommended_action": "Add the confirmed availability statement.",
+        }]})
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_tailored_resume(
+                "[]", "{}", json.dumps(plan), content,
+                "Confirmed availability wording: Available immediately",
+            )
+        self.assertEqual(review["status"], "pass")
+
+    def test_cover_letter_may_omit_confirmed_availability(self):
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "requirement_omission",
+            "description": "The letter fails to state the confirmed availability wording Available immediately.",
+        }]})
+        plan = '{"priorities":[{"criteria_id":"C1"}],"selected_evidence":[]}'
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_cover_letter(
+                "[]", "{}", plan, "Confirmed availability wording: Available immediately", "Grounded letter."
+            )
+        self.assertEqual(review["status"], "pass")
+
+    def test_conflicting_availability_still_fails_deterministically(self):
+        content, plan = self._correct_two_role_resume()
+        content += "\nI am available following one month's notice."
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_tailored_resume(
+                "[]", "{}", json.dumps(plan), content,
+                "Confirmed availability wording: Available immediately",
+            )
+        issues = [issue for result in review["results"] for issue in result["issues"]]
+        self.assertIn("availability_conflict", {issue["type"] for issue in issues})
+        self.assertEqual(review["status"], "fail")
+
+    def test_unconfirmed_start_date_still_fails_deterministically(self):
+        plan = '{"priorities":[{"criteria_id":"C1"}],"selected_evidence":[]}'
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_cover_letter(
+                "[]", "{}", plan, "Confirmed availability wording: Do not state availability",
+                "I can start on 7 September 2026.",
+            )
+        issues = [issue for result in review["results"] for issue in result["issues"]]
+        self.assertIn("unsupported_availability_claim", {issue["type"] for issue in issues})
+        self.assertEqual(review["status"], "fail")
+
+    def test_job_roster_availability_finding_is_not_filtered(self):
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [{
+            "type": "requirement_omission", "blocks_release": True,
+            "description": "The CV does not address the JD requirement for availability across rotating weekend shifts.",
+        }]}]}
+        ai.reconcile_availability_findings(review, "Available immediately")
+        self.assertEqual(review["status"], "fail")
+        self.assertEqual(len(review["results"][0]["issues"]), 1)
+
+    def test_reworded_unknown_availability_omission_is_filtered(self):
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [{
+            "type": "unknown_reviewer_issue", "blocks_release": True,
+            "description": "Applicant availability is absent.",
+            "evidence": "Confirmed availability: Available immediately",
+            "recommended_action": "Include the availability statement in the CV.",
+        }]}]}
+        ai.reconcile_availability_findings(review, "Available immediately")
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
+    def test_availability_reconciliation_preserves_other_hard_checks(self):
+        issue_types = {"canonical_name_conflict", "aggregate_claim_unverified", "role_order_mismatch"}
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [
+            {"type": issue_type, "blocks_release": True, "description": "Hard check failed."}
+            for issue_type in issue_types
+        ]}]}
+        ai.reconcile_availability_findings(review, "Available immediately")
+        self.assertEqual(review["status"], "fail")
+        self.assertEqual({issue["type"] for issue in review["results"][0]["issues"]}, issue_types)
+
     def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
         plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'
         with patch.object(ai, "_openai_draft", return_value='CV\n<!-- GENERATION_META {"used_experiences":["EV001"],"closing_styles":[]} -->') as provider:
@@ -302,6 +382,7 @@ November 2017 - January 2019
         self.assertIn("not a second Selection Criteria response", prompt)
         self.assertIn("short organisation field is not an exclusive canonical name", prompt)
         self.assertIn("used only to identify or honestly acknowledge an evidence gap", prompt)
+        self.assertIn("The letter may omit availability entirely", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 
