@@ -355,6 +355,62 @@ November 2017 - January 2019
         self.assertEqual(review["status"], "fail")
         self.assertEqual({issue["type"] for issue in review["results"][0]["issues"]}, issue_types)
 
+    def test_null_bullet_limit_rejects_word_count_compression_heuristic(self):
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [{
+            "type": "evidence_mismatch", "blocks_release": True,
+            "description": "The Kenya role uses 60 words across 3 sentences and 4 lines, reproducing essentially the entire source rather than condensing it.",
+            "location": "China Communications Construction Company - Kenya Branch",
+        }]}]}
+        plan = {"roles": [{
+            "employer_marker": "China Communications Construction Company - Kenya Branch",
+            "curation_action": "include_concisely", "max_bullets": None,
+        }]}
+
+        ai.reconcile_resume_compression_findings(review, plan)
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
+    def test_real_duplicate_content_finding_is_not_filtered(self):
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [{
+            "type": "evidence_mismatch", "blocks_release": True,
+            "description": "The same supplier-coordination fact is duplicated in two bullets in the Kenya role.",
+            "location": "Kenya role",
+        }]}]}
+        plan = {"roles": [{"source_section": "Kenya role", "curation_action": "include_concisely", "max_bullets": None}]}
+
+        ai.reconcile_resume_compression_findings(review, plan)
+
+        self.assertEqual(review["status"], "fail")
+        self.assertEqual(len(review["results"][0]["issues"]), 1)
+
+    def test_non_null_bullet_limit_finding_is_not_filtered(self):
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [{
+            "type": "evidence_mismatch", "blocks_release": True,
+            "description": "The role has 4 lines although max_bullets is 2.",
+            "location": "Kenya role",
+        }]}]}
+        plan = {"roles": [{"source_section": "Kenya role", "curation_action": "include_concisely", "max_bullets": 2}]}
+
+        ai.reconcile_resume_compression_findings(review, plan)
+
+        self.assertEqual(review["status"], "fail")
+
+    def test_compression_filter_preserves_fabrication_and_wrong_attribution(self):
+        for description in (
+            "The Kenya role fabricates contract-management duties while using 4 lines.",
+            "The Kenya role attributes an Avaintec responsibility to the wrong employer and uses 60 words.",
+        ):
+            review = {"status": "fail", "results": [{"status": "fail", "issues": [{
+                "type": "evidence_mismatch", "blocks_release": True,
+                "description": description, "location": "Kenya role",
+            }]}]}
+            plan = {"roles": [{"source_section": "Kenya role", "curation_action": "include_concisely", "max_bullets": None}]}
+
+            ai.reconcile_resume_compression_findings(review, plan)
+
+            self.assertEqual(review["status"], "fail", description)
+
     def test_resume_generation_prompt_contains_strict_ckb_constraint(self):
         plan = '{"selected_evidence":[{"evidence_id":"EV001","source_text":"Prepared reports."}]}'
         with patch.object(ai, "_openai_draft", return_value='CV\n<!-- GENERATION_META {"used_experiences":["EV001"],"closing_styles":[]} -->') as provider:
@@ -461,6 +517,28 @@ November 2017 - January 2019
         self.assertIn("Do not rewrite", call.call_args.args[0])
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][1]["issues"][0]["type"], "unsupported_claim")
+
+    def test_selection_quote_is_checked_only_against_its_own_response(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
+        plan = '{"items":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'
+        bundle = {"responses": [
+            {"criteria_id": "C1", "final_response": "I prepared reports."},
+            {"criteria_id": "C2", "final_response": "I led the project."},
+        ]}
+        reviewer_output = json.dumps({"results": [
+            {"criteria_id": "C1", "status": "fail", "issues": [{
+                "type": "unsupported_claim", "description": "The response states 'I led the project'.",
+                "location": "I led the project", "location_kind": "exact_quote",
+            }]},
+            {"criteria_id": "C2", "status": "pass", "issues": []},
+        ]})
+
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            result = ai.review_selection_criteria_batch(ckb, plan, bundle)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["results"][0]["issues"][0]["grounding_status"], "unverified")
+        self.assertFalse(result["results"][0]["issues"][0]["blocks_release"])
 
     def test_selection_repair_removes_unsupported_outcome_and_rechecks(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'

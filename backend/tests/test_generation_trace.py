@@ -32,6 +32,7 @@ class GenerationTraceTests(unittest.TestCase):
         })
         self.assertEqual(trace["versions"]["government_writing_rules"], "1.0")
         self.assertEqual(trace["versions"]["applicant_profile_schema"], "1.0")
+        self.assertEqual(trace["versions"]["review_policy"], "2.0")
         self.assertEqual(trace["runtime"]["status"], "completed")
         self.assertEqual(trace["runtime"]["latency_ms"], 1250)
         self.assertEqual(trace["runtime"]["observed_retry_count"], 2)

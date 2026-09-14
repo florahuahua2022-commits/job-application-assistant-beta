@@ -7,6 +7,7 @@ from .ckb import CKB_SCHEMA_VERSION
 from .government_writing_rules import GOVERNMENT_WRITING_RULES_VERSION
 from .job_model import JOB_MODEL_SCHEMA_VERSION
 from .reviewer import REVIEW_SCHEMA_VERSION
+from .reviewer_core import REVIEW_POLICY_VERSION
 from .selection_logic import SELECTION_PLAN_SCHEMA_VERSION
 
 
@@ -64,6 +65,7 @@ def build_generation_trace(
             "job_model_schema": JOB_MODEL_SCHEMA_VERSION,
             "selection_plan_schema": SELECTION_PLAN_SCHEMA_VERSION,
             "review_schema": REVIEW_SCHEMA_VERSION,
+            "review_policy": REVIEW_POLICY_VERSION,
             "government_writing_rules": GOVERNMENT_WRITING_RULES_VERSION,
             "applicant_profile_schema": APPLICANT_PROFILE_SCHEMA_VERSION,
         },

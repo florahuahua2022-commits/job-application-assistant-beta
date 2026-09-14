@@ -1,5 +1,5 @@
 from typing import Any
-from .reviewer_core import SHARED_REVIEW_ISSUE_TYPES, findings_block_release, normalise_finding
+from .reviewer_core import REVIEW_POLICY_VERSION, SHARED_REVIEW_ISSUE_TYPES, findings_block_release, normalise_finding
 
 
 REVIEW_SCHEMA_VERSION = "1.0"
@@ -46,6 +46,7 @@ def normalise_review_result(raw: dict[str, Any], criteria_ids: list[str]) -> dic
             })
     return {
         "schema_version": REVIEW_SCHEMA_VERSION,
+        "review_policy_version": REVIEW_POLICY_VERSION,
         "status": "fail" if any(item["status"] == "fail" for item in results) else "pass",
         "results": results,
     }

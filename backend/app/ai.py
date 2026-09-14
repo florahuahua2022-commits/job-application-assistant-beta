@@ -9,7 +9,7 @@ from .evidence_matcher import matched_evidence_pack, normalise_match_result, val
 from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
-from .reviewer_core import normalise_document_review, normalise_finding
+from .reviewer_core import normalise_document_review, normalise_finding, reconcile_review_grounding
 from .resume_plan import repair_resume_role_blocks, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, confirmed_availability_wording, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
@@ -345,7 +345,9 @@ FULL CAREER KNOWLEDGE BASE WITH SOURCE TEXT:
 {json.dumps(ckb, ensure_ascii=False)}
 
 Return JSON only:
-{{"results":[{{"criteria_id":"...","status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"response phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}]}}
+{{"results":[{{"criteria_id":"...","status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"exact response phrase or section","location_kind":"exact_quote|section|document_wide","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}]}}
+
+Use location_kind exact_quote only when location is copied verbatim from the response. Use section for a heading or structural location and document_wide for a finding without one quoted location. Never present a paraphrase as an exact quote.
 
 Return every criteria_id exactly once. Use pass with an empty issues array when no material issue exists."""
     last_error = ""
@@ -353,6 +355,10 @@ Return every criteria_id exactly once. Use pass with an empty issues array when 
         try:
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             result = normalise_review_result(raw, criteria_ids)
+            result = reconcile_review_grounding(result, {
+                str(response.get("criteria_id") or ""): str(response.get("final_response") or "")
+                for response in bundle.get("responses") or []
+            })
             errors = validate_review_result(result, criteria_ids)
             if not errors:
                 result["telemetry"] = {"reviewer_retries": attempt}
@@ -527,7 +533,9 @@ FINAL COVER LETTER:
 {content}
 
 Return JSON only:
-{{"status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"letter phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+{{"status":"pass|fail","issues":[{{"type":"unsupported_claim","description":"...","evidence":"source detail","location":"exact letter phrase or section","location_kind":"exact_quote|section|document_wide","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+
+Use location_kind exact_quote only when location is copied verbatim from the letter. Use section for a heading or structural location and document_wide for a finding without one quoted location. Never present a paraphrase as an exact quote.
 
 Use pass with an empty issues array when there is no material issue."""
     last_error = ""
@@ -537,6 +545,7 @@ Use pass with an empty issues array when there is no material issue."""
             availability_value = profile_availability_from_prompt(applicant_profile)
             raw["issues"] = list(raw.get("issues") or []) + contract_issues + availability_issues(content, availability_value)
             result = normalise_document_review(raw, "cover_letter")
+            result = reconcile_review_grounding(result, content)
             result = reconcile_availability_findings(result, confirmed_availability_wording(availability_value))
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
@@ -666,6 +675,8 @@ Treat the Resume Plan as authoritative curation. Use missing_role_header when a 
 
 Check that roles, employers, dates, responsibilities, skills and outcomes remain traceable to CKB source_text. Check whether the curation reflects the Resume Plan and selected evidence. Check each selected relevant source fact against the actual prose. Report generation_under_utilized with the evidence ID, source passage, affected paragraph and system rewrite action when a distinctive action, tool, scope or case is lost or replaced by generic duties. Compare action plus object/context across roles: three or more generic near-duplicate entries with unused distinctive source facts are generation_under_utilized. Shared opening verbs with different facts are acceptable. Report insufficient_source_detail only when the complete original role group lacks useful actions, objects, tools, scope and context; name the role and ask for specific source additions. Never use a thin-record ratio or word threshold as proof. If source grouping cannot be reconstructed report source_parsing_uncertain as advisory. Do not fail on word count, missing numbers, low job match or repeated opening verbs alone. A null max_bullets is not a one-bullet limit. A style_only preference must never cause failure by itself. Do not calculate exact word counts or required headings; application logic already checks them.
 
+For include_concisely, never infer inadequate compression from word count, sentence count, line count or the proportion of source detail retained. With max_bullets null there is no mechanical ceiling. Report a material issue only when you can identify a repeated fact, unselected or omitted evidence, fabricated content, wrong role attribution, irrelevant expansion or a breached non-null max_bullets value.
+
 Treat "currently", "current", "present" and equivalent ongoing-employment wording as unsupported unless the relevant CKB source_text explicitly states an ongoing status or open-ended date range. An organisation being a government agency does not prove current employment.
 
 Treat policies, procedures, frameworks, government requirements and recordkeeping requirements as unsupported when the relevant terms are absent from CKB source_text. Do not infer them merely from a government employer.
@@ -688,7 +699,9 @@ FINAL TAILORED CV:
 {content}
 
 Return JSON only:
-{{"status":"pass|fail","issues":[{{"type":"unsupported_claim|missing_role_header|role_order_mismatch|omitted_role_expanded|...","description":"...","evidence":"source detail","location":"CV phrase","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+{{"status":"pass|fail","issues":[{{"type":"unsupported_claim|missing_role_header|role_order_mismatch|omitted_role_expanded|...","description":"...","evidence":"source detail","location":"exact CV phrase or section","location_kind":"exact_quote|section|document_wide","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+
+Use location_kind exact_quote only when location is copied verbatim from the CV. Use section for a heading or structural location and document_wide for a finding without one quoted location. Never present a paraphrase as an exact quote.
 
 Use pass with an empty issues array when there is no material issue."""
     last_error = ""
@@ -698,7 +711,9 @@ Use pass with an empty issues array when there is no material issue."""
             availability_value = profile_availability_from_prompt(applicant_profile)
             raw["issues"] = list(raw.get("issues") or []) + evaluate_resume_quality(content, plan)["issues"] + availability_issues(content, availability_value)
             result = normalise_document_review(raw, "tailored_resume")
+            result = reconcile_review_grounding(result, content)
             result = reconcile_availability_findings(result, confirmed_availability_wording(availability_value))
+            result = reconcile_resume_compression_findings(result, plan)
             result = reconcile_resume_structure_findings(
                 result, plan, validate_resume_content(
                     content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []],
@@ -712,6 +727,33 @@ Use pass with an empty issues array when there is no material issue."""
 
 
 ROLE_STRUCTURE_TYPES = {"missing_role_header", "role_order_mismatch", "omitted_role_expanded"}
+
+
+def _word_count_compression_finding(issue: dict, roles: list[dict]) -> bool:
+    if issue.get("type") not in {"evidence_mismatch", "generation_under_utilized", "requirement_omission"}:
+        return False
+    text = " ".join(str(issue.get(key) or "") for key in ("description", "evidence", "location", "recommended_action")).casefold()
+    matching_roles = [role for role in roles if any(
+        str(role.get(key) or "").casefold() in text
+        for key in ("role_marker", "employer_marker", "source_section") if role.get(key)
+    )]
+    heuristic = any(term in text for term in ("word", "sentence", "line", "proportion", "ratio", "entire source", "all source content"))
+    compression = any(term in text for term in ("concis", "compress", "condens", "too much", "entire source", "all source content"))
+    real_problem = any(term in text for term in (
+        "fabricat", "unsupported", "unselected", "omitted evidence", "wrong role", "wrong employer",
+        "misattribut", "irrelevant", "same fact", "same action", "same duty", "duplicate",
+    ))
+    return bool(matching_roles and all("max_bullets" in role and role["max_bullets"] is None for role in matching_roles) and heuristic and compression and not real_problem)
+
+
+def reconcile_resume_compression_findings(review: dict, plan: dict) -> dict:
+    """A null bullet ceiling cannot fail from word/line-count compression heuristics."""
+    roles = plan.get("roles") or []
+    for result in review.get("results") or []:
+        result["issues"] = [issue for issue in result.get("issues") or [] if not _word_count_compression_finding(issue, roles)]
+        result["status"] = "fail" if any(issue.get("blocks_release") for issue in result["issues"]) else "pass"
+    review["status"] = "fail" if any(result.get("status") == "fail" for result in review.get("results") or []) else "pass"
+    return review
 
 
 def _availability_omission_finding(issue: dict, confirmed_wording: str) -> bool:
