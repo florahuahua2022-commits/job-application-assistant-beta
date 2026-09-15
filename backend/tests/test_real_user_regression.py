@@ -55,8 +55,65 @@ PRODUCTION_SAVED_EXPERIENCES = json.dumps([{
     "responsibility": "User-edited wording.",
 }])
 
+PRODUCTION_NINE_EXPERIENCES = [{
+    "id": "EVA37A578823CE", "role_title": "Finance Administration Officer",
+    "organization": "Department of Communities - Disability Services, WA State Government",
+    "time_period_text": "February 2026 - August 2026", "responsibility": "Provided administrative support.",
+}, {
+    "id": "EV2572ECCB036E",
+    "role_title": "Assisted in prioritising competing tasks to support service delivery; used Dayforce within a WA Government environment. Processed journals and completed reconciliations.",
+    "organization": "Self-employed via Mable", "time_period_text": "August 2025 - January 2026", "responsibility": "",
+}, {
+    "id": "EV849245D0F4F5",
+    "role_title": "Provided individual support to independently sourced clients through Mable, including community participation, appointments and assistance with daily living.",
+    "organization": "My Support", "time_period_text": "August 2024 - August 2025", "responsibility": "",
+}, {
+    "id": "EVD886D211EFA3", "role_title": "Additional Australian experience",
+    "organization": "Sodex: Utility, . Woolworths: Cashier, May 2023 - November 2023.",
+    "time_period_text": "December 2023 - April 2024", "responsibility": "Casual work.",
+}, {
+    "id": "EV1CBFDD076607",
+    "role_title": "Sodex: Utility, December 2023 - April 2024. Woolworths: Cashier, May 2023 - November 2023.",
+    "organization": "Puma, Port Hedland: service station work, .", "time_period_text": "March 2023 - May 2023",
+    "responsibility": "Additional Australian experience.",
+}, {
+    "id": "EV2FAF7A3012FA", "role_title": "Executive Assistant to Board Member", "organization": "Avaintec",
+    "time_period_text": "November 2017 - January 2019", "responsibility": "Administrative support.",
+}, {
+    "id": "EV51BD90C637AE", "role_title": "Project Administration Officer",
+    "organization": "China Communications Construction Company - Kenya Branch",
+    "time_period_text": "January 2016 - August 2017", "responsibility": "Project support.",
+}, {
+    "id": "EV1BFA570A50FD", "role_title": "Project Administration Officer", "organization": "Chevron CDB Project",
+    "time_period_text": "August 2012 - December 2015", "responsibility": "Project support.",
+}, {
+    "id": "EV8F624C6303E4", "role_title": "Project Assistant", "organization": "Pratt & Whitney",
+    "time_period_text": "October 2007 - August 2012", "responsibility": "Project support.",
+}]
+
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_update_to_latest_rejects_resume_with_uncovered_experiences_without_replacing_snapshot(self):
+        with Session(self.engine) as session:
+            resume = Resume(title="Master Resume", source_text=PRODUCTION_MISSING_EXPERIENCES_SOURCE,
+                            experiences_json=PRODUCTION_SAVED_EXPERIENCES, ckb_json="[]")
+            application = JobApplication(
+                company="Curtin University", position_title="Fieldwork Administrative Support Officer",
+                job_description="Provide administrative support.", resume_snapshot_json='{"sentinel":"unchanged"}',
+            )
+            session.add_all([resume, application]); session.commit(); session.refresh(application)
+            application_id = application.id
+
+        response = self.client.put(f"/applications/{application_id}/resume", json={
+            "use_latest_master": True, "source_text": None, "expected_snapshot": '{"sentinel":"unchanged"}',
+        })
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "master_resume_experience_needs_review")
+        self.assertIn("Self-employed via Mable", str(response.json()["detail"]))
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(JobApplication, application_id).resume_snapshot_json, '{"sentinel":"unchanged"}')
+
     def test_missing_experience_coverage_uses_existing_409_detail_for_create_edit_scan_and_generation(self):
         created = self.client.post("/resumes", json={
             "title": "Master Resume", "source_text": PRODUCTION_MISSING_EXPERIENCES_SOURCE,
@@ -122,6 +179,20 @@ class RealUserRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["detail"]["code"], "master_resume_experience_needs_review")
         self.assertIn("Puma, Port Hedland", str(response.json()["detail"]))
+
+    def test_uploaded_experiences_persist_review_annotations(self):
+        source = "Work Experience\nProject Officer\nExample Agency\nFeb 2020 - Present\nPrepared reports.\nEducation"
+        with patch("app.main.extract_resume_text", return_value=source):
+            response = self.client.post(
+                "/resumes/upload", files={"file": ("resume.docx", b"document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+                data={"title": "Master Resume"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        with Session(self.engine) as session:
+            experience = json.loads(session.exec(select(Resume)).first().experiences_json)[0]
+        self.assertIs(experience["needs_review"], False)
+        self.assertEqual(experience["review_reasons"], [])
 
     def test_bennco_pasted_ad_persists_only_formal_criteria_in_job_model(self):
         raw_text = """Project Administrator
@@ -221,11 +292,48 @@ Education"""
             self.assertEqual(safe_resume.experiences_json, safe_experiences)
             self.assertEqual(safe_resume.ckb_json, '[{"safe":"unchanged"}]')
 
+        second_scan = self.client.post("/resumes/risk-scan")
+        self.assertEqual(second_scan.status_code, 200, second_scan.text)
+        self.assertEqual(second_scan.json(), scan.json())
+        with Session(self.engine) as session:
+            second_marked_json = session.exec(select(Resume).where(Resume.title != "Safe Resume")).first().experiences_json
+        self.assertEqual(second_marked_json, json.dumps([marked], ensure_ascii=False))
+
         blocked = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
 
         self.assertEqual(blocked.status_code, 409, blocked.text)
         self.assertEqual(blocked.json()["detail"]["code"], "master_resume_experience_needs_review")
         self.assertEqual(blocked.json()["detail"]["experiences"], flagged["experiences"])
+
+    def test_real_nine_experience_backfill_changes_only_review_annotations_and_is_idempotent(self):
+        original = json.loads(json.dumps(PRODUCTION_NINE_EXPERIENCES))
+        with Session(self.engine) as session:
+            session.add(Resume(
+                title="Master Resume", source_text=PRODUCTION_MISSING_EXPERIENCES_SOURCE,
+                experiences_json=json.dumps(original), ckb_json='[{"sentinel":"unchanged"}]',
+            ))
+            session.commit()
+
+        first = self.client.post("/resumes/risk-scan")
+        with Session(self.engine) as session:
+            after_first = json.loads(session.exec(select(Resume)).first().experiences_json)
+        second = self.client.post("/resumes/risk-scan")
+        with Session(self.engine) as session:
+            stored = session.exec(select(Resume)).first()
+            after_second = json.loads(stored.experiences_json)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(after_first, after_second)
+        self.assertEqual(
+            [{key: value for key, value in item.items() if key not in {"needs_review", "review_reasons"}} for item in after_second],
+            original,
+        )
+        self.assertEqual([item["needs_review"] for item in after_second], [False, True, True, False, False, False, False, False, False])
+        self.assertEqual(after_second[1]["review_reasons"], ["duty_shaped_role_title"])
+        self.assertEqual(after_second[2]["review_reasons"], ["duty_shaped_role_title"])
+        self.assertEqual(stored.ckb_json, '[{"sentinel":"unchanged"}]')
 
     def test_risky_resume_edit_returns_actionable_detail_without_changing_saved_resume(self):
         source = """Work Experience

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resumeSaveFailure, reviewReasonMessage, unlinkedReviewIssues } from "./resumeReview.ts";
+import { mergeResumeReviewIssues, resumeSaveFailure, reviewReasonMessage, unlinkedReviewIssues } from "./resumeReview.ts";
 
 test("review reason codes are translated for ordinary users", () => {
   assert.equal(
@@ -39,4 +39,16 @@ test("missing source experiences remain visible even when no editor card exists"
   };
 
   assert.deepEqual(unlinkedReviewIssues([missing]), [missing]);
+});
+
+test("page-load scan keeps uncovered experiences alongside persisted review flags", () => {
+  const persisted = [{ index: 2, id: "bad-title", role_title: "Provided support...", review_reasons: ["Title needs review."] }];
+  const uncovered = [{
+    index: 10, id: null, role_title: "Independent Support Worker", organization: "Self-employed via Mable",
+    time_period_text: "August 2025 - January 2026", source_excerpt: "Self-employed via Mable...",
+    review_reasons: ["This work experience appears in the Resume text but is missing from the structured experience list."],
+  }];
+
+  assert.deepEqual(mergeResumeReviewIssues(persisted, uncovered), [...persisted, ...uncovered]);
+  assert.deepEqual(mergeResumeReviewIssues(persisted, [...uncovered, persisted[0]]), [...persisted, ...uncovered]);
 });

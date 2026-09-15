@@ -1361,13 +1361,19 @@ def update_application_resume(
         resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
         if not resume or not resume.source_text.strip():
             raise HTTPException(409, "Save a usable Master Resume first.")
-        mismatches = master_resume_integrity_mismatches(resume)
-        if mismatches:
-            raise HTTPException(409, {
-                "code": "latest_master_resume_incomplete", "can_update": False,
-                "message": "The latest Master Resume still has structured employment fields that are not supported by its text: " + "; ".join(mismatches) + ". Correct the Master Resume before updating this application.",
-                "mismatches": mismatches,
-            })
+        integrity_issue = master_resume_integrity_issue(resume)
+        if integrity_issue:
+            review_detail = master_resume_review_detail(resume)
+            if review_detail:
+                raise HTTPException(409, review_detail)
+            mismatches = master_resume_integrity_mismatches(resume)
+            if mismatches:
+                raise HTTPException(409, {
+                    "code": "latest_master_resume_incomplete", "can_update": False,
+                    "message": "The latest Master Resume still has structured employment fields that are not supported by its text: " + "; ".join(mismatches) + ". Correct the Master Resume before updating this application.",
+                    "mismatches": mismatches,
+                })
+            raise HTTPException(409, integrity_issue)
         ckb, _ = get_or_refresh_current_ckb(session, resume, user_id)
         ckb_json = json.dumps(ckb, ensure_ascii=False)
     else:

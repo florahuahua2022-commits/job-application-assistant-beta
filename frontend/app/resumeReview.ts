@@ -34,6 +34,16 @@ export function reviewIssuesFromExperiences(experiences: any[]): ResumeReviewIss
   }] : []);
 }
 
+export function mergeResumeReviewIssues(persisted: ResumeReviewIssue[], scanned: ResumeReviewIssue[]) {
+  const seen = new Set<string>();
+  return [...persisted, ...scanned].filter((issue) => {
+    const key = issue.id || [issue.organization, issue.role_title, issue.time_period_text].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function unlinkedReviewIssues(issues: ResumeReviewIssue[]) {
   return issues.filter((issue) => Boolean(issue.source_excerpt));
 }

@@ -14,7 +14,7 @@ import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanP
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
 import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
 import { activeApplications, archivedApplications } from "./applicationArchive";
-import { ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, reviewIssuesFromExperiences, unlinkedReviewIssues } from "./resumeReview";
+import { mergeResumeReviewIssues, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, reviewIssuesFromExperiences, unlinkedReviewIssues } from "./resumeReview";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -124,6 +124,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [confirmedApplication, setConfirmedApplication] = useState<number | null>(null);
   const [experiences, setExperiences] = useState<Experience[]>([]);
   const [resumeReviewIssues, setResumeReviewIssues] = useState<ResumeReviewIssue[]>([]);
+  const [resumeScanIssues, setResumeScanIssues] = useState<ResumeReviewIssue[]>([]);
   const [resultPromptsShown, setResultPromptsShown] = useState<string[]>([]);
   const [contactGuess, setContactGuess] = useState<ContactGuess>({ full_name: "", phone: "", email: "" });
   const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
@@ -165,12 +166,20 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
 
   function clearAuthenticatedState() {
     setProfile(null); setResumes([]); setApplications([]); setDocuments([]);
+    setResumeScanIssues([]);
     setApplicationRequirements(null); setApplicationDecision(null); setReleaseChecklist(null);
     setRequirementsEditDraft(null); setSources([]); setSourcesLoadState("idle");
     setSourcesError(""); setSourceUploadId(null); sourcesRequestId.current += 1;
   }
 
   async function refresh() {
+    let scanned: { resume_id: number; experiences: ResumeReviewIssue[] }[] = [];
+    if (!applicationsPage) {
+      try {
+        const scanResponse = await authenticatedFetch(`${api}/resumes/risk-scan`, { method: "POST" });
+        if (scanResponse.ok) scanned = (await scanResponse.json()).resumes || [];
+      } catch { /* Resume loading still falls back to persisted review annotations. */ }
+    }
     const [profileResponse, resumeResponse, applicationResponse, backupResponse, selectionAccessResponse] = await Promise.all([
       authenticatedFetch(`${api}/profile`),
       authenticatedFetch(`${api}/resumes`),
@@ -179,7 +188,11 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       authenticatedFetch(`${api}/selection-criteria/access`),
     ]);
     if (profileResponse.ok) setProfile(await profileResponse.json());
-    if (resumeResponse.ok) setResumes(await resumeResponse.json());
+    if (resumeResponse.ok) {
+      const loaded = await resumeResponse.json();
+      setResumes(loaded);
+      setResumeScanIssues(scanned.find((item) => item.resume_id === loaded[0]?.id)?.experiences || []);
+    }
     if (applicationResponse.ok) setApplications(await applicationResponse.json());
     if (backupResponse.ok) setBackups(await backupResponse.json());
     if (selectionAccessResponse.ok) setSelectionAccess(await selectionAccessResponse.json());
@@ -229,9 +242,9 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     try {
       const loaded = JSON.parse(resumes[0].experiences_json || "[]");
       setExperiences(loaded);
-      setResumeReviewIssues(reviewIssuesFromExperiences(loaded));
+      setResumeReviewIssues(mergeResumeReviewIssues(reviewIssuesFromExperiences(loaded), resumeScanIssues));
     } catch { setExperiences([]); setResumeReviewIssues([]); }
-  }, [resumes]);
+  }, [resumes, resumeScanIssues]);
 
   useEffect(() => {
     if (!applicationsPage || selectedApplication || !applications.length) return;
