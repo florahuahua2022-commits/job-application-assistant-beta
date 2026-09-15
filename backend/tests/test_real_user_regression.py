@@ -101,6 +101,16 @@ Education"""
         self.assertEqual(scan.status_code, 200, scan.text)
         self.assertEqual(scan.json()["scanned_count"], 2)
         self.assertEqual(scan.json()["needs_review_count"], 1)
+        flagged = scan.json()["resumes"][0]
+        self.assertEqual(flagged["resume_id"], 1)
+        self.assertEqual(flagged["experiences"][0]["index"], 1)
+        self.assertEqual(
+            flagged["experiences"][0]["review_reasons"],
+            [
+                "The role title looks like a description of duties rather than a job title.",
+                "A possible job title immediately before this entry may have been left out.",
+            ],
+        )
         with Session(self.engine) as session:
             resume = session.exec(select(Resume).where(Resume.title != "Safe Resume")).first()
             marked = json.loads(resume.experiences_json)[0]
@@ -114,7 +124,43 @@ Education"""
         blocked = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
 
         self.assertEqual(blocked.status_code, 409, blocked.text)
-        self.assertIn("review", str(blocked.json()["detail"]).lower())
+        self.assertEqual(blocked.json()["detail"]["code"], "master_resume_experience_needs_review")
+        self.assertEqual(blocked.json()["detail"]["experiences"], flagged["experiences"])
+
+    def test_risky_resume_edit_returns_actionable_detail_without_changing_saved_resume(self):
+        source = """Work Experience
+Support Worker
+Provided individual support to clients through Mable, including appointments and assistance with daily living.
+Mable | Jan 2020 – Present
+Education"""
+        safe_source = "Work Experience\nProject Officer\nExample Agency\nFeb 2020 – Present\nPrepared reports and coordinated meetings."
+        safe_experience = {
+            "id": "saved", "role_title": "Project Officer", "organization": "Example Agency",
+            "responsibility": "Prepared reports and coordinated meetings.",
+            "source_text": "Project Officer\nExample Agency\nFeb 2020 – Present\nPrepared reports and coordinated meetings.",
+            "time_period_text": "Feb 2020 – Present",
+        }
+        with Session(self.engine) as session:
+            saved = Resume(title="Master Resume", source_text=safe_source,
+                           experiences_json=json.dumps([safe_experience]), ckb_json="[]")
+            session.add(saved); session.commit(); session.refresh(saved); resume_id = saved.id
+        before = self.client.get("/resumes").json()[0]
+
+        response = self.client.patch(f"/resumes/{resume_id}", json={
+            "source_text": source,
+            "experiences_json": json.dumps([{
+                "id": "draft-edit", "role_title": "Provided individual support to clients through Mable, including appointments and assistance with daily living.",
+                "organization": "Mable", "responsibility": "", "source_text": "Provided individual support to clients through Mable, including appointments and assistance with daily living.\nMable | Jan 2020 – Present",
+                "time_period_text": "Jan 2020 – Present",
+            }]),
+        })
+
+        self.assertEqual(response.status_code, 409, response.text)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "master_resume_experience_needs_review")
+        self.assertEqual(detail["experiences"][0]["id"], "draft-edit")
+        self.assertNotIn("duty_shaped_role_title", str(detail))
+        self.assertEqual(self.client.get("/resumes").json()[0], before)
 
     def test_production_shaped_historical_resume_requires_complete_reupload(self):
         roles = [

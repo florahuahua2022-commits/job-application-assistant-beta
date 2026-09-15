@@ -397,7 +397,8 @@ def prepare_application_decision(
     require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
-        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
+        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id)
+                            or master_resume_review_detail(master_resume) or integrity_issue)
     requirements = load_application_requirements(application.application_requirements_json, application.selection_criteria)
     job_model = json.loads(application.job_model_json or "{}")
     if job_model.get("requirement_mode") == "inferred_requirements":
@@ -495,6 +496,42 @@ def master_resume_integrity_issue(resume: Resume) -> str | None:
     return None
 
 
+_RESUME_REVIEW_MESSAGES = {
+    "duty_shaped_role_title": "The role title looks like a description of duties rather than a job title.",
+    "excluded_role_header": "A possible job title immediately before this entry may have been left out.",
+    "possible_merged_experiences": "This entry may contain more than one job and should be split into separate experiences.",
+}
+
+
+def resume_review_experiences(resume: Resume) -> list[dict]:
+    try:
+        experiences = json.loads(resume.experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [{
+        "index": index,
+        "id": item.get("id") or item.get("evidence_id"),
+        "role_title": item.get("role_title") or "",
+        "organization": item.get("organization") or "",
+        "review_reasons": [
+            _RESUME_REVIEW_MESSAGES.get(reason, "The extracted experience structure may be inaccurate.")
+            for reason in item.get("review_reasons", [])
+        ] or ["The extracted experience structure may be inaccurate."],
+    } for index, item in enumerate(experiences, start=1)
+      if isinstance(item, dict) and item.get("needs_review")]
+
+
+def master_resume_review_detail(resume: Resume) -> dict | None:
+    experiences = resume_review_experiences(resume)
+    if not experiences:
+        return None
+    return {
+        "code": "master_resume_experience_needs_review",
+        "message": "Review the highlighted Master Resume experiences before generating new documents.",
+        "experiences": experiences,
+    }
+
+
 def master_resume_integrity_mismatches(resume: Resume) -> list[str]:
     try:
         experiences = json.loads(resume.experiences_json or "[]")
@@ -582,9 +619,11 @@ def build_resume_content_check(
         if result:
             add(f"{prefix}.result", f"Experience {index} — result", result)
         if experience.get("needs_review"):
+            reasons = resume_review_experiences(resume)
+            reason = next((item for item in reasons if item["index"] == index), None)
             items.append(ResumeContentCheckItem(
                 field=f"{prefix}.parsing", label=f"Experience {index} — parsing", value=experience.get("role_title") or "",
-                status="review", message="The extracted work experience structure needs review.",
+                status="review", message=" ".join(reason["review_reasons"]) if reason else "The extracted work experience structure needs review.",
             ))
     matched_count = sum(item.status == "matched" for item in items)
     review_count = sum(item.status == "review" for item in items)
@@ -1190,7 +1229,8 @@ def scan_resume_risks(
             resume.updated_at = datetime.utcnow()
             session.add(resume)
         if risky:
-            flagged.append({"resume_id": resume.id, "experience_indexes": risky})
+            review_resume = resume.model_copy(update={"experiences_json": marked})
+            flagged.append({"resume_id": resume.id, "experiences": resume_review_experiences(review_resume)})
     session.commit()
     return {"scanned_count": len(resumes), "needs_review_count": len(flagged), "resumes": flagged}
 
@@ -1234,7 +1274,8 @@ def update_resume(
         if master_resume_integrity_issue(proposed):
             raise HTTPException(
                 409,
-                "The Master Resume changed after this editor loaded. Refresh the page and review the latest complete Resume before saving again.",
+                master_resume_review_detail(proposed)
+                or "The Master Resume changed after this editor loaded. Refresh the page and review the latest complete Resume before saving again.",
             )
         values["experiences_json"] = next_experiences_json
         values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
@@ -1539,7 +1580,8 @@ def get_application_decision(
     require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
-        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
+        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id)
+                            or master_resume_review_detail(master_resume) or integrity_issue)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     ckb, _ = application_ckb(session, application, master_resume, user_id)
     decision = json.loads(application.application_decision_json or "{}")
@@ -2944,7 +2986,8 @@ def generate_document(
     require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
     if integrity_issue:
-        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id) or integrity_issue)
+        raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id)
+                            or master_resume_review_detail(master_resume) or integrity_issue)
     application.company = expand_abbreviated_company(application.company, application.job_description)
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     used_experiences = "[]"

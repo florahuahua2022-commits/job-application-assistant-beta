@@ -14,13 +14,14 @@ import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanP
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
 import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
 import { activeApplications, archivedApplications } from "./applicationArchive";
+import { ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, reviewIssuesFromExperiences } from "./resumeReview";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
-type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean };
+type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean; needs_review?: boolean; review_reasons?: string[] };
 type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
 type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string; updated_at: string };
 type SelectionPlanItem = { criteria_id: string; criteria_text: string; allocated_word_limit: number; matched_evidence: string[]; match_type: string; coverage: string; evidence_status: "strong" | "transferable" | "weak" };
@@ -122,6 +123,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [adWarnings, setAdWarnings] = useState<string[]>([]);
   const [confirmedApplication, setConfirmedApplication] = useState<number | null>(null);
   const [experiences, setExperiences] = useState<Experience[]>([]);
+  const [resumeReviewIssues, setResumeReviewIssues] = useState<ResumeReviewIssue[]>([]);
   const [resultPromptsShown, setResultPromptsShown] = useState<string[]>([]);
   const [contactGuess, setContactGuess] = useState<ContactGuess>({ full_name: "", phone: "", email: "" });
   const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
@@ -224,7 +226,11 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
 
   useEffect(() => {
     if (!resumes[0]) return;
-    try { setExperiences(JSON.parse(resumes[0].experiences_json || "[]")); } catch { setExperiences([]); }
+    try {
+      const loaded = JSON.parse(resumes[0].experiences_json || "[]");
+      setExperiences(loaded);
+      setResumeReviewIssues(reviewIssuesFromExperiences(loaded));
+    } catch { setExperiences([]); setResumeReviewIssues([]); }
   }, [resumes]);
 
   useEffect(() => {
@@ -361,7 +367,16 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    setNotice(response.ok ? "Master Resume saved. You only need to update it when your experience changes." : "Could not save the Master Resume.");
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const failure = resumeSaveFailure(experiences, result.detail);
+      setExperiences(failure.experiences);
+      setResumeReviewIssues(failure.reviewIssues);
+      setNotice(failure.message);
+      document.getElementById("master-resume")?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+    setNotice("Master Resume saved. You only need to update it when your experience changes.");
     if (response.ok) {
       setApplicationDecision(null);
       setResumeContentCheck(null);
@@ -742,6 +757,15 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     return true;
   }
 
+  function handleResumeReviewError(result: any) {
+    const detail = result?.detail as ResumeReviewDetail | undefined;
+    if (detail?.code !== "master_resume_experience_needs_review") return false;
+    setResumeReviewIssues(detail.experiences || []);
+    setPackNotice(detail.message || "Review the highlighted Master Resume experiences before generating.");
+    document.getElementById("master-resume")?.scrollIntoView({ behavior: "smooth" });
+    return true;
+  }
+
   async function openApplication(id: number) {
     setSelectedApplication(id);
     setDocumentHistory([]);
@@ -897,6 +921,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     const created: GeneratedDocument[] = [];
     let generatingType: typeof packTypes[number] = "tailored_resume";
     let resumeSnapshotFailure = false;
+    let resumeReviewFailure = false;
     try {
       for (let index = 0; index < generationTypes.length; index += 1) {
         const documentType = generationTypes[index];
@@ -906,6 +931,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         const result = await response.json();
         if (!response.ok) {
           resumeSnapshotFailure = handleResumeSnapshotError(result);
+          resumeReviewFailure = handleResumeReviewError(result);
           if (result.detail?.document_id) {
             const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
             if (documentsResponse.ok) setDocuments(await documentsResponse.json());
@@ -946,7 +972,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       }
       const detail = error instanceof Error ? error.message : "The application pack could not be completed.";
       setGenerationFailure({ documentType: generatingType, message: detail });
-      if (!resumeSnapshotFailure) showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. Existing drafts are kept. A connection error alone does not confirm whether generation has finished.`);
+      if (!resumeSnapshotFailure && !resumeReviewFailure) showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. Existing drafts are kept. A connection error alone does not confirm whether generation has finished.`);
     } finally {
       setBusy(false);
     }
@@ -1489,7 +1515,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         </div>
       </details>
 
-      <details className="panel" open={!resumes.length}>
+      <details className="panel" id="master-resume" open={!resumes.length || resumeReviewIssues.length > 0}>
         <summary><span>1</span><div><strong>Master Resume</strong><small>{resumes.length ? "Saved — edit only when needed" : "Add your real experience once"}</small></div></summary>
         {resumes.length > 0 && <form onSubmit={uploadResume} className="formBody uploadBox">
           <div><strong>Upload your existing resume</strong><p className="helper">DOCX, PDF or TXT, up to 10 MB. Uploading replaces the current Master Resume.</p></div>
@@ -1503,8 +1529,9 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
           <label>Resume text<textarea name="source_text" defaultValue={resumes[0]?.source_text || ""} rows={14} required /></label>
           <div className="experienceBuilder">
             <div className="experienceHeader"><div><strong>Structured work experiences</strong><p className="helper">These facts help Selection Criteria use STAR naturally and prevent invented results.</p></div><button type="button" className="secondary" onClick={addExperience}>Add experience</button></div>
-            {experiences.map((experience, index) => <fieldset className="experienceCard" key={experience.id}><legend>Experience {index + 1}</legend>
+            {experiences.map((experience, index) => { const reviewIssue = resumeReviewIssues.find((issue) => issue.id === experience.id || issue.index === index + 1); return <fieldset className="experienceCard" key={experience.id}><legend>Experience {index + 1}</legend>
               <div className="compactForm">
+                {reviewIssue && <div className="requirementsWarnings full" role="alert"><strong>Check this work experience</strong><ul>{reviewIssue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}
                 <label>Role title<input value={experience.role_title} onChange={(event) => updateExperience(experience.id, "role_title", event.target.value)} required /></label>
                 {sourceDetailIsThin(experience.responsibility, experience.context, experience.no_result_data ? "" : experience.result) && <p className="requirementsWarnings full">{experience.role_title || "This experience"}: source detail may be limited. Describe your specific actions, systems/tools, volume or frequency, and an observed outcome if known. Include only facts you can support; numbers are optional.</p>}
                 <label>Organisation<input value={experience.organization} onChange={(event) => updateExperience(experience.id, "organization", event.target.value)} required /></label>
@@ -1516,7 +1543,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 <p className="metricPrompt full">Does this experience have specific numbers—volume, time saved, accuracy, financial value or satisfaction score? An approximate range is useful too, such as “about 20–30 per week”.</p>
                 <button type="button" className="dangerLink" onClick={() => setExperiences((current) => current.filter((item) => item.id !== experience.id))}>Remove experience</button>
               </div>
-            </fieldset>)}
+            </fieldset>})}
             {!experiences.length && <p className="helper">Add each relevant role as a separate experience. You can still keep the full resume text above.</p>}
           </div>
           {resumes[0] && <div className="resumeContentCheck">
