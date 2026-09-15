@@ -10,6 +10,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from zipfile import BadZipFile, ZipFile
 
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from pypdf import PdfReader
 from .ckb import EMPLOYMENT_PERIOD_PATTERN, stable_evidence_id
 
@@ -80,6 +82,14 @@ def _resume_line(value: str) -> str:
 
 _ROLE_HINT = re.compile(r"(?i)\b(?:officer|assistant|administrator|coordinator|manager|director|advisor|adviser|consultant|analyst|specialist|lead|engineer|accountant|clerk|secretary|executive)\b")
 _COMPANY_HINT = re.compile(r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|council|department|university|college|government|authority|agency|company|corporation|corp|project|branch)\b")
+_DUTY_START = re.compile(
+    r"(?i)^(?:assisted|provided|prepared|supported|managed|coordinated|maintained|processed|reviewed|delivered|developed|"
+    r"responsible|led|collated|served|handled|created|implemented|monitored|organised|organized)\b"
+)
+_NON_ROLE_HEADINGS = {
+    "work experience", "professional experience", "employment history", "career history",
+    "responsibilities", "key achievements", "achievements", "duties",
+}
 
 
 def _employment_identity(first: str, second: str) -> tuple[str, str]:
@@ -90,6 +100,48 @@ def _employment_identity(first: str, second: str) -> tuple[str, str]:
     if first_company != second_company:
         return (second, first) if first_company else (first, second)
     return first, second
+
+
+def _experience_review_reasons(source_text: str, item: dict) -> list[str]:
+    role = str(item.get("role_title") or "").strip()
+    responsibility = str(item.get("responsibility") or "").strip()
+    source_block = str(item.get("source_text") or "").strip()
+    sentence_shaped = len(role) > 80 and bool(re.search(r"[.;!?]|\b(?:and|including|within|through)\b", role, re.IGNORECASE))
+    duty_shaped = bool(_DUTY_START.match(role)) and (not responsibility or sentence_shaped)
+    reasons: list[str] = []
+    if duty_shaped or (not responsibility and sentence_shaped):
+        reasons.append("duty_shaped_role_title")
+
+    start = source_text.find(source_block) if source_block else -1
+    if reasons and start > 0:
+        previous = next((_resume_line(line) for line in reversed(source_text[:start].splitlines()) if _resume_line(line)), "")
+        if (previous and previous.casefold().rstrip(":") not in _NON_ROLE_HEADINGS
+                and len(previous) <= 120 and not _DUTY_START.match(previous)
+                and not EMPLOYMENT_PERIOD_PATTERN.search(previous) and not re.search(r"[.;!?]$", previous)):
+            reasons.append("excluded_role_header")
+
+    lines = [_resume_line(line) for line in source_block.splitlines() if _resume_line(line)]
+    date_index = next((index for index, line in enumerate(lines) if EMPLOYMENT_PERIOD_PATTERN.search(line)), -1)
+    possible_headers = [
+        line for line in lines[date_index + 1:]
+        if len(line) <= 100 and re.fullmatch(r"[^:.;!?]{2,60}:\s*[^.;!?]{2,60}", line)
+        and line.split(":", 1)[0].strip().casefold() not in _NON_ROLE_HEADINGS
+    ] if date_index >= 0 else []
+    if len(possible_headers) >= 2:
+        reasons.append("possible_merged_experiences")
+    return list(dict.fromkeys(reasons))
+
+
+def mark_resume_experience_risks(source_text: str, experiences: list[dict]) -> list[dict]:
+    """Annotate suspicious parsed identities without changing their source facts."""
+    marked = []
+    for item in experiences:
+        copy = dict(item)
+        reasons = _experience_review_reasons(source_text, copy)
+        copy["needs_review"] = bool(reasons)
+        copy["review_reasons"] = reasons
+        marked.append(copy)
+    return marked
 
 
 def normalise_resume_experiences(experiences_json: str) -> tuple[str, bool]:
@@ -224,7 +276,16 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
             "competency_tags": [],
             "fact_verification": "explicit",
         })
-    return experiences
+    return mark_resume_experience_risks(source_text, experiences)
+
+
+def _docx_blocks(document: Document):
+    for child in document.element.body.iterchildren():
+        if child.tag.endswith("}p"):
+            yield Paragraph(child, document).text
+        elif child.tag.endswith("}tbl"):
+            table = Table(child, document)
+            yield from (cell.text for row in table.rows for cell in row.cells)
 
 
 def extract_document_text(filename: str, payload: bytes, kind: str | None = None) -> tuple[str, str, list[str]]:
@@ -250,10 +311,7 @@ def extract_document_text(filename: str, payload: bytes, kind: str | None = None
         except BadZipFile as error:
             raise ValueError("The DOCX file is corrupt or incomplete.") from error
         document = Document(BytesIO(payload))
-        text = "\n".join([
-            *(paragraph.text for paragraph in document.paragraphs),
-            *(cell.text for table in document.tables for row in table.rows for cell in row.cells),
-        ])
+        text = "\n".join(_docx_blocks(document))
     elif suffix == "pdf":
         reader = PdfReader(BytesIO(payload), strict=False)
         page_count = len(reader.pages)

@@ -30,7 +30,7 @@ from .evidence_allocation import apply_selection_allocation, build_evidence_allo
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename, export_theme
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, normalise_resume_experiences, parse_job_ad_text
+from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
@@ -232,6 +232,18 @@ def serialise_ckb(source_text: str, experiences_json: str) -> str:
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(ckb, ensure_ascii=False)
+
+
+def mark_resume_risks_json(source_text: str, experiences_json: str) -> str:
+    try:
+        experiences = json.loads(experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        experiences = []
+    if not isinstance(experiences, list):
+        experiences = []
+    return json.dumps(mark_resume_experience_risks(
+        source_text, [item for item in experiences if isinstance(item, dict)]
+    ), ensure_ascii=False)
 
 
 def _normalise_experience_identity(value: object) -> str:
@@ -470,6 +482,8 @@ def master_resume_integrity_issue(resume: Resume) -> str | None:
         experiences = json.loads(resume.experiences_json or "[]")
     except (TypeError, json.JSONDecodeError):
         return "The Master Resume employment information is invalid. Re-upload the complete Resume before continuing."
+    if any(isinstance(item, dict) and item.get("needs_review") for item in experiences):
+        return "The Master Resume has work experience parsing that needs review before generating new documents."
     unsupported = [
         item for item in experiences if isinstance(item, dict) and (
             not _resume_value_is_supported(str(item.get("role_title") or ""), resume.source_text)
@@ -567,6 +581,11 @@ def build_resume_content_check(
         result = str(experience.get("result") or "")
         if result:
             add(f"{prefix}.result", f"Experience {index} — result", result)
+        if experience.get("needs_review"):
+            items.append(ResumeContentCheckItem(
+                field=f"{prefix}.parsing", label=f"Experience {index} — parsing", value=experience.get("role_title") or "",
+                status="review", message="The extracted work experience structure needs review.",
+            ))
     matched_count = sum(item.status == "matched" for item in items)
     review_count = sum(item.status == "review" for item in items)
     missing_count = sum(item.status == "missing" for item in items)
@@ -1104,6 +1123,7 @@ def create_resume(
     if not json.loads(canonical):
         canonical = json.dumps(extract_resume_experiences(values["source_text"]), ensure_ascii=False)
     values["experiences_json"], _ = _recover_explicit_experience_periods(values["source_text"], canonical)
+    values["experiences_json"] = mark_resume_risks_json(values["source_text"], values["experiences_json"])
     values["ckb_json"] = serialise_ckb(values["source_text"], values.get("experiences_json") or "[]")
     resume = Resume.model_validate(values)
     resume.user_id = user_id
@@ -1154,6 +1174,27 @@ def list_resumes(
     return session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).all()
 
 
+@app.post("/resumes/risk-scan")
+def scan_resume_risks(
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    resumes = session.exec(select_for_user(Resume, user_id)).all()
+    flagged = []
+    for resume in resumes:
+        marked = mark_resume_risks_json(resume.source_text, resume.experiences_json)
+        items = json.loads(marked)
+        risky = [index for index, item in enumerate(items, start=1) if item.get("needs_review")]
+        if risky and marked != resume.experiences_json:
+            resume.experiences_json = marked
+            resume.updated_at = datetime.utcnow()
+            session.add(resume)
+        if risky:
+            flagged.append({"resume_id": resume.id, "experience_indexes": risky})
+    session.commit()
+    return {"scanned_count": len(resumes), "needs_review_count": len(flagged), "resumes": flagged}
+
+
 @app.get("/resumes/{resume_id}/content-check", response_model=ResumeContentCheckResponse)
 def check_resume_content(
     resume_id: int,
@@ -1185,6 +1226,7 @@ def update_resume(
         if not json.loads(canonical):
             canonical = json.dumps(extract_resume_experiences(next_source_text), ensure_ascii=False)
         next_experiences_json, _ = _recover_explicit_experience_periods(next_source_text, canonical)
+        next_experiences_json = mark_resume_risks_json(next_source_text, next_experiences_json)
         proposed = resume.model_copy(update={
             "source_text": next_source_text,
             "experiences_json": next_experiences_json,

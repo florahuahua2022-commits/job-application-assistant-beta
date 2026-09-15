@@ -5,7 +5,7 @@ from io import BytesIO
 from docx import Document
 
 from app.ckb import build_career_knowledge_base
-from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, normalise_resume_experiences, parse_job_ad_text, parse_job_page
+from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, parse_job_page
 from app.job_model import build_job_model
 
 
@@ -70,6 +70,22 @@ class IngestTests(unittest.TestCase):
         self.assertIn("Alex Morgan", text)
         self.assertIn("Project coordination", text)
 
+    def test_docx_extraction_preserves_interleaved_paragraph_and_table_order(self):
+        document = Document()
+        document.add_paragraph("Before table")
+        table = document.add_table(rows=1, cols=2)
+        table.cell(0, 0).text = "Role title"
+        table.cell(0, 1).text = "Employer"
+        document.add_paragraph("After table")
+        stream = BytesIO()
+        document.save(stream)
+
+        text = extract_resume_text("resume.docx", stream.getvalue())
+
+        self.assertLess(text.index("Before table"), text.index("Role title"))
+        self.assertLess(text.index("Role title"), text.index("Employer"))
+        self.assertLess(text.index("Employer"), text.index("After table"))
+
     def test_rejects_unsupported_resume_file(self):
         with self.assertRaises(ValueError):
             extract_resume_text("resume.png", b"not a supported resume document" * 3)
@@ -127,6 +143,69 @@ Bachelor of Business"""
             extract_resume_experiences("Alex Morgan\nProfessional Summary\nExperienced administrator and coordinator."),
             [],
         )
+
+    def test_marks_duty_between_role_and_employer_date_for_review(self):
+        source = """Work Experience
+Finance Administration Officer
+Assisted in prioritising competing tasks to support service delivery; used Dayforce within a WA Government environment.
+WA Government | Feb 2026 – Aug 2026
+Education"""
+
+        result = extract_resume_experiences(source)
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["needs_review"])
+        self.assertIn("duty_shaped_role_title", result[0]["review_reasons"])
+        self.assertIn("excluded_role_header", result[0]["review_reasons"])
+
+    def test_marks_multiple_undated_roles_swallowed_by_dated_experience(self):
+        source = """Work Experience
+Puma, Port Hedland: service station work
+Mar 2023 – May 2023
+Served customers and handled payments.
+Core Color, Adelaide: ecommerce work
+Processed online orders.
+Amazon: ecommerce work
+Managed customer orders.
+Education"""
+
+        result = extract_resume_experiences(source)
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["needs_review"])
+        self.assertIn("possible_merged_experiences", result[0]["review_reasons"])
+
+    def test_long_job_title_is_not_marked_without_duty_sentence_signals(self):
+        source = """Work Experience
+Senior Executive Assistant to the Deputy Director General Strategy and Organisational Transformation
+Department of Example Services
+Feb 2020 – Present
+Coordinated executive briefings and maintained governance records.
+Education"""
+
+        result = extract_resume_experiences(source)
+
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0]["needs_review"])
+        self.assertEqual(result[0]["review_reasons"], [])
+
+    def test_historical_risk_scan_marks_only_metadata(self):
+        source = """Work Experience
+Support Worker
+Provided individual support to clients through Mable, including appointments and assistance with daily living.
+Mable | Jan 2020 – Present
+Education"""
+        original = {
+            "role_title": "Provided individual support to clients through Mable, including appointments and assistance with daily living.",
+            "organization": "Mable",
+            "responsibility": "",
+            "source_text": "Provided individual support to clients through Mable, including appointments and assistance with daily living.\nMable | Jan 2020 – Present",
+        }
+
+        marked = mark_resume_experience_risks(source, [original])
+
+        self.assertEqual({key: marked[0][key] for key in original}, original)
+        self.assertTrue(marked[0]["needs_review"])
 
     def test_employment_header_layout_matrix_preserves_identity_and_explicit_period(self):
         cases = {

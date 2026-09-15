@@ -65,6 +65,57 @@ Prepared reports, coordinated meetings and maintained accurate project records.
         self.assertEqual(experience["time_period_text"], "Feb 2020 – Present")
         self.assertEqual(evidence["time_period"], {"start": "Feb 2020", "end": "Present"})
 
+    def test_historical_resume_risk_scan_marks_without_rewriting_and_blocks_generation(self):
+        application_id = self.seed(required=("resume",))
+        source = """Work Experience
+Support Worker
+Provided individual support to clients through Mable, including appointments and assistance with daily living.
+Mable | Jan 2020 – Present
+Education"""
+        experience = {
+            "role_title": "Provided individual support to clients through Mable, including appointments and assistance with daily living.",
+            "organization": "Mable",
+            "responsibility": "",
+            "source_text": "Provided individual support to clients through Mable, including appointments and assistance with daily living.\nMable | Jan 2020 – Present",
+            "time_period_text": "Jan 2020 – Present",
+        }
+        with Session(self.engine) as session:
+            resume = session.exec(select(Resume)).first()
+            resume.source_text = source
+            resume.experiences_json = json.dumps([experience])
+            resume.ckb_json = '[{"sentinel":"unchanged"}]'
+            safe_experiences = json.dumps([{
+                "role_title": "Project Officer", "organization": "Example Agency",
+                "responsibility": "Prepared reports and coordinated meetings.",
+                "source_text": "Project Officer\nExample Agency\nFeb 2020 – Present\nPrepared reports and coordinated meetings.",
+                "time_period_text": "Feb 2020 – Present",
+            }])
+            safe_resume = Resume(
+                title="Safe Resume", source_text="Work Experience\n" + json.loads(safe_experiences)[0]["source_text"],
+                experiences_json=safe_experiences, ckb_json='[{"safe":"unchanged"}]',
+            )
+            session.add_all([resume, safe_resume]); session.commit()
+
+        scan = self.client.post("/resumes/risk-scan")
+
+        self.assertEqual(scan.status_code, 200, scan.text)
+        self.assertEqual(scan.json()["scanned_count"], 2)
+        self.assertEqual(scan.json()["needs_review_count"], 1)
+        with Session(self.engine) as session:
+            resume = session.exec(select(Resume).where(Resume.title != "Safe Resume")).first()
+            marked = json.loads(resume.experiences_json)[0]
+            self.assertEqual({key: marked[key] for key in experience}, experience)
+            self.assertTrue(marked["needs_review"])
+            self.assertEqual(resume.ckb_json, '[{"sentinel":"unchanged"}]')
+            safe_resume = session.exec(select(Resume).where(Resume.title == "Safe Resume")).first()
+            self.assertEqual(safe_resume.experiences_json, safe_experiences)
+            self.assertEqual(safe_resume.ckb_json, '[{"safe":"unchanged"}]')
+
+        blocked = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
+
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("review", str(blocked.json()["detail"]).lower())
+
     def test_production_shaped_historical_resume_requires_complete_reupload(self):
         roles = [
             ("Finance Administration Officer", "Department of Communities – Disability Services | WA State Government", "Feb 2026", "Aug 2026"),
