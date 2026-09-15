@@ -30,7 +30,7 @@ from .evidence_allocation import apply_selection_allocation, build_evidence_allo
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename, export_theme
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text
+from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
@@ -485,6 +485,8 @@ def master_resume_integrity_issue(resume: Resume) -> str | None:
         return "The Master Resume employment information is invalid. Re-upload the complete Resume before continuing."
     if any(isinstance(item, dict) and item.get("needs_review") for item in experiences):
         return "The Master Resume has work experience parsing that needs review before generating new documents."
+    if find_uncovered_experience_candidates(resume.source_text, experiences):
+        return "The Master Resume text contains work experiences that are missing from the structured experience list."
     unsupported = [
         item for item in experiences if isinstance(item, dict) and (
             not _resume_value_is_supported(str(item.get("role_title") or ""), resume.source_text)
@@ -500,6 +502,7 @@ _RESUME_REVIEW_MESSAGES = {
     "duty_shaped_role_title": "The role title looks like a description of duties rather than a job title.",
     "excluded_role_header": "A possible job title immediately before this entry may have been left out.",
     "possible_merged_experiences": "This entry may contain more than one job and should be split into separate experiences.",
+    "possible_missing_experience": "This work experience appears in the Resume text but is missing from the structured experience list.",
 }
 
 
@@ -508,7 +511,7 @@ def resume_review_experiences(resume: Resume) -> list[dict]:
         experiences = json.loads(resume.experiences_json or "[]")
     except (TypeError, json.JSONDecodeError):
         return []
-    return [{
+    flagged = [{
         "index": index,
         "id": item.get("id") or item.get("evidence_id"),
         "role_title": item.get("role_title") or "",
@@ -519,6 +522,17 @@ def resume_review_experiences(resume: Resume) -> list[dict]:
         ] or ["The extracted experience structure may be inaccurate."],
     } for index, item in enumerate(experiences, start=1)
       if isinstance(item, dict) and item.get("needs_review")]
+    for offset, item in enumerate(find_uncovered_experience_candidates(resume.source_text, experiences), start=1):
+        flagged.append({
+            "index": len(experiences) + offset,
+            "id": None,
+            "role_title": item["role_title"],
+            "organization": item["organization"],
+            "time_period_text": item["time_period_text"],
+            "source_excerpt": item["source_excerpt"],
+            "review_reasons": [_RESUME_REVIEW_MESSAGES["possible_missing_experience"]],
+        })
+    return flagged
 
 
 def master_resume_review_detail(resume: Resume) -> dict | None:
@@ -1166,6 +1180,8 @@ def create_resume(
     values["ckb_json"] = serialise_ckb(values["source_text"], values.get("experiences_json") or "[]")
     resume = Resume.model_validate(values)
     resume.user_id = user_id
+    if master_resume_integrity_issue(resume):
+        raise HTTPException(409, master_resume_review_detail(resume) or master_resume_integrity_issue(resume))
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
     return resume
@@ -1200,6 +1216,8 @@ async def upload_resume(
             experiences_json=experiences_json,
             ckb_json=ckb_json,
         )
+    if master_resume_integrity_issue(resume):
+        raise HTTPException(409, master_resume_review_detail(resume) or master_resume_integrity_issue(resume))
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
     return resume
@@ -1228,8 +1246,9 @@ def scan_resume_risks(
             resume.experiences_json = marked
             resume.updated_at = datetime.utcnow()
             session.add(resume)
-        if risky:
-            review_resume = resume.model_copy(update={"experiences_json": marked})
+        review_resume = resume.model_copy(update={"experiences_json": marked})
+        review_experiences = resume_review_experiences(review_resume)
+        if review_experiences:
             flagged.append({"resume_id": resume.id, "experiences": resume_review_experiences(review_resume)})
     session.commit()
     return {"scanned_count": len(resumes), "needs_review_count": len(flagged), "resumes": flagged}

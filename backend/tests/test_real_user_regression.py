@@ -22,7 +22,107 @@ from app.resume_plan import build_resume_curation_plan, validate_resume_content
 from app.ingest import parse_job_ad_text
 
 
+PRODUCTION_MISSING_EXPERIENCES_SOURCE = """WORK EXPERIENCE
+Department of Communities - Disability Services, WA State Government February 2026 - August 2026
+Finance Administration Officer
+Provided administrative and operational support to business units.
+Self-employed via Mable August 2025 - January 2026
+Independent Support Worker
+Managed client scheduling, appointments and direct communication independently, maintaining professional service records.
+Provided individual support with daily living and community participation according to each client's needs.
+My Support August 2024 - August 2025
+Support Worker
+Delivered individualised support with daily living, appointments and community access.
+Additional Australian employment: October 2022 - April 2024
+Service and casual roles
+Sodex: Utility, December 2023 - April 2024.
+Woolworths: Cashier, May 2023 - November 2023.
+Puma, Port Hedland: service station work, March 2023 - May 2023.
+SA Health: casual engagement, October 2022 (one month).
+Core Color, Adelaide May 2022 - September 2022
+E-commerce Operations
+Processed supplier orders through a CRM system.
+Self-employed - Amazon e-commerce business 2019 - 2022
+Self-employed E-commerce Operator
+Operated an independent Amazon e-commerce business.
+EDUCATION
+Bachelor of Arts"""
+
+PRODUCTION_SAVED_EXPERIENCES = json.dumps([{
+    "id": "finance", "role_title": "Finance Administration Officer",
+    "organization": "Department of Communities - Disability Services, WA State Government",
+    "time_period_text": "February 2026 - August 2026",
+    "responsibility": "User-edited wording.",
+}])
+
+
 class RealUserRegressionTests(unittest.TestCase):
+    def test_missing_experience_coverage_uses_existing_409_detail_for_create_edit_scan_and_generation(self):
+        created = self.client.post("/resumes", json={
+            "title": "Master Resume", "source_text": PRODUCTION_MISSING_EXPERIENCES_SOURCE,
+            "experiences_json": PRODUCTION_SAVED_EXPERIENCES,
+        })
+        self.assertEqual(created.status_code, 409, created.text)
+        self.assertEqual(created.json()["detail"]["code"], "master_resume_experience_needs_review")
+        self.assertIn("Self-employed via Mable", str(created.json()["detail"]))
+
+        safe_source = "Work Experience\nProject Officer Example Agency Feb 2020 - Present\nProject Officer\nPrepared reports."
+        with Session(self.engine) as session:
+            resume = Resume(title="Master Resume", source_text=safe_source, experiences_json=json.dumps([{
+                "id": "safe", "role_title": "Project Officer", "organization": "Example Agency",
+                "time_period_text": "Feb 2020 - Present", "responsibility": "Prepared reports.",
+            }]), ckb_json="[]")
+            application = JobApplication(
+                company="Example", position_title="Administrator", job_description="Administrative support.",
+                job_model_json='{"schema_version":"1.0","criteria":[],"limit_scope":"unspecified"}',
+                application_requirements_json=json.dumps(self.requirements("resume")),
+            )
+            session.add_all([resume, application]); session.commit(); session.refresh(resume); session.refresh(application)
+            resume_id, application_id = resume.id, application.id
+
+        before = self.client.get("/resumes").json()[0]
+        edited = self.client.patch(f"/resumes/{resume_id}", json={
+            "source_text": PRODUCTION_MISSING_EXPERIENCES_SOURCE,
+            "experiences_json": PRODUCTION_SAVED_EXPERIENCES,
+        })
+        self.assertEqual(edited.status_code, 409, edited.text)
+        self.assertEqual(self.client.get("/resumes").json()[0], before)
+
+        with Session(self.engine) as session:
+            resume = session.get(Resume, resume_id)
+            resume.source_text = PRODUCTION_MISSING_EXPERIENCES_SOURCE
+            resume.experiences_json = PRODUCTION_SAVED_EXPERIENCES
+            session.add(resume); session.commit()
+
+        scan = self.client.post("/resumes/risk-scan")
+        self.assertEqual(scan.status_code, 200, scan.text)
+        self.assertEqual(scan.json()["needs_review_count"], 1)
+        self.assertIn("Core Color, Adelaide", str(scan.json()["resumes"][0]))
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(Resume, resume_id).experiences_json, PRODUCTION_SAVED_EXPERIENCES)
+
+        generated = self.client.post("/generate", json={
+            "application_id": application_id, "document_type": "tailored_resume",
+        })
+        self.assertEqual(generated.status_code, 409, generated.text)
+        self.assertEqual(generated.json()["detail"]["code"], "master_resume_experience_needs_review")
+
+    def test_upload_blocks_when_real_resume_experiences_are_omitted_by_parsing(self):
+        document = Document()
+        for line in PRODUCTION_MISSING_EXPERIENCES_SOURCE.splitlines():
+            document.add_paragraph(line)
+        stream = BytesIO(); document.save(stream)
+
+        response = self.client.post(
+            "/resumes/upload",
+            files={"file": ("resume.docx", stream.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+            data={"title": "Master Resume"},
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "master_resume_experience_needs_review")
+        self.assertIn("Puma, Port Hedland", str(response.json()["detail"]))
+
     def test_bennco_pasted_ad_persists_only_formal_criteria_in_job_model(self):
         raw_text = """Project Administrator
 Bennco Group

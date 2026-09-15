@@ -14,7 +14,7 @@ import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanP
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
 import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
 import { activeApplications, archivedApplications } from "./applicationArchive";
-import { ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, reviewIssuesFromExperiences } from "./resumeReview";
+import { ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, reviewIssuesFromExperiences, unlinkedReviewIssues } from "./resumeReview";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -421,7 +421,14 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     try {
       const response = await authenticatedFetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || "Validation failed: the Resume file could not be read.");
+      if (!response.ok) {
+        const failure = resumeSaveFailure(experiences, result.detail);
+        setResumeReviewIssues(failure.reviewIssues);
+        setNotice(failure.message);
+        document.getElementById("master-resume")?.scrollIntoView({ behavior: "smooth" });
+        setResumeUploadState(uploadFailureState());
+        return;
+      }
       let extractedExperienceCount = 0;
       try { extractedExperienceCount = JSON.parse(result.experiences_json || "[]").length; } catch { extractedExperienceCount = 0; }
       const guess = detectContact(result.source_text || "");
@@ -1529,6 +1536,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
           <label>Resume text<textarea name="source_text" defaultValue={resumes[0]?.source_text || ""} rows={14} required /></label>
           <div className="experienceBuilder">
             <div className="experienceHeader"><div><strong>Structured work experiences</strong><p className="helper">These facts help Selection Criteria use STAR naturally and prevent invented results.</p></div><button type="button" className="secondary" onClick={addExperience}>Add experience</button></div>
+            {unlinkedReviewIssues(resumeReviewIssues).map((issue) => <div className="requirementsWarnings full" role="alert" key={`${issue.organization}-${issue.role_title}-${issue.time_period_text}`}><strong>Work experience missing from the structured list</strong><p>{[issue.organization, issue.role_title, issue.time_period_text].filter(Boolean).join(" · ")}</p><ul>{issue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>)}
             {experiences.map((experience, index) => { const reviewIssue = resumeReviewIssues.find((issue) => issue.id === experience.id || issue.index === index + 1); return <fieldset className="experienceCard" key={experience.id}><legend>Experience {index + 1}</legend>
               <div className="compactForm">
                 {reviewIssue && <div className="requirementsWarnings full" role="alert"><strong>Check this work experience</strong><ul>{reviewIssue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}

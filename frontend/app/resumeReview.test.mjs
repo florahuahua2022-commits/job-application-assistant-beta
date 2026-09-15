@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resumeSaveFailure, reviewReasonMessage } from "./resumeReview.ts";
+import { resumeSaveFailure, reviewReasonMessage, unlinkedReviewIssues } from "./resumeReview.ts";
 
 test("review reason codes are translated for ordinary users", () => {
   assert.equal(
@@ -28,4 +28,15 @@ test("a rejected save returns review details without replacing the user's draft"
   assert.strictEqual(result.experiences, draft);
   assert.equal(result.message, "Review the highlighted experience.");
   assert.equal(result.reviewIssues[0].id, "draft-edit");
+});
+
+test("missing source experiences remain visible even when no editor card exists", () => {
+  const missing = {
+    index: 6, id: null, role_title: "Independent Support Worker",
+    organization: "Self-employed via Mable", time_period_text: "August 2025 - January 2026",
+    source_excerpt: "Self-employed via Mable August 2025 - January 2026\nIndependent Support Worker",
+    review_reasons: ["This work experience appears in the Resume text but is missing from the structured experience list."],
+  };
+
+  assert.deepEqual(unlinkedReviewIssues([missing]), [missing]);
 });

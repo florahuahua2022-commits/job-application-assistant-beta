@@ -5,11 +5,81 @@ from io import BytesIO
 from docx import Document
 
 from app.ckb import build_career_knowledge_base
-from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, parse_job_page
+from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, parse_job_page
 from app.job_model import build_job_model
 
 
 class IngestTests(unittest.TestCase):
+    def test_finds_real_resume_roles_missing_from_nonempty_structured_experiences(self):
+        source = """WORK EXPERIENCE
+Department of Communities - Disability Services, WA State Government February 2026 - August 2026
+Finance Administration Officer
+Provided administrative and operational support to business units.
+
+Self-employed via Mable August 2025 - January 2026
+Independent Support Worker
+Managed client scheduling, appointments and direct communication independently, maintaining professional service records.
+Provided individual support with daily living and community participation according to each client's needs.
+My Support August 2024 - August 2025
+Support Worker
+Delivered individualised support with daily living, appointments and community access.
+
+Additional Australian employment: October 2022 - April 2024
+Service and casual roles
+Sodex: Utility, December 2023 - April 2024.
+Woolworths: Cashier, May 2023 - November 2023.
+Puma, Port Hedland: service station work, March 2023 - May 2023.
+SA Health: casual engagement, October 2022 (one month).
+
+Core Color, Adelaide May 2022 - September 2022
+E-commerce Operations
+Processed supplier orders through a CRM system.
+Self-employed - Amazon e-commerce business 2019 - 2022
+Self-employed E-commerce Operator
+Operated an independent Amazon e-commerce business.
+EDUCATION
+Bachelor of Arts"""
+        saved = [{
+            "role_title": "Finance Administration Officer",
+            "organization": "Department of Communities - Disability Services, WA State Government",
+            "time_period_text": "February 2026 - August 2026",
+            "responsibility": "User-edited wording that intentionally differs from the source text.",
+        }]
+
+        missing = find_uncovered_experience_candidates(source, saved)
+
+        identities = {(item["organization"], item["role_title"], item["time_period_text"]) for item in missing}
+        self.assertIn(("Self-employed via Mable", "Independent Support Worker", "August 2025 - January 2026"), identities)
+        self.assertIn(("My Support", "Support Worker", "August 2024 - August 2025"), identities)
+        self.assertIn(("Additional Australian employment", "Service and casual roles", "October 2022 - April 2024"), identities)
+        self.assertIn(("Core Color, Adelaide", "E-commerce Operations", "May 2022 - September 2022"), identities)
+        self.assertIn(("Self-employed - Amazon e-commerce business", "Self-employed E-commerce Operator", "2019 - 2022"), identities)
+        self.assertNotIn("Finance Administration Officer", {item["role_title"] for item in missing})
+
+    def test_coverage_ignores_user_edits_to_responsibility_wording(self):
+        source = """WORK EXPERIENCE
+Self-employed via Mable August 2025 - January 2026
+Independent Support Worker
+Managed client scheduling and direct client communication independently.
+EDUCATION"""
+        saved = [{
+            "role_title": "Independent Support Worker",
+            "organization": "Self-employed via Mable",
+            "time_period_text": "August 2025 - January 2026",
+            "responsibility": "Completely rewritten wording chosen by the user.",
+        }]
+
+        self.assertEqual(find_uncovered_experience_candidates(source, saved), [])
+
+    def test_coverage_does_not_treat_a_short_duty_line_as_a_missing_role(self):
+        source = """WORK EXPERIENCE
+Example Agency February 2020 - January 2022
+Customer service and scheduling
+Assisted clients and maintained records.
+EDUCATION"""
+
+        self.assertEqual(find_uncovered_experience_candidates(source, []), [])
+
     def test_ocr_reads_scanned_pdf_pages_and_filters_low_confidence_text(self):
         class FakeImage:
             def close(self):

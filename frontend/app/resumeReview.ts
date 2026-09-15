@@ -3,6 +3,8 @@ export type ResumeReviewIssue = {
   id?: string | null;
   role_title: string;
   organization?: string;
+  time_period_text?: string;
+  source_excerpt?: string;
   review_reasons: string[];
 };
 
@@ -30,6 +32,10 @@ export function reviewIssuesFromExperiences(experiences: any[]): ResumeReviewIss
     organization: experience.organization || "",
     review_reasons: (experience.review_reasons || []).map(reviewReasonMessage),
   }] : []);
+}
+
+export function unlinkedReviewIssues(issues: ResumeReviewIssue[]) {
+  return issues.filter((issue) => Boolean(issue.source_excerpt));
 }
 
 export function resumeSaveFailure<T>(experiences: T, detail: ResumeReviewDetail | string | undefined) {

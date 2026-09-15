@@ -80,7 +80,9 @@ def _resume_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-_ROLE_HINT = re.compile(r"(?i)\b(?:officer|assistant|administrator|coordinator|manager|director|advisor|adviser|consultant|analyst|specialist|lead|engineer|accountant|clerk|secretary|executive)\b")
+_ROLE_WORDS = r"officer|assistant|administrator|coordinator|manager|director|advisor|adviser|consultant|analyst|specialist|lead|engineer|accountant|clerk|secretary|executive"
+_ROLE_HINT = re.compile(fr"(?i)\b(?:{_ROLE_WORDS})\b")
+_COVERAGE_ROLE_HINT = re.compile(fr"(?i)\b(?:{_ROLE_WORDS}|worker|operator|operations|roles)\b")
 _COMPANY_HINT = re.compile(r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|council|department|university|college|government|authority|agency|company|corporation|corp|project|branch)\b")
 _DUTY_START = re.compile(
     r"(?i)^(?:assisted|provided|prepared|supported|managed|coordinated|maintained|processed|reviewed|delivered|developed|"
@@ -142,6 +144,70 @@ def mark_resume_experience_risks(source_text: str, experiences: list[dict]) -> l
         copy["review_reasons"] = reasons
         marked.append(copy)
     return marked
+
+
+def _experience_identity_value(value: object) -> str:
+    return re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
+
+
+def find_uncovered_experience_candidates(source_text: str, experiences: list[dict]) -> list[dict]:
+    """Find explicit employer/title/period headers absent from structured experiences."""
+    lines = [_resume_line(line) for line in source_text.splitlines()]
+    lines = [line for line in lines if line]
+    section_start = next((index + 1 for index, line in enumerate(lines) if re.fullmatch(
+        r"(?i)(?:professional |relevant )?(?:work |employment )?(?:experience|history)|employment history|career history",
+        line,
+    )), 0)
+    section_end = next((index for index in range(section_start, len(lines)) if re.fullmatch(
+        r"(?i)(?:education|qualifications|certifications?|skills|technical skills|referees?|references|volunteering)",
+        lines[index],
+    )), len(lines))
+    work_lines = lines[section_start:section_end]
+    saved_identities = {
+        (
+            _experience_identity_value(item.get("organization")),
+            _experience_identity_value(item.get("role_title")),
+            _experience_identity_value(item.get("time_period_text")),
+        )
+        for item in experiences if isinstance(item, dict)
+    }
+    candidates = []
+    seen = set()
+    for index, line in enumerate(work_lines):
+        match = EMPLOYMENT_PERIOD_PATTERN.search(line)
+        if not match or _DUTY_START.match(line):
+            continue
+        period = match.group(0).strip()
+        prefix = _resume_line(line[:match.start()]).strip(" ,:;|–—-")
+        if not prefix:
+            continue
+        organization, role = prefix, ""
+        role_on_next_line = False
+        if ":" in prefix:
+            organization, role = (_resume_line(part) for part in prefix.split(":", 1))
+        if not role and index + 1 < len(work_lines):
+            following = work_lines[index + 1]
+            if (len(following) <= 80 and _COVERAGE_ROLE_HINT.search(following)
+                    and not EMPLOYMENT_PERIOD_PATTERN.search(following)
+                    and not _DUTY_START.match(following) and not re.search(r"[.!?]$", following)):
+                role = following
+                role_on_next_line = True
+        organization = organization.rstrip(":")
+        role = role.strip(" ,:;|–—-")
+        if not organization or not role:
+            continue
+        identity = tuple(_experience_identity_value(value) for value in (organization, role, period))
+        if identity in saved_identities or identity in seen:
+            continue
+        seen.add(identity)
+        candidates.append({
+            "organization": organization,
+            "role_title": role,
+            "time_period_text": period,
+            "source_excerpt": "\n".join(work_lines[index:index + (2 if role_on_next_line else 1)]),
+            "review_reasons": ["possible_missing_experience"],
+        })
+    return candidates
 
 
 def normalise_resume_experiences(experiences_json: str) -> tuple[str, bool]:
