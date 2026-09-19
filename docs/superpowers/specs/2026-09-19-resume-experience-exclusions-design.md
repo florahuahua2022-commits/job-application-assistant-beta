@@ -66,7 +66,14 @@ For `exclude`, the server regenerates current candidates and rejects an ID that 
 
 ## Shared integrity behavior
 
-All integrity callers use the Resume's reconciled exclusions:
+All integrity callers use the Resume's reconciled exclusions. Save-time and downstream behavior are deliberately different:
+
+- Parsed entries with `needs_review` remain a save-time 409 because their structured fields are unsafe.
+- Unresolved uncovered candidates do not prevent create, upload, or edit/save. The Resume is persisted so the user can act on server-derived candidate IDs.
+- A successful save response exposes the unresolved count. The UI must say: `Saved. N work experiences still need your decision before documents can be generated.` It must not show the ordinary unconditional success message.
+- Update to latest, diagnosis, and generation remain blocked while any uncovered candidate is unresolved.
+
+The shared detection/reconciliation logic is used by:
 
 1. Master Resume creation
 2. Master Resume upload
@@ -114,7 +121,7 @@ Then confirm Curtin application id 41 is stale, run `Update to latest`, and gene
 
 ## Acceptance tests
 
-- Unresolved candidates block create, upload, edit/save, risk scan reporting, Update to latest, diagnosis, and generation.
+- Unresolved candidates are reported by create, upload, edit/save, and risk scan, but do not block persistence; they block Update to latest, diagnosis, and generation.
 - Excluded candidates remain discoverable/auditable but do not block any integrity caller.
 - Repeated scan and repeated exclude calls are idempotent with stable order and no duplicate records.
 - Restore makes the candidate unresolved and blocking again.
@@ -126,3 +133,4 @@ Then confirm Curtin application id 41 is stale, run `Update to latest`, and gene
 - Excluding after an application snapshot exists makes that snapshot stale; Update to latest is required before diagnosis or generation.
 - The existing duty-shaped-title and structured-field support checks are unchanged.
 - Real fixtures for Sodex, Puma, and Amazon can all be excluded while Mable, My Support, Department of Communities, unrelated experiences, and CKB facts remain unchanged.
+- A new upload containing unresolved candidates persists successfully, reports the unresolved count, allows those candidates to be excluded, and then permits Update to latest and generation. This test must prove the former save/409/exclusion deadlock is removed end to end.
