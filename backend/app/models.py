@@ -19,6 +19,7 @@ class Resume(SQLModel, table=True):
     source_text: str
     experiences_json: str = "[]"
     ckb_json: str = "[]"
+    experience_exclusions_json: str = "[]"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

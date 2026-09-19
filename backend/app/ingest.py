@@ -1,4 +1,5 @@
 import ipaddress
+import hashlib
 import json
 import re
 import socket
@@ -150,7 +151,14 @@ def _experience_identity_value(value: object) -> str:
     return re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
 
 
-def find_uncovered_experience_candidates(source_text: str, experiences: list[dict]) -> list[dict]:
+def experience_candidate_id(organization: object, role_title: object, time_period_text: object) -> str:
+    anchors = "|".join(_experience_identity_value(value) for value in (organization, role_title, time_period_text))
+    return "EX" + hashlib.sha1(anchors.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def find_uncovered_experience_candidates(
+    source_text: str, experiences: list[dict], exclusions: list[dict] | None = None,
+) -> list[dict]:
     """Find explicit employer/title/period headers absent from structured experiences."""
     lines = [_resume_line(line) for line in source_text.splitlines()]
     lines = [line for line in lines if line]
@@ -173,6 +181,10 @@ def find_uncovered_experience_candidates(source_text: str, experiences: list[dic
     }
     candidates = []
     seen = set()
+    excluded_ids = {
+        str(item.get("candidate_id") or "") for item in exclusions or []
+        if isinstance(item, dict) and item.get("status") == "excluded_by_user"
+    }
     for index, line in enumerate(work_lines):
         match = EMPLOYMENT_PERIOD_PATTERN.search(line)
         if not match or _DUTY_START.match(line):
@@ -200,7 +212,10 @@ def find_uncovered_experience_candidates(source_text: str, experiences: list[dic
         if identity in saved_identities or identity in seen:
             continue
         seen.add(identity)
+        candidate_id = experience_candidate_id(organization, role, period)
         candidates.append({
+            "candidate_id": candidate_id,
+            "status": "excluded_by_user" if candidate_id in excluded_ids else "unresolved",
             "organization": organization,
             "role_title": role,
             "time_period_text": period,
@@ -208,6 +223,22 @@ def find_uncovered_experience_candidates(source_text: str, experiences: list[dic
             "review_reasons": ["possible_missing_experience"],
         })
     return candidates
+
+
+def reconcile_experience_exclusions(source_text: str, experiences: list[dict], exclusions_json: str) -> str:
+    try:
+        exclusions = json.loads(exclusions_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        exclusions = []
+    if not isinstance(exclusions, list):
+        exclusions = []
+    saved = {
+        str(item.get("candidate_id") or ""): item for item in exclusions
+        if isinstance(item, dict) and item.get("status") == "excluded_by_user"
+    }
+    current = find_uncovered_experience_candidates(source_text, experiences, exclusions)
+    reconciled = [saved[item["candidate_id"]] for item in current if item["candidate_id"] in saved]
+    return json.dumps(reconciled, ensure_ascii=False)
 
 
 def normalise_resume_experiences(experiences_json: str) -> tuple[str, bool]:

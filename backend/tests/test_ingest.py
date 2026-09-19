@@ -5,11 +5,45 @@ from io import BytesIO
 from docx import Document
 
 from app.ckb import build_career_knowledge_base
-from app.ingest import _extract_scanned_pdf_text, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, parse_job_page
+from app.ingest import _extract_scanned_pdf_text, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, parse_job_page, reconcile_experience_exclusions
 from app.job_model import build_job_model
 
 
 class IngestTests(unittest.TestCase):
+    def test_candidate_id_changes_only_when_an_anchor_changes(self):
+        base = experience_candidate_id("Sodex", "Utility", "December 2023 - April 2024")
+
+        self.assertEqual(base, experience_candidate_id(" sodex ", "Utility", "December 2023 – April 2024"))
+        self.assertNotEqual(base, experience_candidate_id("Sodex WA", "Utility", "December 2023 - April 2024"))
+        self.assertNotEqual(base, experience_candidate_id("Sodex", "Cleaner", "December 2023 - April 2024"))
+        self.assertNotEqual(base, experience_candidate_id("Sodex", "Utility", "January 2024 - April 2024"))
+
+    def test_exclusion_survives_wording_edits_but_not_anchor_changes(self):
+        source = """Work Experience
+Sodex: Utility, December 2023 - April 2024.
+Moved freight and maintained work areas.
+Education"""
+        candidate = find_uncovered_experience_candidates(source, [])[0]
+        exclusions = [{**candidate, "status": "excluded_by_user"}]
+
+        edited = source.replace("Moved freight and maintained work areas.", "Completed revised warehouse duties.")
+        self.assertEqual(find_uncovered_experience_candidates(edited, [], exclusions)[0]["status"], "excluded_by_user")
+
+        changed = source.replace("Utility", "Cleaner")
+        changed_candidate = find_uncovered_experience_candidates(changed, [], exclusions)[0]
+        self.assertEqual(changed_candidate["status"], "unresolved")
+        self.assertNotEqual(changed_candidate["candidate_id"], candidate["candidate_id"])
+        self.assertEqual(reconcile_experience_exclusions(changed, [], json.dumps(exclusions)), "[]")
+
+    def test_covered_candidate_is_not_uncovered_and_malformed_exclusions_fail_closed(self):
+        source = """Work Experience
+Sodex: Utility, December 2023 - April 2024.
+Education"""
+        saved = [{"organization": "Sodex", "role_title": "Utility", "time_period_text": "December 2023 - April 2024"}]
+
+        self.assertEqual(find_uncovered_experience_candidates(source, saved), [])
+        self.assertEqual(reconcile_experience_exclusions(source, [], "not-json"), "[]")
+
     def test_finds_real_resume_roles_missing_from_nonempty_structured_experiences(self):
         source = """WORK EXPERIENCE
 Department of Communities - Disability Services, WA State Government February 2026 - August 2026
