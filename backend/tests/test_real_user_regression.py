@@ -93,6 +93,48 @@ PRODUCTION_NINE_EXPERIENCES = [{
 
 
 class RealUserRegressionTests(unittest.TestCase):
+    def test_exclusion_api_is_validated_idempotent_and_reversible(self):
+        source = """WORK EXPERIENCE
+Example Agency January 2020 - Present
+Project Officer
+Prepared reports and coordinated meetings.
+Sodex: Utility, December 2023 - April 2024.
+EDUCATION"""
+        experiences = json.dumps([{
+            "id": "saved", "role_title": "Project Officer", "organization": "Example Agency",
+            "time_period_text": "January 2020 - Present", "responsibility": "Prepared reports and coordinated meetings.",
+        }])
+        with Session(self.engine) as session:
+            resume = Resume(title="Master Resume", source_text=source, experiences_json=experiences, ckb_json='[{"sentinel":true}]')
+            session.add(resume); session.commit(); session.refresh(resume); resume_id = resume.id
+
+        scan = self.client.post("/resumes/risk-scan")
+        candidate = scan.json()["resumes"][0]["experiences"][0]
+        self.assertEqual(candidate["status"], "unresolved")
+        before = self.client.get("/resumes").json()[0]
+
+        rejected = self.client.patch(f"/resumes/{resume_id}/experience-exclusions", json={"candidate_id": "EXUNKNOWN", "action": "exclude"})
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+
+        payload = {"candidate_id": candidate["candidate_id"], "action": "exclude"}
+        first = self.client.patch(f"/resumes/{resume_id}/experience-exclusions", json=payload)
+        second = self.client.patch(f"/resumes/{resume_id}/experience-exclusions", json=payload)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["exclusions"], second.json()["exclusions"])
+        self.assertEqual(first.json()["candidates"][0]["status"], "excluded_by_user")
+
+        after = self.client.get("/resumes").json()[0]
+        self.assertEqual(after["source_text"], before["source_text"])
+        self.assertEqual(after["experiences_json"], before["experiences_json"])
+        self.assertEqual(after["ckb_json"], before["ckb_json"])
+        self.assertEqual(self.client.post("/resumes/risk-scan").json()["needs_review_count"], 0)
+
+        restored = self.client.patch(f"/resumes/{resume_id}/experience-exclusions", json={**payload, "action": "restore"})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["exclusions"], [])
+        self.assertEqual(restored.json()["candidates"][0]["status"], "unresolved")
+
     def test_update_to_latest_rejects_resume_with_uncovered_experiences_without_replacing_snapshot(self):
         with Session(self.engine) as session:
             resume = Resume(title="Master Resume", source_text=PRODUCTION_MISSING_EXPERIENCES_SOURCE,

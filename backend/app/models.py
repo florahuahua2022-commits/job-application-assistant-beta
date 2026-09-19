@@ -215,6 +215,11 @@ class ResumeUpdate(SQLModel):
     experiences_json: str | None = None
 
 
+class ExperienceExclusionUpdate(SQLModel):
+    candidate_id: str
+    action: Literal["exclude", "restore"]
+
+
 class ApplicationResumeUpdate(SQLModel):
     use_latest_master: bool = False
     source_text: str | None = Field(default=None, max_length=200000)

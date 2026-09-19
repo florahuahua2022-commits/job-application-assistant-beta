@@ -30,10 +30,10 @@ from .evidence_allocation import apply_selection_allocation, build_evidence_allo
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename, export_theme
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text
+from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -244,6 +244,14 @@ def mark_resume_risks_json(source_text: str, experiences_json: str) -> str:
     return json.dumps(mark_resume_experience_risks(
         source_text, [item for item in experiences if isinstance(item, dict)]
     ), ensure_ascii=False)
+
+
+def resume_exclusions(resume: Resume) -> list[dict]:
+    try:
+        exclusions = json.loads(resume.experience_exclusions_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [item for item in exclusions if isinstance(item, dict)] if isinstance(exclusions, list) else []
 
 
 def _normalise_experience_identity(value: object) -> str:
@@ -485,7 +493,9 @@ def master_resume_integrity_issue(resume: Resume) -> str | None:
         return "The Master Resume employment information is invalid. Re-upload the complete Resume before continuing."
     if any(isinstance(item, dict) and item.get("needs_review") for item in experiences):
         return "The Master Resume has work experience parsing that needs review before generating new documents."
-    if find_uncovered_experience_candidates(resume.source_text, experiences):
+    if any(item["status"] == "unresolved" for item in find_uncovered_experience_candidates(
+        resume.source_text, experiences, resume_exclusions(resume)
+    )):
         return "The Master Resume text contains work experiences that are missing from the structured experience list."
     unsupported = [
         item for item in experiences if isinstance(item, dict) and (
@@ -522,7 +532,8 @@ def resume_review_experiences(resume: Resume) -> list[dict]:
         ] or ["The extracted experience structure may be inaccurate."],
     } for index, item in enumerate(experiences, start=1)
       if isinstance(item, dict) and item.get("needs_review")]
-    for offset, item in enumerate(find_uncovered_experience_candidates(resume.source_text, experiences), start=1):
+    uncovered = find_uncovered_experience_candidates(resume.source_text, experiences, resume_exclusions(resume))
+    for offset, item in enumerate((item for item in uncovered if item["status"] == "unresolved"), start=1):
         flagged.append({
             "index": len(experiences) + offset,
             "id": None,
@@ -530,6 +541,8 @@ def resume_review_experiences(resume: Resume) -> list[dict]:
             "organization": item["organization"],
             "time_period_text": item["time_period_text"],
             "source_excerpt": item["source_excerpt"],
+            "candidate_id": item["candidate_id"],
+            "status": item["status"],
             "review_reasons": [_RESUME_REVIEW_MESSAGES["possible_missing_experience"]],
         })
     return flagged
@@ -1248,10 +1261,52 @@ def scan_resume_risks(
             session.add(resume)
         review_resume = resume.model_copy(update={"experiences_json": marked})
         review_experiences = resume_review_experiences(review_resume)
-        if review_experiences:
-            flagged.append({"resume_id": resume.id, "experiences": resume_review_experiences(review_resume)})
+        excluded = [item for item in find_uncovered_experience_candidates(
+            resume.source_text, items, resume_exclusions(resume)
+        ) if item["status"] == "excluded_by_user"]
+        if review_experiences or excluded:
+            flagged.append({"resume_id": resume.id, "experiences": review_experiences, "excluded_experiences": excluded})
     session.commit()
-    return {"scanned_count": len(resumes), "needs_review_count": len(flagged), "resumes": flagged}
+    return {"scanned_count": len(resumes), "needs_review_count": sum(bool(item["experiences"]) for item in flagged), "resumes": flagged}
+
+
+@app.patch("/resumes/{resume_id}/experience-exclusions")
+def update_resume_exclusion(
+    resume_id: int,
+    payload: ExperienceExclusionUpdate,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    resume = get_for_user(session, Resume, resume_id, user_id)
+    if not resume:
+        raise HTTPException(404, "Resume not found.")
+    try:
+        experiences = json.loads(resume.experiences_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        experiences = []
+    exclusions = resume_exclusions(resume)
+    candidates = find_uncovered_experience_candidates(resume.source_text, experiences, exclusions)
+    matching = next((item for item in candidates if item["candidate_id"] == payload.candidate_id), None)
+    if payload.action == "exclude":
+        already = next((item for item in exclusions if item.get("candidate_id") == payload.candidate_id), None)
+        if not matching and not already:
+            raise HTTPException(422, "This experience is no longer an unresolved candidate. Refresh and try again.")
+        if not already:
+            exclusions.append({**matching, "status": "excluded_by_user", "excluded_at": datetime.utcnow().isoformat()})
+    else:
+        exclusions = [item for item in exclusions if item.get("candidate_id") != payload.candidate_id]
+    reconciled = reconcile_experience_exclusions(resume.source_text, experiences, json.dumps(exclusions, ensure_ascii=False))
+    if reconciled != resume.experience_exclusions_json:
+        resume.experience_exclusions_json = reconciled
+        resume.updated_at = datetime.utcnow()
+        session.add(resume); session.commit(); session.refresh(resume)
+        invalidate_evidence_matches(session, user_id)
+    current_exclusions = resume_exclusions(resume)
+    return {
+        "resume": resume,
+        "exclusions": current_exclusions,
+        "candidates": find_uncovered_experience_candidates(resume.source_text, experiences, current_exclusions),
+    }
 
 
 @app.get("/resumes/{resume_id}/content-check", response_model=ResumeContentCheckResponse)
