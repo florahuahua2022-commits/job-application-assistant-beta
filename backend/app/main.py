@@ -125,6 +125,7 @@ def resume_snapshot(resume: Resume, ckb_json: str | None = None) -> dict:
     return {
         "resume_id": resume.id, "title": resume.title, "source_text": resume.source_text,
         "experiences_json": resume.experiences_json, "ckb_json": ckb_json if ckb_json is not None else resume.ckb_json,
+        "experience_exclusions_json": resume.experience_exclusions_json,
     }
 
 
@@ -158,7 +159,8 @@ def application_master_resume(
         if auto_update_pristine and latest and not has_documents and not has_diagnosis and (
             snapshot.get("source_text") != latest.source_text
             or snapshot.get("experiences_json", "[]") != latest.experiences_json
-        ) and not master_resume_integrity_issue(latest):
+        ) and snapshot.get("experience_exclusions_json", "[]") == latest.experience_exclusions_json \
+                and not master_resume_integrity_issue(latest):
             apply_resume_snapshot(application, latest, serialise_ckb(latest.source_text, latest.experiences_json))
             session.add(application); session.commit()
             snapshot = json.loads(application.resume_snapshot_json)
@@ -166,6 +168,7 @@ def application_master_resume(
             id=snapshot.get("resume_id"), title=snapshot.get("title") or "Master Resume",
             source_text=snapshot["source_text"], experiences_json=snapshot.get("experiences_json") or "[]",
             ckb_json=snapshot.get("ckb_json") or "[]",
+            experience_exclusions_json=snapshot.get("experience_exclusions_json") or "[]",
         )
     if application.resume_snapshot_json not in {"", "{}", None}:
         return None
@@ -585,7 +588,9 @@ def stale_resume_snapshot_detail(session: Session, application: JobApplication, 
         snapshot = {}
     if not snapshot.get("source_text"):
         return None
-    if snapshot.get("source_text") == latest.source_text and snapshot.get("experiences_json", "[]") == latest.experiences_json:
+    if (snapshot.get("source_text") == latest.source_text
+            and snapshot.get("experiences_json", "[]") == latest.experiences_json
+            and snapshot.get("experience_exclusions_json", "[]") == latest.experience_exclusions_json):
         return None
     mismatches = master_resume_integrity_mismatches(latest)
     if mismatches:

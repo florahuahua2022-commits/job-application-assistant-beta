@@ -135,6 +135,45 @@ EDUCATION"""
         self.assertEqual(restored.json()["exclusions"], [])
         self.assertEqual(restored.json()["candidates"][0]["status"], "unresolved")
 
+    def test_excluding_after_application_snapshot_requires_update_to_latest(self):
+        source = """WORK EXPERIENCE
+Example Agency January 2020 - Present
+Project Officer
+Prepared reports and coordinated meetings.
+Sodex: Utility, December 2023 - April 2024.
+EDUCATION"""
+        experiences = json.dumps([{
+            "id": "saved", "role_title": "Project Officer", "organization": "Example Agency",
+            "time_period_text": "January 2020 - Present", "responsibility": "Prepared reports and coordinated meetings.",
+        }])
+        old_snapshot = json.dumps({
+            "resume_id": 1, "title": "Master Resume", "source_text": source,
+            "experiences_json": experiences, "ckb_json": "[]", "experience_exclusions_json": "[]",
+        })
+        with Session(self.engine) as session:
+            resume = Resume(title="Master Resume", source_text=source, experiences_json=experiences, ckb_json="[]")
+            application = JobApplication(company="Curtin University", position_title="Fieldwork Administrative Support Officer",
+                                         job_description="Provide administrative support.", resume_snapshot_json=old_snapshot)
+            session.add_all([resume, application]); session.commit(); session.refresh(resume); session.refresh(application)
+            resume_id, application_id = resume.id, application.id
+
+        candidate = self.client.post("/resumes/risk-scan").json()["resumes"][0]["experiences"][0]
+        excluded = self.client.patch(f"/resumes/{resume_id}/experience-exclusions", json={
+            "candidate_id": candidate["candidate_id"], "action": "exclude",
+        })
+        self.assertEqual(excluded.status_code, 200, excluded.text)
+
+        blocked = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.json()["detail"]["code"], "application_resume_snapshot_outdated")
+
+        updated = self.client.put(f"/applications/{application_id}/resume", json={
+            "use_latest_master": True, "source_text": None, "expected_snapshot": old_snapshot,
+        })
+        self.assertEqual(updated.status_code, 200, updated.text)
+        snapshot = json.loads(updated.json()["resume_snapshot_json"])
+        self.assertEqual(json.loads(snapshot["experience_exclusions_json"])[0]["candidate_id"], candidate["candidate_id"])
+
     def test_update_to_latest_rejects_resume_with_uncovered_experiences_without_replacing_snapshot(self):
         with Session(self.engine) as session:
             resume = Resume(title="Master Resume", source_text=PRODUCTION_MISSING_EXPERIENCES_SOURCE,
