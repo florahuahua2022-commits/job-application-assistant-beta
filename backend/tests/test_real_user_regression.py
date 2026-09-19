@@ -135,6 +135,47 @@ EDUCATION"""
         self.assertEqual(restored.json()["exclusions"], [])
         self.assertEqual(restored.json()["candidates"][0]["status"], "unresolved")
 
+    def test_real_sodex_puma_amazon_candidates_can_all_be_excluded_without_rewriting_resume(self):
+        source = """WORK EXPERIENCE
+Example Agency January 2020 - Present
+Project Officer
+Prepared reports and coordinated meetings.
+Sodex: Utility, December 2023 - April 2024.
+Puma, Port Hedland: service station work, March 2023 - May 2023.
+Self-employed - Amazon e-commerce business 2019 - 2022
+Self-employed E-commerce Operator
+Operated an independent Amazon e-commerce business.
+EDUCATION"""
+        experiences = json.dumps([{
+            "id": "saved", "role_title": "Project Officer", "organization": "Example Agency",
+            "time_period_text": "January 2020 - Present", "responsibility": "Prepared reports and coordinated meetings.",
+        }])
+        with Session(self.engine) as session:
+            resume = Resume(title="Master Resume", source_text=source, experiences_json=experiences, ckb_json='[{"sentinel":true}]')
+            session.add(resume); session.commit(); session.refresh(resume); resume_id = resume.id
+
+        scan = self.client.post("/resumes/risk-scan").json()
+        candidates = scan["resumes"][0]["experiences"]
+        self.assertEqual(
+            {(item["organization"], item["role_title"], item["time_period_text"]) for item in candidates},
+            {
+                ("Sodex", "Utility", "December 2023 - April 2024"),
+                ("Puma, Port Hedland", "service station work", "March 2023 - May 2023"),
+                ("Self-employed - Amazon e-commerce business", "Self-employed E-commerce Operator", "2019 - 2022"),
+            },
+        )
+        for item in candidates:
+            response = self.client.patch(f"/resumes/{resume_id}/experience-exclusions", json={
+                "candidate_id": item["candidate_id"], "action": "exclude",
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+
+        self.assertEqual(self.client.post("/resumes/risk-scan").json()["needs_review_count"], 0)
+        with Session(self.engine) as session:
+            stored = session.get(Resume, resume_id)
+            self.assertEqual((stored.source_text, stored.experiences_json, stored.ckb_json), (source, experiences, '[{"sentinel":true}]'))
+            self.assertIsNone(master_resume_integrity_issue(stored))
+
     def test_excluding_after_application_snapshot_requires_update_to_latest(self):
         source = """WORK EXPERIENCE
 Example Agency January 2020 - Present
@@ -195,14 +236,13 @@ EDUCATION"""
         with Session(self.engine) as session:
             self.assertEqual(session.get(JobApplication, application_id).resume_snapshot_json, '{"sentinel":"unchanged"}')
 
-    def test_missing_experience_coverage_uses_existing_409_detail_for_create_edit_scan_and_generation(self):
+    def test_missing_experience_coverage_saves_but_still_blocks_scan_and_generation(self):
         created = self.client.post("/resumes", json={
             "title": "Master Resume", "source_text": PRODUCTION_MISSING_EXPERIENCES_SOURCE,
             "experiences_json": PRODUCTION_SAVED_EXPERIENCES,
         })
-        self.assertEqual(created.status_code, 409, created.text)
-        self.assertEqual(created.json()["detail"]["code"], "master_resume_experience_needs_review")
-        self.assertIn("Self-employed via Mable", str(created.json()["detail"]))
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertGreater(created.json()["unresolved_experience_count"], 0)
 
         safe_source = "Work Experience\nProject Officer Example Agency Feb 2020 - Present\nProject Officer\nPrepared reports."
         with Session(self.engine) as session:
@@ -223,8 +263,8 @@ EDUCATION"""
             "source_text": PRODUCTION_MISSING_EXPERIENCES_SOURCE,
             "experiences_json": PRODUCTION_SAVED_EXPERIENCES,
         })
-        self.assertEqual(edited.status_code, 409, edited.text)
-        self.assertEqual(self.client.get("/resumes").json()[0], before)
+        self.assertEqual(edited.status_code, 200, edited.text)
+        self.assertGreater(edited.json()["unresolved_experience_count"], 0)
 
         with Session(self.engine) as session:
             resume = session.get(Resume, resume_id)
@@ -234,8 +274,8 @@ EDUCATION"""
 
         scan = self.client.post("/resumes/risk-scan")
         self.assertEqual(scan.status_code, 200, scan.text)
-        self.assertEqual(scan.json()["needs_review_count"], 1)
-        self.assertIn("Core Color, Adelaide", str(scan.json()["resumes"][0]))
+        self.assertGreaterEqual(scan.json()["needs_review_count"], 1)
+        self.assertIn("Core Color, Adelaide", str(scan.json()["resumes"]))
         with Session(self.engine) as session:
             self.assertEqual(session.get(Resume, resume_id).experiences_json, PRODUCTION_SAVED_EXPERIENCES)
 
@@ -245,21 +285,77 @@ EDUCATION"""
         self.assertEqual(generated.status_code, 409, generated.text)
         self.assertEqual(generated.json()["detail"]["code"], "master_resume_experience_needs_review")
 
-    def test_upload_blocks_when_real_resume_experiences_are_omitted_by_parsing(self):
-        document = Document()
-        for line in PRODUCTION_MISSING_EXPERIENCES_SOURCE.splitlines():
-            document.add_paragraph(line)
-        stream = BytesIO(); document.save(stream)
+    def test_upload_saves_when_real_resume_experiences_are_omitted_by_parsing(self):
+        parsed = json.loads(PRODUCTION_SAVED_EXPERIENCES)
+        with patch("app.main.extract_resume_text", return_value=PRODUCTION_MISSING_EXPERIENCES_SOURCE), patch(
+            "app.main.extract_resume_experiences", return_value=parsed,
+        ):
+            response = self.client.post(
+                "/resumes/upload",
+                files={"file": ("resume.docx", b"document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+                data={"title": "Master Resume"},
+            )
 
-        response = self.client.post(
-            "/resumes/upload",
-            files={"file": ("resume.docx", stream.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
-            data={"title": "Master Resume"},
-        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertGreater(response.json()["unresolved_experience_count"], 0)
 
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["detail"]["code"], "master_resume_experience_needs_review")
-        self.assertIn("Puma, Port Hedland", str(response.json()["detail"]))
+    def test_upload_unresolved_then_exclude_allows_update_and_generation(self):
+        application_id = self.seed(required=("resume",))
+        source = """WORK EXPERIENCE
+Example Agency January 2020 - Present
+Project Officer
+Prepared reports and coordinated meetings.
+Sodex: Utility, December 2023 - April 2024.
+EDUCATION"""
+        parsed = [{
+            "id": "saved", "role_title": "Project Officer", "organization": "Example Agency",
+            "time_period_text": "January 2020 - Present", "responsibility": "Prepared reports and coordinated meetings.",
+        }]
+        with patch("app.main.extract_resume_text", return_value=source), patch("app.main.extract_resume_experiences", return_value=parsed):
+            uploaded = self.client.post("/resumes/upload", files={"file": ("resume.docx", b"document")}, data={"title": "Master Resume"})
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        self.assertEqual(uploaded.json()["unresolved_experience_count"], 1)
+
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, application_id)
+            old_snapshot = application.resume_snapshot_json
+        blocked_update = self.client.put(f"/applications/{application_id}/resume", json={
+            "use_latest_master": True, "source_text": None, "expected_snapshot": old_snapshot,
+        })
+        self.assertEqual(blocked_update.status_code, 409, blocked_update.text)
+
+        issue = self.client.post("/resumes/risk-scan").json()["resumes"][0]["experiences"][0]
+        excluded = self.client.patch(f"/resumes/{uploaded.json()['id']}/experience-exclusions", json={
+            "candidate_id": issue["candidate_id"], "action": "exclude",
+        })
+        self.assertEqual(excluded.status_code, 200, excluded.text)
+        updated = self.client.put(f"/applications/{application_id}/resume", json={
+            "use_latest_master": True, "source_text": None, "expected_snapshot": old_snapshot,
+        })
+        self.assertEqual(updated.status_code, 200, updated.text)
+
+        with Session(self.engine) as session:
+            application = session.get(JobApplication, application_id)
+            profile = session.exec(select(ApplicantProfile)).first()
+            requirements = json.loads(application.application_requirements_json)
+            application.application_decision_json = json.dumps({
+                "schema_version": "1.0", "status": "ready", "application_recommendation": "apply",
+                "inputs": decision_inputs(json.loads(application.job_model_json), requirements, [], profile),
+                "requirements": [], "questions": [], "blocking_issues": [],
+            })
+            session.add(application); session.commit()
+        plan = {"selected_evidence": [], "roles": [{
+            "employer_marker": "Example Agency", "role_marker": "Project Officer",
+            "display_period": "January 2020 - Present", "chronology_order": 0, "include_role_header": True,
+        }]}
+        draft = "## Professional Summary\nGrounded support.\n## Key Skills\nAdministration\n## Work Experience\n**Project Officer**\n**Example Agency**\nJanuary 2020 - Present"
+        with patch("app.main.match_evidence_batch", return_value={"schema_version": "1.0", "matches": [], "unused_evidence": []}), patch(
+            "app.main.build_resume_curation_plan", return_value=plan,
+        ), patch("app.main.generate_draft", return_value=draft), patch(
+            "app.main.repair_tailored_resume", return_value=(draft, {"status": "pass", "results": []}),
+        ):
+            generated = self.client.post("/generate", json={"application_id": application_id, "document_type": "tailored_resume"})
+        self.assertEqual(generated.status_code, 200, generated.text)
 
     def test_uploaded_experiences_persist_review_annotations(self):
         source = "Work Experience\nProject Officer\nExample Agency\nFeb 2020 - Present\nPrepared reports.\nEducation"

@@ -489,14 +489,14 @@ def _resume_value_is_supported(value: str, source_text: str) -> bool:
     return bool(meaningful) and sum(word in source_set for word in meaningful) / len(meaningful) >= 0.8
 
 
-def master_resume_integrity_issue(resume: Resume) -> str | None:
+def master_resume_integrity_issue(resume: Resume, allow_uncovered: bool = False) -> str | None:
     try:
         experiences = json.loads(resume.experiences_json or "[]")
     except (TypeError, json.JSONDecodeError):
         return "The Master Resume employment information is invalid. Re-upload the complete Resume before continuing."
     if any(isinstance(item, dict) and item.get("needs_review") for item in experiences):
         return "The Master Resume has work experience parsing that needs review before generating new documents."
-    if any(item["status"] == "unresolved" for item in find_uncovered_experience_candidates(
+    if not allow_uncovered and any(item["status"] == "unresolved" for item in find_uncovered_experience_candidates(
         resume.source_text, experiences, resume_exclusions(resume)
     )):
         return "The Master Resume text contains work experiences that are missing from the structured experience list."
@@ -560,6 +560,29 @@ def master_resume_review_detail(resume: Resume) -> dict | None:
         "message": "Review the highlighted Master Resume experiences before generating new documents.",
         "experiences": experiences,
     }
+
+
+def resume_save_issue(resume: Resume) -> str | None:
+    return master_resume_integrity_issue(resume, allow_uncovered=True)
+
+
+def resume_save_review_detail(resume: Resume) -> dict | None:
+    experiences = [item for item in resume_review_experiences(resume) if not item.get("candidate_id")]
+    if not experiences:
+        return None
+    return {
+        "code": "master_resume_experience_needs_review",
+        "message": "Review the highlighted Master Resume experiences before saving.",
+        "experiences": experiences,
+    }
+
+
+def resume_save_response(resume: Resume) -> dict:
+    experiences = json.loads(resume.experiences_json or "[]")
+    unresolved = [item for item in find_uncovered_experience_candidates(
+        resume.source_text, experiences, resume_exclusions(resume)
+    ) if item["status"] == "unresolved"]
+    return {**resume.model_dump(), "unresolved_experience_count": len(unresolved)}
 
 
 def master_resume_integrity_mismatches(resume: Resume) -> list[str]:
@@ -1183,7 +1206,7 @@ def save_profile(
     return profile_response(profile, referees)
 
 
-@app.post("/resumes", response_model=Resume)
+@app.post("/resumes")
 def create_resume(
     payload: ResumeCreate,
     session: Session = Depends(get_session),
@@ -1195,17 +1218,20 @@ def create_resume(
         canonical = json.dumps(extract_resume_experiences(values["source_text"]), ensure_ascii=False)
     values["experiences_json"], _ = _recover_explicit_experience_periods(values["source_text"], canonical)
     values["experiences_json"] = mark_resume_risks_json(values["source_text"], values["experiences_json"])
+    values["experience_exclusions_json"] = reconcile_experience_exclusions(
+        values["source_text"], json.loads(values["experiences_json"]), "[]"
+    )
     values["ckb_json"] = serialise_ckb(values["source_text"], values.get("experiences_json") or "[]")
     resume = Resume.model_validate(values)
     resume.user_id = user_id
-    if master_resume_integrity_issue(resume):
-        raise HTTPException(409, master_resume_review_detail(resume) or master_resume_integrity_issue(resume))
+    if resume_save_issue(resume):
+        raise HTTPException(409, resume_save_review_detail(resume) or resume_save_issue(resume))
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
-    return resume
+    return resume_save_response(resume)
 
 
-@app.post("/resumes/upload", response_model=Resume)
+@app.post("/resumes/upload")
 async def upload_resume(
     file: UploadFile = File(...),
     title: str = Form("Master Resume"),
@@ -1219,11 +1245,15 @@ async def upload_resume(
     experiences_json = json.dumps(extract_resume_experiences(source_text), ensure_ascii=False)
     ckb_json = serialise_ckb(source_text, experiences_json)
     current = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
+    exclusions_json = reconcile_experience_exclusions(
+        source_text, json.loads(experiences_json), current.experience_exclusions_json if current else "[]"
+    )
     if current:
         current.title = title.strip() or "Master Resume"
         current.source_text = source_text
         current.experiences_json = experiences_json
         current.ckb_json = ckb_json
+        current.experience_exclusions_json = exclusions_json
         current.updated_at = datetime.utcnow()
         resume = current
     else:
@@ -1233,12 +1263,13 @@ async def upload_resume(
             source_text=source_text,
             experiences_json=experiences_json,
             ckb_json=ckb_json,
+            experience_exclusions_json=exclusions_json,
         )
-    if master_resume_integrity_issue(resume):
-        raise HTTPException(409, master_resume_review_detail(resume) or master_resume_integrity_issue(resume))
+    if resume_save_issue(resume):
+        raise HTTPException(409, resume_save_review_detail(resume) or resume_save_issue(resume))
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
-    return resume
+    return resume_save_response(resume)
 
 
 @app.get("/resumes", response_model=list[Resume])
@@ -1327,7 +1358,7 @@ def check_resume_content(
     return build_resume_content_check(resume, profile)
 
 
-@app.patch("/resumes/{resume_id}", response_model=Resume)
+@app.patch("/resumes/{resume_id}")
 def update_resume(
     resume_id: int,
     payload: ResumeUpdate,
@@ -1349,21 +1380,25 @@ def update_resume(
         proposed = resume.model_copy(update={
             "source_text": next_source_text,
             "experiences_json": next_experiences_json,
+            "experience_exclusions_json": reconcile_experience_exclusions(
+                next_source_text, json.loads(next_experiences_json), resume.experience_exclusions_json
+            ),
         })
-        if master_resume_integrity_issue(proposed):
+        if resume_save_issue(proposed):
             raise HTTPException(
                 409,
-                master_resume_review_detail(proposed)
+                resume_save_review_detail(proposed)
                 or "The Master Resume changed after this editor loaded. Refresh the page and review the latest complete Resume before saving again.",
             )
         values["experiences_json"] = next_experiences_json
+        values["experience_exclusions_json"] = proposed.experience_exclusions_json
         values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
     for key, value in values.items():
         setattr(resume, key, value)
     resume.updated_at = datetime.utcnow()
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
-    return resume
+    return resume_save_response(resume)
 
 
 @app.post("/applications", response_model=JobApplication)
@@ -1386,11 +1421,9 @@ def create_application(
     master_resume = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     if master_resume:
         current_ckb, _ = get_or_refresh_current_ckb(session, master_resume, user_id)
-        values["resume_snapshot_json"] = json.dumps({
-            "resume_id": master_resume.id, "title": master_resume.title,
-            "source_text": master_resume.source_text, "experiences_json": master_resume.experiences_json,
-            "ckb_json": json.dumps(current_ckb, ensure_ascii=False),
-        }, ensure_ascii=False)
+        values["resume_snapshot_json"] = json.dumps(
+            resume_snapshot(master_resume, json.dumps(current_ckb, ensure_ascii=False)), ensure_ascii=False
+        )
     application = JobApplication.model_validate(values)
     application.user_id = user_id
     session.add(application); session.commit(); session.refresh(application)

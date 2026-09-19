@@ -14,7 +14,7 @@ import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanP
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
 import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
 import { activeApplications, archivedApplications } from "./applicationArchive";
-import { mergeResumeReviewIssues, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, reviewIssuesFromExperiences, unlinkedReviewIssues } from "./resumeReview";
+import { candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, resumeSaveSuccessMessage, reviewIssuesFromExperiences, unresolvedReviewIssues } from "./resumeReview";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -173,7 +173,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   }
 
   async function refresh() {
-    let scanned: { resume_id: number; experiences: ResumeReviewIssue[] }[] = [];
+    let scanned: { resume_id: number; experiences: ResumeReviewIssue[]; excluded_experiences?: ResumeReviewIssue[] }[] = [];
     if (!applicationsPage) {
       try {
         const scanResponse = await authenticatedFetch(`${api}/resumes/risk-scan`, { method: "POST" });
@@ -191,7 +191,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     if (resumeResponse.ok) {
       const loaded = await resumeResponse.json();
       setResumes(loaded);
-      setResumeScanIssues(scanned.find((item) => item.resume_id === loaded[0]?.id)?.experiences || []);
+      const result = scanned.find((item) => item.resume_id === loaded[0]?.id);
+      setResumeScanIssues([...(result?.experiences || []), ...(result?.excluded_experiences || [])]);
     }
     if (applicationResponse.ok) setApplications(await applicationResponse.json());
     if (backupResponse.ok) setBackups(await backupResponse.json());
@@ -389,7 +390,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       document.getElementById("master-resume")?.scrollIntoView({ behavior: "smooth" });
       return;
     }
-    setNotice("Master Resume saved. You only need to update it when your experience changes.");
+    setNotice(resumeSaveSuccessMessage(Number(result.unresolved_experience_count || 0)));
     if (response.ok) {
       setApplicationDecision(null);
       setResumeContentCheck(null);
@@ -416,6 +417,28 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
 
   function addExperience() {
     setExperiences((current) => [...current, { id: crypto.randomUUID(), role_title: "", organization: "", time_period_text: "", responsibility: "", context: "", result: "", no_result_data: false }]);
+  }
+
+  function addCandidateExperience(issue: ResumeReviewIssue) {
+    setExperiences((current) => [...current, {
+      id: crypto.randomUUID(), ...candidateExperienceDraft(issue), context: "", result: "", no_result_data: false,
+    }]);
+    setResumeReviewIssues((current) => current.filter((item) => item.candidate_id !== issue.candidate_id));
+    setNotice("The experience was added as a draft. Add what you did, then save the Master Resume.");
+  }
+
+  async function setCandidateExclusion(issue: ResumeReviewIssue, action: "exclude" | "restore") {
+    const resume = resumes[0];
+    if (!resume || !issue.candidate_id) return;
+    const response = await authenticatedFetch(`${api}/resumes/${resume.id}/experience-exclusions`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_id: issue.candidate_id, action }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) return setNotice(typeof result.detail === "string" ? result.detail : "Could not update this experience choice.");
+    setResumeReviewIssues((current) => current.map((item) => item.candidate_id === issue.candidate_id
+      ? { ...item, status: action === "exclude" ? "excluded_by_user" : "unresolved" } : item));
+    setNotice(action === "exclude" ? "This experience will not be used in generated documents. You can restore it below." : "This experience needs your decision before documents can be generated.");
   }
 
   function updateExperience(id: string, field: keyof Experience, value: string | boolean) {
@@ -448,7 +471,9 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       setContactGuess(guess);
       const contactSaved = await saveDetectedContact(guess);
       await refresh(); await runResumeContentCheck(result.id);
-      const experienceMessage = extractedExperienceCount ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.` : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.";
+      const unresolvedCount = Number(result.unresolved_experience_count || 0);
+      const experienceMessage = (extractedExperienceCount ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.` : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.")
+        + (unresolvedCount ? ` ${unresolvedCount} work ${unresolvedCount === 1 ? "experience still needs" : "experiences still need"} your decision before documents can be generated.` : "");
       setNotice((contactSaved ? "CV uploaded. We found and saved your name, phone and email — please check them once." : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.") + experienceMessage);
       setResumeUploadState("saved");
     } catch (error) {
@@ -1549,7 +1574,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
           <label>Resume text<textarea name="source_text" defaultValue={resumes[0]?.source_text || ""} rows={14} required /></label>
           <div className="experienceBuilder">
             <div className="experienceHeader"><div><strong>Structured work experiences</strong><p className="helper">These facts help Selection Criteria use STAR naturally and prevent invented results.</p></div><button type="button" className="secondary" onClick={addExperience}>Add experience</button></div>
-            {unlinkedReviewIssues(resumeReviewIssues).map((issue) => <div className="requirementsWarnings full" role="alert" key={`${issue.organization}-${issue.role_title}-${issue.time_period_text}`}><strong>Work experience missing from the structured list</strong><p>{[issue.organization, issue.role_title, issue.time_period_text].filter(Boolean).join(" · ")}</p><ul>{issue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>)}
+            {unresolvedReviewIssues(resumeReviewIssues).map((issue) => <div className="requirementsWarnings full" role="alert" key={issue.candidate_id}><strong>Decide whether to use this work experience</strong><p>{[issue.organization, issue.role_title, issue.time_period_text].filter(Boolean).join(" · ")}</p><ul>{issue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul><div className="inlineActions"><button type="button" onClick={() => addCandidateExperience(issue)}>Add as work experience</button><button type="button" className="secondary" onClick={() => setCandidateExclusion(issue, "exclude")}>Do not use</button></div></div>)}
+            {excludedReviewIssues(resumeReviewIssues).length > 0 && <details className="full"><summary>Experiences not used ({excludedReviewIssues(resumeReviewIssues).length})</summary>{excludedReviewIssues(resumeReviewIssues).map((issue) => <div className="requirementsWarnings" key={issue.candidate_id}><p>{[issue.organization, issue.role_title, issue.time_period_text].filter(Boolean).join(" · ")}</p><button type="button" className="secondary" onClick={() => setCandidateExclusion(issue, "restore")}>Restore</button></div>)}</details>}
             {experiences.map((experience, index) => { const reviewIssue = resumeReviewIssues.find((issue) => issue.id === experience.id || issue.index === index + 1); return <fieldset className="experienceCard" key={experience.id}><legend>Experience {index + 1}</legend>
               <div className="compactForm">
                 {reviewIssue && <div className="requirementsWarnings full" role="alert"><strong>Check this work experience</strong><ul>{reviewIssue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}

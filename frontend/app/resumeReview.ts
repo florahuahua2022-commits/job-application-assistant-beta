@@ -5,6 +5,8 @@ export type ResumeReviewIssue = {
   organization?: string;
   time_period_text?: string;
   source_excerpt?: string;
+  candidate_id?: string;
+  status?: "unresolved" | "excluded_by_user";
   review_reasons: string[];
 };
 
@@ -46,6 +48,29 @@ export function mergeResumeReviewIssues(persisted: ResumeReviewIssue[], scanned:
 
 export function unlinkedReviewIssues(issues: ResumeReviewIssue[]) {
   return issues.filter((issue) => Boolean(issue.source_excerpt));
+}
+
+export function unresolvedReviewIssues(issues: ResumeReviewIssue[]) {
+  return issues.filter((issue) => issue.status === "unresolved");
+}
+
+export function excludedReviewIssues(issues: ResumeReviewIssue[]) {
+  return issues.filter((issue) => issue.status === "excluded_by_user");
+}
+
+export function candidateExperienceDraft(issue: ResumeReviewIssue) {
+  return {
+    role_title: issue.role_title,
+    organization: issue.organization || "",
+    time_period_text: issue.time_period_text || "",
+    responsibility: "",
+  };
+}
+
+export function resumeSaveSuccessMessage(unresolvedCount: number) {
+  return unresolvedCount
+    ? `Master Resume saved. ${unresolvedCount} work ${unresolvedCount === 1 ? "experience still needs" : "experiences still need"} your decision before documents can be generated.`
+    : "Master Resume saved. You only need to update it when your experience changes.";
 }
 
 export function resumeSaveFailure<T>(experiences: T, detail: ResumeReviewDetail | string | undefined) {

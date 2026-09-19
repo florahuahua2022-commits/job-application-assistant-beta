@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeResumeReviewIssues, resumeSaveFailure, reviewReasonMessage, unlinkedReviewIssues } from "./resumeReview.ts";
+import { candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, resumeSaveFailure, resumeSaveSuccessMessage, reviewReasonMessage, unresolvedReviewIssues, unlinkedReviewIssues } from "./resumeReview.ts";
 
 test("review reason codes are translated for ordinary users", () => {
   assert.equal(
@@ -51,4 +51,22 @@ test("page-load scan keeps uncovered experiences alongside persisted review flag
 
   assert.deepEqual(mergeResumeReviewIssues(persisted, uncovered), [...persisted, ...uncovered]);
   assert.deepEqual(mergeResumeReviewIssues(persisted, [...uncovered, persisted[0]]), [...persisted, ...uncovered]);
+});
+
+test("uncovered candidates support add, exclude and restore without inventing duties", () => {
+  const candidate = {
+    index: 10, id: null, candidate_id: "EX123", status: "unresolved",
+    role_title: "Utility", organization: "Sodex", time_period_text: "December 2023 - April 2024",
+    source_excerpt: "Sodex: Utility, December 2023 - April 2024.", review_reasons: ["Missing."],
+  };
+  assert.deepEqual(unresolvedReviewIssues([candidate]), [candidate]);
+  assert.deepEqual(excludedReviewIssues([{ ...candidate, status: "excluded_by_user" }]), [{ ...candidate, status: "excluded_by_user" }]);
+  assert.deepEqual(candidateExperienceDraft(candidate), {
+    role_title: "Utility", organization: "Sodex", time_period_text: "December 2023 - April 2024", responsibility: "",
+  });
+});
+
+test("successful save explains unresolved candidates still block downstream work", () => {
+  assert.equal(resumeSaveSuccessMessage(3), "Master Resume saved. 3 work experiences still need your decision before documents can be generated.");
+  assert.equal(resumeSaveSuccessMessage(0), "Master Resume saved. You only need to update it when your experience changes.");
 });
