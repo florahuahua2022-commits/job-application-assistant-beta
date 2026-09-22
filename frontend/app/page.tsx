@@ -12,9 +12,9 @@ import {
 import { ApplicationDecision, decisionLabel } from "./applicationDecision";
 import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
-import { normaliseApplicationText, optionalBackupState, parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
+import { experienceDetailWarning, normaliseApplicationText, optionalBackupState, parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations";
 import { activeApplications, archivedApplications } from "./applicationArchive";
-import { applicationSourcesOpen, candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, resumeSaveState, resumeSaveSuccessMessage, reviewIssuesFromExperiences, unresolvedReviewIssues } from "./resumeReview";
+import { applicationSourcesOpen, candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, normaliseExperienceText, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, resumeSaveState, resumeSaveSuccessMessage, reviewIssuesFromExperiences, unresolvedReviewIssues } from "./resumeReview";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -184,7 +184,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       authenticatedFetch(`${api}/profile`),
       authenticatedFetch(`${api}/resumes`),
       authenticatedFetch(`${api}/applications`),
-      authenticatedFetch(`${api}/backups`).catch(() => null),
+      supabase ? Promise.resolve(null) : authenticatedFetch(`${api}/backups`).catch(() => null),
       authenticatedFetch(`${api}/selection-criteria/access`),
     ]);
     if (profileResponse.ok) setProfile(await profileResponse.json());
@@ -242,7 +242,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   useEffect(() => {
     if (!resumes[0]) return;
     try {
-      const loaded = JSON.parse(resumes[0].experiences_json || "[]");
+      const loaded = JSON.parse(resumes[0].experiences_json || "[]").map(normaliseExperienceText);
       setExperiences(loaded);
       setResumeReviewIssues(mergeResumeReviewIssues(reviewIssuesFromExperiences(loaded), resumeScanIssues));
     } catch { setExperiences([]); setResumeReviewIssues([]); }
@@ -1617,7 +1617,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
               <div className="compactForm">
                 {reviewIssue && <div className="requirementsWarnings full" role="alert"><strong>Check this work experience</strong><ul>{reviewIssue.review_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}
                 <label>Role title<input value={experience.role_title} onChange={(event) => updateExperience(experience.id, "role_title", event.target.value)} required /></label>
-                {sourceDetailIsThin(experience.responsibility, experience.context, experience.no_result_data ? "" : experience.result) && <p className="requirementsWarnings full">{experience.role_title || "This experience"}: source detail may be limited. Describe your specific actions, systems/tools, volume or frequency, and an observed outcome if known. Include only facts you can support; numbers are optional.</p>}
+                {experienceDetailWarning(experience)}
                 <label>Organisation<input value={experience.organization} onChange={(event) => updateExperience(experience.id, "organization", event.target.value)} required /></label>
                 <label>Employment period <em>optional</em><input value={experience.time_period_text || ""} onChange={(event) => updateExperience(experience.id, "time_period_text", event.target.value)} placeholder="e.g. Feb 2026 – Present" /></label>
                 <label className="full">What did you do? <em>Action</em><textarea rows={3} value={experience.responsibility} onChange={(event) => updateExperience(experience.id, "responsibility", event.target.value)} required /></label>

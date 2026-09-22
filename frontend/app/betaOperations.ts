@@ -1,3 +1,5 @@
+import { createElement } from "react";
+
 export async function withBusyReset<T>(operation: () => Promise<T>, reset: () => void): Promise<T> {
   try { return await operation(); } finally { reset(); }
 }
@@ -41,4 +43,13 @@ export function preservedOrganisation(current: string, extracted: string): strin
 
 export function sourceDetailIsThin(action: string, context: string, result: string): boolean {
   return ([...new Set([action, context, result].map(value => value.trim()))].join(" ").match(/[\p{L}\p{N}]+(?:['-][\p{L}\p{N}]+)*/gu) || []).length < 20;
+}
+
+export function experienceDetailWarning(experience: Record<string, any>) {
+  const responsibility = typeof experience.responsibility === "string" ? experience.responsibility : "";
+  const context = typeof experience.context === "string" ? experience.context : "";
+  const result = typeof experience.result === "string" ? experience.result : "";
+  if (!sourceDetailIsThin(responsibility, context, experience.no_result_data ? "" : result)) return null;
+  return createElement("p", { className: "requirementsWarnings full" },
+    `${experience.role_title || "This experience"}: source detail may be limited. Describe your specific actions, systems/tools, volume or frequency, and an observed outcome if known. Include only facts you can support; numbers are optional.`);
 }

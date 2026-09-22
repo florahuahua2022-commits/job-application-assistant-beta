@@ -10,6 +10,15 @@ export type ResumeReviewIssue = {
   review_reasons: string[];
 };
 
+export function normaliseExperienceText<T extends Record<string, any>>(experience: T) {
+  return {
+    ...experience,
+    responsibility: typeof experience.responsibility === "string" ? experience.responsibility : "",
+    context: typeof experience.context === "string" ? experience.context : "",
+    result: typeof experience.result === "string" ? experience.result : "",
+  };
+}
+
 export type ResumeReviewDetail = {
   code?: string;
   message?: string;
@@ -78,7 +87,7 @@ export function resumeSaveState(result: any) {
   try { experiences = JSON.parse(result.experiences_json || "[]"); } catch { /* Keep the editor usable. */ }
   return {
     resume: result,
-    experiences,
+    experiences: experiences.map(normaliseExperienceText),
     reviewIssues: result.review_experiences || [],
     contentCheck: result.content_check || null,
   };

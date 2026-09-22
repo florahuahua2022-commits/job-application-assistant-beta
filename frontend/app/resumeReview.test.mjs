@@ -1,6 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applicationSourcesOpen, candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, resumeSaveFailure, resumeSaveState, resumeSaveSuccessMessage, reviewReasonMessage, unresolvedReviewIssues, unlinkedReviewIssues } from "./resumeReview.ts";
+import { renderToStaticMarkup } from "react-dom/server";
+import * as resumeReview from "./resumeReview.ts";
+import { experienceDetailWarning } from "./betaOperations.ts";
+
+const { applicationSourcesOpen, candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, resumeSaveFailure, resumeSaveState, resumeSaveSuccessMessage, reviewReasonMessage, unresolvedReviewIssues, unlinkedReviewIssues } = resumeReview;
+
+test("the real experience warning render tolerates missing historical text fields", () => {
+  for (const missingField of ["responsibility", "context", "result"]) {
+    const experience = { id: "E1", role_title: "Officer", responsibility: "Handled cases", context: "Busy service", result: "Improved turnaround", no_result_data: false };
+    delete experience[missingField];
+    const html = renderToStaticMarkup(experienceDetailWarning(experience));
+    assert.match(html, /source detail may be limited/);
+  }
+});
 
 test("review reason codes are translated for ordinary users", () => {
   assert.equal(
@@ -81,7 +94,7 @@ test("successful save state comes entirely from the save response", () => {
 
   assert.deepEqual(resumeSaveState(result), {
     resume: result,
-    experiences: [{ id: "E1", role_title: "Officer" }],
+    experiences: [{ id: "E1", role_title: "Officer", responsibility: "", context: "", result: "" }],
     reviewIssues: result.review_experiences,
     contentCheck: result.content_check,
   });
