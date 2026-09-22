@@ -11,7 +11,7 @@ from app.auth import get_current_user
 from app.config import settings
 from app.database import get_session
 from app.main import app, check_generation_quota, check_selection_criteria_credit, selection_criteria_access
-from app.models import CreditLedger, GenerationUsage
+from app.models import CreditLedger, GeneratedDocument, GenerationUsage
 
 
 class OnlineSecurityTests(unittest.TestCase):
@@ -71,6 +71,13 @@ class OnlineSecurityTests(unittest.TestCase):
         self.assertEqual(len(session.datetimes), 2)
         self.assertTrue(all(value.utcoffset() == timedelta(0) for value in session.datetimes))
         self.assertEqual(GenerationUsage(user_id=uuid4(), pack_id=uuid4()).generated_at.utcoffset(), timedelta(0))
+
+    def test_generated_document_timestamp_is_timezone_aware_utc(self):
+        document = GeneratedDocument(
+            user_id=uuid4(), application_id=1, document_type="tailored_resume", content="Draft"
+        )
+
+        self.assertEqual(document.created_at.utcoffset(), timedelta(0))
 
     def test_daily_pack_limit_stops_a_new_pack(self):
         user_id = uuid4()

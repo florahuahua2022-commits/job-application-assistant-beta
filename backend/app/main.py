@@ -3198,7 +3198,7 @@ def generate_document(
     if not feature["enabled"]:
         raise HTTPException(503, f"{payload.document_type.replace('_', ' ').title()} generation is temporarily unavailable. Existing documents remain available.")
     generation_started = perf_counter()
-    generation_started_at = datetime.utcnow()
+    generation_started_at = datetime.now(timezone.utc)
     application = get_for_user(session, JobApplication, payload.application_id, user_id)
     master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True) if application else None
     if not application or not master_resume:

@@ -131,7 +131,7 @@ class GeneratedDocument(SQLModel, table=True):
     trace_json: str = "{}"
     used_experiences_json: str = "[]"
     closing_styles_json: str = "[]"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class GenerationUsage(SQLModel, table=True):
