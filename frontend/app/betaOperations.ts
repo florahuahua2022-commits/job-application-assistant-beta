@@ -22,6 +22,19 @@ export function parsedSelectionCriteria(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+export function optionalBackupState<T>(status: number, value: unknown) {
+  return { available: status >= 200 && status < 300, backups: Array.isArray(value) ? value as T[] : [] };
+}
+
+export function normaliseApplicationText<T extends Record<string, unknown>>(application: T) {
+  return {
+    ...application,
+    company: typeof application.company === "string" ? application.company : "",
+    position_title: typeof application.position_title === "string" ? application.position_title : "",
+    job_description: typeof application.job_description === "string" ? application.job_description : "",
+  };
+}
+
 export function preservedOrganisation(current: string, extracted: string): string {
   return current || extracted;
 }

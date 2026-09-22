@@ -3,6 +3,8 @@ import json
 import re
 from typing import Any
 
+from .experience_identity import experience_candidate_id
+
 
 CKB_SCHEMA_VERSION = "2.0"
 EVIDENCE_THIN_WORD_THRESHOLD = 20
@@ -179,15 +181,27 @@ def _detail_evidence(source_text: str) -> list[dict[str, Any]]:
     return result
 
 
-def build_career_knowledge_base(source_text: str, experiences_json: str = "[]") -> list[dict[str, Any]]:
+def build_career_knowledge_base(
+    source_text: str, experiences_json: str = "[]", experience_exclusions_json: str = "[]",
+) -> list[dict[str, Any]]:
     try:
         experiences = json.loads(experiences_json or "[]")
     except (TypeError, json.JSONDecodeError):
         experiences = []
+    try:
+        exclusions = json.loads(experience_exclusions_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        exclusions = []
+    excluded_ids = {
+        experience_candidate_id(item.get("organization"), item.get("role_title"), item.get("time_period_text"))
+        for item in exclusions if isinstance(item, dict)
+    } if isinstance(exclusions, list) else set()
     evidence: list[dict[str, Any]] = []
     if isinstance(experiences, list):
         for item in experiences:
-            if isinstance(item, dict):
+            if isinstance(item, dict) and experience_candidate_id(
+                item.get("organization"), item.get("role_title"), item.get("time_period_text")
+            ) not in excluded_ids:
                 evidence.extend(_experience_evidence_items(item))
     evidence.extend(_detail_evidence(source_text))
     unique: dict[str, dict[str, Any]] = {}

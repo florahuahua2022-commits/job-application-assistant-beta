@@ -14,7 +14,7 @@ from app.ai import AIServiceError
 from app.application_requirements import empty_application_requirements
 from app.ckb import build_career_knowledge_base
 from app.database import get_session
-from app.main import app, get_or_refresh_current_ckb, master_resume_integrity_issue
+from app.main import app, get_or_refresh_current_ckb, master_resume_integrity_issue, repair_legacy_resume_evidence
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, JobSource, Resume
 from app.outcome_learning import build_submission_snapshot
 from app.release_state import details_fingerprint, fingerprint, generation_inputs_fingerprint, pack_fingerprint
@@ -55,7 +55,7 @@ PRODUCTION_SAVED_EXPERIENCES = json.dumps([{
     "responsibility": "User-edited wording.",
 }])
 
-PRODUCTION_NINE_EXPERIENCES = [{
+PRODUCTION_CLEAN_NINE_EXPERIENCES = [{
     "id": "EVA37A578823CE", "role_title": "Finance Administration Officer",
     "organization": "Department of Communities - Disability Services, WA State Government",
     "time_period_text": "February 2026 - August 2026", "responsibility": "Provided administrative support.",
@@ -68,14 +68,11 @@ PRODUCTION_NINE_EXPERIENCES = [{
     "role_title": "Provided individual support to independently sourced clients through Mable, including community participation, appointments and assistance with daily living.",
     "organization": "My Support", "time_period_text": "August 2024 - August 2025", "responsibility": "",
 }, {
-    "id": "EVD886D211EFA3", "role_title": "Additional Australian experience",
-    "organization": "Sodex: Utility, . Woolworths: Cashier, May 2023 - November 2023.",
-    "time_period_text": "December 2023 - April 2024", "responsibility": "Casual work.",
+    "id": "woolworths", "role_title": "Cashier", "organization": "Woolworths",
+    "time_period_text": "May 2023 - November 2023", "responsibility": "Casual cashier work.",
 }, {
-    "id": "EV1CBFDD076607",
-    "role_title": "Sodex: Utility, December 2023 - April 2024. Woolworths: Cashier, May 2023 - November 2023.",
-    "organization": "Puma, Port Hedland: service station work, .", "time_period_text": "March 2023 - May 2023",
-    "responsibility": "Additional Australian experience.",
+    "id": "core-color", "role_title": "E-commerce Operations", "organization": "Core Color",
+    "time_period_text": "May 2022 - September 2022", "responsibility": "Processed supplier orders through a CRM system.",
 }, {
     "id": "EV2FAF7A3012FA", "role_title": "Executive Assistant to Board Member", "organization": "Avaintec",
     "time_period_text": "November 2017 - January 2019", "responsibility": "Administrative support.",
@@ -135,7 +132,7 @@ EDUCATION"""
         self.assertEqual(restored.json()["exclusions"], [])
         self.assertEqual(restored.json()["candidates"][0]["status"], "unresolved")
 
-    def test_real_sodex_puma_amazon_candidates_can_all_be_excluded_without_rewriting_resume(self):
+    def test_real_sodex_puma_amazon_candidates_are_excluded_from_rebuilt_ckb(self):
         source = """WORK EXPERIENCE
 Example Agency January 2020 - Present
 Project Officer
@@ -173,8 +170,77 @@ EDUCATION"""
         self.assertEqual(self.client.post("/resumes/risk-scan").json()["needs_review_count"], 0)
         with Session(self.engine) as session:
             stored = session.get(Resume, resume_id)
-            self.assertEqual((stored.source_text, stored.experiences_json, stored.ckb_json), (source, experiences, '[{"sentinel":true}]'))
+            excluded = stored.experience_exclusions_json
+            candidate_experiences = json.dumps(json.loads(experiences) + [{
+                "role_title": "Utility", "organization": "Sodex",
+                "time_period_text": "December 2023 - April 2024", "responsibility": "Casual work.",
+            }])
+            rebuilt = build_career_knowledge_base(source, candidate_experiences, excluded)
+            self.assertEqual([item["source_section"] for item in rebuilt], ["Work Experience > Example Agency > Project Officer"])
+            plan = build_resume_curation_plan(
+                {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]},
+                {"matches": [{"criteria_id": "C1", "matched_evidence": ["excluded-sodex"], "coverage": "strong"}]},
+                rebuilt,
+            )
+            self.assertNotIn("excluded-sodex", plan["selected_evidence"])
+            self.assertEqual(stored.source_text, source)
             self.assertIsNone(master_resume_integrity_issue(stored))
+
+    def test_legacy_evidence_repair_refreshes_existing_snapshots_and_caches_idempotently(self):
+        legacy = json.dumps([{
+            "id": "EVD886D211EFA3", "role_title": "Additional Australian experience",
+            "organization": "Sodex: Utility, . Woolworths: Cashier, May 2023 - November 2023.",
+            "time_period_text": "December 2023 - April 2024", "responsibility": "",
+        }, {
+            "id": "EV1CBFDD076607",
+            "role_title": "Sodex: Utility, December 2023 - April 2024. Woolworths: Cashier, May 2023 - November 2023.",
+            "organization": "Puma, Port Hedland: service station work, .",
+            "time_period_text": "March 2023 - May 2023",
+            "responsibility": "Core Color 2022 E-commerce operations Adelaide Processed supplier orders through a CRM system.",
+        }, {
+            "id": "older-role", "role_title": "Executive Assistant", "organization": "Older Employer",
+            "time_period_text": "2017 - 2019", "responsibility": "Administrative support.",
+        }])
+        exclusions = json.dumps([{
+            "organization": "Sodex", "role_title": "Utility", "time_period_text": "December 2023 - April 2024",
+        }, {
+            "organization": "Puma, Port Hedland", "role_title": "service station work", "time_period_text": "March 2023 - May 2023",
+        }, {
+            "organization": "Self-employed - Amazon e-commerce business", "role_title": "Self-employed e-commerce operator",
+            "time_period_text": "2019 - 2022",
+        }])
+        with Session(self.engine) as session:
+            resume = Resume(title="Master Resume", source_text=PRODUCTION_MISSING_EXPERIENCES_SOURCE,
+                            experiences_json=legacy, ckb_json=json.dumps(build_career_knowledge_base(PRODUCTION_MISSING_EXPERIENCES_SOURCE, legacy)),
+                            experience_exclusions_json=exclusions)
+            session.add(resume); session.commit(); session.refresh(resume)
+            stale_snapshot = json.dumps({
+                "resume_id": resume.id, "source_text": resume.source_text, "experiences_json": legacy,
+                "ckb_json": resume.ckb_json, "experience_exclusions_json": exclusions,
+            })
+            curtin = JobApplication(company="Curtin University", position_title="Fieldwork Administrative Support Officer",
+                                    job_description="Administration", resume_snapshot_json=stale_snapshot,
+                                    evidence_matches_json='{"matches":["EV1CBFDD076607"]}', selection_plan_json='{"items":[1]}')
+            sra = JobApplication(company="SRA Solutions", position_title="Project Administrator / Document Controller",
+                                 job_description="Project administration", resume_snapshot_json=stale_snapshot,
+                                 evidence_matches_json='{"matches":["EV1CBFDD076607"]}', selection_plan_json='{"items":[1]}')
+            session.add_all([curtin, sra]); session.commit()
+
+            first = repair_legacy_resume_evidence(session, resume, None)
+            first_state = (resume.experiences_json, resume.ckb_json, curtin.resume_snapshot_json, sra.resume_snapshot_json)
+            second = repair_legacy_resume_evidence(session, resume, None)
+            second_state = (resume.experiences_json, resume.ckb_json, curtin.resume_snapshot_json, sra.resume_snapshot_json)
+
+        self.assertEqual((first, second), (2, 0))
+        self.assertEqual(first_state, second_state)
+        cleaned = json.loads(resume.experiences_json)
+        self.assertEqual([item["organization"] for item in cleaned], ["Woolworths", "Core Color", "Older Employer"])
+        self.assertNotIn("EV1CBFDD076607", resume.ckb_json)
+        for application in (curtin, sra):
+            snapshot = json.loads(application.resume_snapshot_json)
+            self.assertEqual(snapshot["experiences_json"], resume.experiences_json)
+            self.assertEqual(snapshot["ckb_json"], resume.ckb_json)
+            self.assertEqual((application.evidence_matches_json, application.selection_plan_json), ("{}", "{}"))
 
     def test_excluding_after_application_snapshot_requires_update_to_latest(self):
         source = """WORK EXPERIENCE
@@ -483,7 +549,7 @@ Education"""
         self.assertEqual(blocked.json()["detail"]["experiences"], flagged["experiences"])
 
     def test_real_nine_experience_backfill_changes_only_review_annotations_and_is_idempotent(self):
-        original = json.loads(json.dumps(PRODUCTION_NINE_EXPERIENCES))
+        original = json.loads(json.dumps(PRODUCTION_CLEAN_NINE_EXPERIENCES))
         with Session(self.engine) as session:
             session.add(Resume(
                 title="Master Resume", source_text=PRODUCTION_MISSING_EXPERIENCES_SOURCE,

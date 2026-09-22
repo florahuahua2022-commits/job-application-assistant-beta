@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, resumeSaveFailure, resumeSaveSuccessMessage, reviewReasonMessage, unresolvedReviewIssues, unlinkedReviewIssues } from "./resumeReview.ts";
+import { applicationSourcesOpen, candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, resumeSaveFailure, resumeSaveState, resumeSaveSuccessMessage, reviewReasonMessage, unresolvedReviewIssues, unlinkedReviewIssues } from "./resumeReview.ts";
 
 test("review reason codes are translated for ordinary users", () => {
   assert.equal(
@@ -69,4 +69,27 @@ test("uncovered candidates support add, exclude and restore without inventing du
 test("successful save explains unresolved candidates still block downstream work", () => {
   assert.equal(resumeSaveSuccessMessage(3), "Master Resume saved. 3 work experiences still need your decision before documents can be generated.");
   assert.equal(resumeSaveSuccessMessage(0), "Master Resume saved. You only need to update it when your experience changes.");
+});
+
+test("successful save state comes entirely from the save response", () => {
+  const result = {
+    id: 7,
+    experiences_json: JSON.stringify([{ id: "E1", role_title: "Officer" }]),
+    review_experiences: [{ index: 1, id: "E1", role_title: "Officer", review_reasons: ["Review it."] }],
+    content_check: { ready: false, items: [{ field: "profile.phone", status: "missing" }] },
+  };
+
+  assert.deepEqual(resumeSaveState(result), {
+    resume: result,
+    experiences: [{ id: "E1", role_title: "Officer" }],
+    reviewIssues: result.review_experiences,
+    contentCheck: result.content_check,
+  });
+});
+
+test("application sources expand only when user action is required", () => {
+  assert.equal(applicationSourcesOpen([{ acquisition_status: "fetched", extraction_status: "extracted" }]), false);
+  assert.equal(applicationSourcesOpen([{ acquisition_status: "failed", extraction_status: "failed" }]), true);
+  assert.equal(applicationSourcesOpen([{ acquisition_status: "requires_auth", extraction_status: "pending" }]), true);
+  assert.equal(applicationSourcesOpen([{ acquisition_status: "discovered", extraction_status: "pending" }]), true);
 });

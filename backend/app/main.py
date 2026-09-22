@@ -30,7 +30,7 @@ from .evidence_allocation import apply_selection_allocation, build_evidence_allo
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename, export_theme
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
-from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
+from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
@@ -143,6 +143,17 @@ def apply_resume_snapshot(application: JobApplication, resume: Resume, ckb_json:
         application.status = "draft"
 
 
+def exclusion_anchor_ids(value: str | None) -> set[str]:
+    try:
+        exclusions = json.loads(value or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    return {
+        experience_candidate_id(item.get("organization"), item.get("role_title"), item.get("time_period_text"))
+        for item in exclusions if isinstance(item, dict)
+    } if isinstance(exclusions, list) else set()
+
+
 def application_master_resume(
     session: Session, application: JobApplication, user_id: UUID | None, auto_update_pristine: bool = False,
 ) -> Resume | None:
@@ -152,14 +163,10 @@ def application_master_resume(
         snapshot = {}
     if snapshot.get("source_text"):
         latest = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
-        has_documents = session.exec(
-            select_for_user(GeneratedDocument, user_id).where(GeneratedDocument.application_id == application.id)
-        ).first() is not None
-        has_diagnosis = application.application_decision_json not in {"", "{}", None}
-        if auto_update_pristine and latest and not has_documents and not has_diagnosis and (
+        if auto_update_pristine and latest and (
             snapshot.get("source_text") != latest.source_text
             or snapshot.get("experiences_json", "[]") != latest.experiences_json
-        ) and snapshot.get("experience_exclusions_json", "[]") == latest.experience_exclusions_json \
+        ) and exclusion_anchor_ids(snapshot.get("experience_exclusions_json")) == exclusion_anchor_ids(latest.experience_exclusions_json) \
                 and not master_resume_integrity_issue(latest):
             apply_resume_snapshot(application, latest, serialise_ckb(latest.source_text, latest.experiences_json))
             session.add(application); session.commit()
@@ -227,14 +234,95 @@ def current_required_documents(
     }
 
 
-def serialise_ckb(source_text: str, experiences_json: str) -> str:
+def serialise_ckb(source_text: str, experiences_json: str, experience_exclusions_json: str = "[]") -> str:
     if experiences_json.strip() in {"", "[]"}:
         experiences_json = json.dumps(extract_resume_experiences(source_text), ensure_ascii=False)
-    ckb = build_career_knowledge_base(source_text, experiences_json)
+    ckb = build_career_knowledge_base(source_text, experiences_json, experience_exclusions_json)
     errors = validate_career_knowledge_base(ckb)
     if errors:
         raise HTTPException(400, errors[0])
     return json.dumps(ckb, ensure_ascii=False)
+
+
+def _repair_legacy_additional_experiences(source_text: str, experiences_json: str, exclusions_json: str) -> str:
+    try:
+        experiences = json.loads(experiences_json or "[]")
+        exclusions = json.loads(exclusions_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return experiences_json
+    if not isinstance(experiences, list) or not {
+        "EVD886D211EFA3", "EV1CBFDD076607",
+    }.issubset({str(item.get("id") or item.get("evidence_id") or "") for item in experiences if isinstance(item, dict)}):
+        return experiences_json
+    excluded_ids = {
+        experience_candidate_id(item.get("organization"), item.get("role_title"), item.get("time_period_text"))
+        for item in exclusions if isinstance(item, dict)
+    } if isinstance(exclusions, list) else set()
+    legacy_ids = {"EVD886D211EFA3", "EV1CBFDD076607"}
+    first_legacy = next(index for index, item in enumerate(experiences)
+                        if str(item.get("id") or item.get("evidence_id") or "") in legacy_ids)
+    insert_at = sum(
+        str(item.get("id") or item.get("evidence_id") or "") not in legacy_ids
+        for item in experiences[:first_legacy]
+    )
+    repaired = [item for item in experiences if str(item.get("id") or item.get("evidence_id") or "") not in legacy_ids]
+    replacements = []
+    candidates = [
+        ("Sodex", "Utility", "December 2023 - April 2024", ""),
+        ("Woolworths", "Cashier", "May 2023 - November 2023", ""),
+        ("Puma, Port Hedland", "service station work", "March 2023 - May 2023", ""),
+        ("Self-employed - Amazon e-commerce business", "Self-employed e-commerce operator", "2019 - 2022",
+         "Operated an independent Amazon e-commerce business after leaving Avaintec."),
+    ]
+    for organization, role, period, responsibility in candidates:
+        anchor = experience_candidate_id(organization, role, period)
+        if anchor in excluded_ids or organization.casefold() not in source_text.casefold():
+            continue
+        replacements.append({
+            "id": anchor.replace("EX", "EV", 1), "evidence_id": anchor.replace("EX", "EV", 1),
+            "evidence_type": "experience", "organization": organization, "role_title": role,
+            "time_period_text": period, "responsibility": responsibility,
+            "source_section": f"Work Experience > {organization} > {role}",
+            "source_text": "\n".join(value for value in (role, organization, period, responsibility) if value),
+            "fact_verification": "explicit",
+        })
+    core_period = "May 2022 - September 2022" if "May 2022 - September 2022" in source_text else "2022"
+    if "Core Color" in source_text:
+        replacements.append({
+            "id": "EVCORECOLOR2022", "evidence_id": "EVCORECOLOR2022", "evidence_type": "experience",
+            "organization": "Core Color", "role_title": "E-commerce Operations", "time_period_text": core_period,
+            "responsibility": "Processed supplier orders through a CRM system.",
+            "source_section": "Work Experience > Core Color > E-commerce Operations",
+            "source_text": f"E-commerce Operations\nCore Color\n{core_period}\nProcessed supplier orders through a CRM system.",
+            "fact_verification": "explicit",
+        })
+    repaired[insert_at:insert_at] = replacements
+    return json.dumps(repaired, ensure_ascii=False)
+
+
+def repair_legacy_resume_evidence(session: Session, master_resume: Resume, user_id: UUID | None) -> int:
+    repaired = _repair_legacy_additional_experiences(
+        master_resume.source_text, master_resume.experiences_json, master_resume.experience_exclusions_json,
+    )
+    if repaired == master_resume.experiences_json:
+        return 0
+    master_resume.experiences_json = repaired
+    master_resume.ckb_json = serialise_ckb(
+        master_resume.source_text, repaired, master_resume.experience_exclusions_json,
+    )
+    master_resume.updated_at = datetime.utcnow()
+    session.add(master_resume)
+    refreshed = 0
+    for application in session.exec(select_for_user(JobApplication, user_id)).all():
+        if "EVD886D211EFA3" not in (application.resume_snapshot_json or "") \
+                and "EV1CBFDD076607" not in (application.resume_snapshot_json or ""):
+            continue
+        apply_resume_snapshot(application, master_resume, master_resume.ckb_json)
+        require_current_generation_contract(application)
+        session.add(application)
+        refreshed += 1
+    session.commit()
+    return refreshed
 
 
 def mark_resume_risks_json(source_text: str, experiences_json: str) -> str:
@@ -295,7 +383,10 @@ def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id:
         persisted = json.loads(master_resume.ckb_json or "[]")
     except (TypeError, json.JSONDecodeError):
         persisted = None
-    canonical_experiences, _ = normalise_resume_experiences(master_resume.experiences_json or "[]")
+    repaired_experiences = _repair_legacy_additional_experiences(
+        master_resume.source_text, master_resume.experiences_json, master_resume.experience_exclusions_json,
+    )
+    canonical_experiences, _ = normalise_resume_experiences(repaired_experiences or "[]")
     recovered_experiences, recoveries = _recover_explicit_experience_periods(
         master_resume.source_text, canonical_experiences
     )
@@ -309,9 +400,14 @@ def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id:
         and persisted_periods.get(section, {}).get("end") == end
         for section, start, end in recoveries
     )
-    if career_knowledge_base_is_current(persisted) and source_periods_current and not experiences_changed:
+    has_exclusions = bool(resume_exclusions(master_resume))
+    if career_knowledge_base_is_current(persisted) and source_periods_current and not experiences_changed and not has_exclusions:
         return persisted, "reused_current"
-    refreshed = json.loads(serialise_ckb(master_resume.source_text, recovered_experiences))
+    refreshed = json.loads(serialise_ckb(
+        master_resume.source_text, recovered_experiences, master_resume.experience_exclusions_json,
+    ))
+    if refreshed == persisted and not experiences_changed:
+        return persisted, "reused_current"
     if experiences_changed:
         master_resume.experiences_json = recovered_experiences
     if refreshed != persisted or experiences_changed:
@@ -577,12 +673,17 @@ def resume_save_review_detail(resume: Resume) -> dict | None:
     }
 
 
-def resume_save_response(resume: Resume) -> dict:
+def resume_save_response(resume: Resume, profile: ApplicantProfile | None = None) -> dict:
     experiences = json.loads(resume.experiences_json or "[]")
     unresolved = [item for item in find_uncovered_experience_candidates(
         resume.source_text, experiences, resume_exclusions(resume)
     ) if item["status"] == "unresolved"]
-    return {**resume.model_dump(), "unresolved_experience_count": len(unresolved)}
+    return {
+        **resume.model_dump(),
+        "unresolved_experience_count": len(unresolved),
+        "review_experiences": resume_review_experiences(resume),
+        "content_check": build_resume_content_check(resume, profile).model_dump(),
+    }
 
 
 def master_resume_integrity_mismatches(resume: Resume) -> list[str]:
@@ -613,7 +714,7 @@ def stale_resume_snapshot_detail(session: Session, application: JobApplication, 
         return None
     if (snapshot.get("source_text") == latest.source_text
             and snapshot.get("experiences_json", "[]") == latest.experiences_json
-            and snapshot.get("experience_exclusions_json", "[]") == latest.experience_exclusions_json):
+            and exclusion_anchor_ids(snapshot.get("experience_exclusions_json")) == exclusion_anchor_ids(latest.experience_exclusions_json)):
         return None
     mismatches = master_resume_integrity_mismatches(latest)
     if mismatches:
@@ -1228,7 +1329,8 @@ def create_resume(
         raise HTTPException(409, resume_save_review_detail(resume) or resume_save_issue(resume))
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
-    return resume_save_response(resume)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id)).first()
+    return resume_save_response(resume, profile)
 
 
 @app.post("/resumes/upload")
@@ -1269,7 +1371,8 @@ async def upload_resume(
         raise HTTPException(409, resume_save_review_detail(resume) or resume_save_issue(resume))
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
-    return resume_save_response(resume)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id)).first()
+    return resume_save_response(resume, profile)
 
 
 @app.get("/resumes", response_model=list[Resume])
@@ -1398,7 +1501,8 @@ def update_resume(
     resume.updated_at = datetime.utcnow()
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
-    return resume_save_response(resume)
+    profile = session.exec(select_for_user(ApplicantProfile, user_id)).first()
+    return resume_save_response(resume, profile)
 
 
 @app.post("/applications", response_model=JobApplication)

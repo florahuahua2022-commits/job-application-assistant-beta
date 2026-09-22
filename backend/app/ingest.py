@@ -1,5 +1,4 @@
 import ipaddress
-import hashlib
 import json
 import re
 import socket
@@ -15,6 +14,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 from pypdf import PdfReader
 from .ckb import EMPLOYMENT_PERIOD_PATTERN, stable_evidence_id
+from .experience_identity import experience_candidate_id, experience_identity_value
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -147,15 +147,6 @@ def mark_resume_experience_risks(source_text: str, experiences: list[dict]) -> l
     return marked
 
 
-def _experience_identity_value(value: object) -> str:
-    return re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
-
-
-def experience_candidate_id(organization: object, role_title: object, time_period_text: object) -> str:
-    anchors = "|".join(_experience_identity_value(value) for value in (organization, role_title, time_period_text))
-    return "EX" + hashlib.sha1(anchors.encode("utf-8")).hexdigest()[:12].upper()
-
-
 def find_uncovered_experience_candidates(
     source_text: str, experiences: list[dict], exclusions: list[dict] | None = None,
 ) -> list[dict]:
@@ -173,9 +164,9 @@ def find_uncovered_experience_candidates(
     work_lines = lines[section_start:section_end]
     saved_identities = {
         (
-            _experience_identity_value(item.get("organization")),
-            _experience_identity_value(item.get("role_title")),
-            _experience_identity_value(item.get("time_period_text")),
+            experience_identity_value(item.get("organization")),
+            experience_identity_value(item.get("role_title")),
+            experience_identity_value(item.get("time_period_text")),
         )
         for item in experiences if isinstance(item, dict)
     }
@@ -208,7 +199,7 @@ def find_uncovered_experience_candidates(
         role = role.strip(" ,:;|–—-")
         if not organization or not role:
             continue
-        identity = tuple(_experience_identity_value(value) for value in (organization, role, period))
+        identity = tuple(experience_identity_value(value) for value in (organization, role, period))
         if identity in saved_identities or identity in seen:
             continue
         seen.add(identity)

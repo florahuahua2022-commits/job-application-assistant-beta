@@ -73,6 +73,25 @@ export function resumeSaveSuccessMessage(unresolvedCount: number) {
     : "Master Resume saved. You only need to update it when your experience changes.";
 }
 
+export function resumeSaveState(result: any) {
+  let experiences = [];
+  try { experiences = JSON.parse(result.experiences_json || "[]"); } catch { /* Keep the editor usable. */ }
+  return {
+    resume: result,
+    experiences,
+    reviewIssues: result.review_experiences || [],
+    contentCheck: result.content_check || null,
+  };
+}
+
+export function applicationSourcesOpen(sources: { acquisition_status: string; extraction_status: string }[]) {
+  return sources.some((source) =>
+    ["discovered", "unavailable", "requires_auth", "failed"].includes(source.acquisition_status)
+    || source.extraction_status === "failed"
+    || source.extraction_status === "partial"
+  );
+}
+
 export function resumeSaveFailure<T>(experiences: T, detail: ResumeReviewDetail | string | undefined) {
   const structured = typeof detail === "object" && detail?.code === "master_resume_experience_needs_review";
   return {

@@ -10,7 +10,19 @@ test("source detail prompts for thin input without counting role headers", () =>
   assert.ok(page.includes("insufficient_source_detail"));
   assert.ok(page.includes("issue.recommended_action"));
 });
-import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } from "./betaOperations.ts";
+import * as betaOperations from "./betaOperations.ts";
+
+const { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, uploadFailureState, withBusyReset } = betaOperations;
+
+test("online backup 404 degrades to an unavailable empty state", () => {
+  assert.deepEqual(betaOperations.optionalBackupState?.(404, undefined), { available: false, backups: [] });
+});
+
+test("legacy application rows get safe empty text fields", () => {
+  assert.deepEqual(betaOperations.normaliseApplicationText?.({ id: 1, company: undefined, position_title: null, job_description: undefined }), {
+    id: 1, company: "", position_title: "", job_description: "",
+  });
+});
 
 test("Pack Review and ATS network failures clear busy state", async () => {
   for (const operation of ["pack", "ats"]) {

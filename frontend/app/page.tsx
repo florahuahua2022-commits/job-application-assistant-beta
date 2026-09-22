@@ -12,9 +12,9 @@ import {
 import { ApplicationDecision, decisionLabel } from "./applicationDecision";
 import { AtsResult, PackReviewResult, ReleaseChecklist, canGenerate, releaseCanProceed } from "./releaseWorkflow";
 import { ActivationState, activationIntent, activationTransition } from "./authActivation";
-import { parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
+import { normaliseApplicationText, optionalBackupState, parsedSelectionCriteria, preservedOrganisation, releaseFailureState, resumeEditorVersion, shouldExpireSession, sourceDetailIsThin, uploadFailureState, withBusyReset } from "./betaOperations";
 import { activeApplications, archivedApplications } from "./applicationArchive";
-import { candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, resumeSaveSuccessMessage, reviewIssuesFromExperiences, unresolvedReviewIssues } from "./resumeReview";
+import { applicationSourcesOpen, candidateExperienceDraft, excludedReviewIssues, mergeResumeReviewIssues, ResumeReviewDetail, ResumeReviewIssue, resumeSaveFailure, resumeSaveState, resumeSaveSuccessMessage, reviewIssuesFromExperiences, unresolvedReviewIssues } from "./resumeReview";
 
 const api = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -110,10 +110,10 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [finalCheckState, setFinalCheckState] = useState<"idle" | "checking">("idle");
   const [documentReviewState, setDocumentReviewState] = useState<"idle" | "reviewing">("idle");
   const [resumeContentCheck, setResumeContentCheck] = useState<ResumeContentCheckResult | null>(null);
-  const [resumeCheckState, setResumeCheckState] = useState<"idle" | "checking" | "done" | "error">("idle");
   const [statusFilter, setStatusFilter] = useState("all");
   const [applicationListLimit, setApplicationListLimit] = useState(8);
   const [backups, setBackups] = useState<Backup[]>([]);
+  const [backupsAvailable, setBackupsAvailable] = useState<boolean | null>(null);
   const [resumeUploadState, setResumeUploadState] = useState("idle");
   const [jobImportState, setJobImportState] = useState("idle");
   const [jobFields, setJobFields] = useState<JobFields>({ company: "", position_title: "", job_url: "", job_description: "", selection_criteria: "", discovered_sources: [] });
@@ -184,7 +184,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       authenticatedFetch(`${api}/profile`),
       authenticatedFetch(`${api}/resumes`),
       authenticatedFetch(`${api}/applications`),
-      authenticatedFetch(`${api}/backups`),
+      authenticatedFetch(`${api}/backups`).catch(() => null),
       authenticatedFetch(`${api}/selection-criteria/access`),
     ]);
     if (profileResponse.ok) setProfile(await profileResponse.json());
@@ -194,8 +194,9 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       const result = scanned.find((item) => item.resume_id === loaded[0]?.id);
       setResumeScanIssues([...(result?.experiences || []), ...(result?.excluded_experiences || [])]);
     }
-    if (applicationResponse.ok) setApplications(await applicationResponse.json());
-    if (backupResponse.ok) setBackups(await backupResponse.json());
+    if (applicationResponse.ok) setApplications(((await applicationResponse.json()) as Application[]).map(normaliseApplicationText) as Application[]);
+    const backupState = optionalBackupState<Backup>(backupResponse?.status || 0, backupResponse?.ok ? await backupResponse.json().catch(() => []) : []);
+    setBackupsAvailable(backupState.available); setBackups(backupState.backups);
     if (selectionAccessResponse.ok) setSelectionAccess(await selectionAccessResponse.json());
   }
 
@@ -345,6 +346,47 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setNotice("Contact details confirmed. You will not need to enter them again.");
   }
 
+  async function saveApplicationProfileDetails(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!profile) return;
+    const form = new FormData(event.currentTarget);
+    const fullName = String(form.get("full_name") || "").trim().split(/\s+/).filter(Boolean);
+    const payload = {
+      title: profile.title || "", preferred_name: profile.preferred_name || "",
+      first_name: fullName[0] || "",
+      last_name: fullName.slice(1).join(" ") || fullName[0] || "",
+      phone: String(form.get("phone") || "").trim(),
+      email: String(form.get("email") || "").trim(),
+      postal_address: profile.postal_address || "", suburb: profile.suburb || "", state: profile.state || "WA",
+      postcode: profile.postcode || "", country: profile.country || "Australia",
+      work_rights: String(form.get("work_rights") || "not_specified"),
+      availability_notice: String(form.get("availability_notice") || "not_specified"),
+      target_direction: profile.target_direction || "", motivation: profile.motivation || "",
+      writing_tone: profile.writing_tone || "natural_professional", preferences_notes: profile.preferences_notes || "",
+      referees: profile.referees || [],
+    };
+    const response = await authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not update the applicant details.");
+    setProfile(result); setConfirmedApplication(null); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+    setNotice("Applicant details updated. Confirm them before applying.");
+  }
+
+  async function saveApplicationJobIdentity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected) return;
+    const form = new FormData(event.currentTarget);
+    const response = await authenticatedFetch(`${api}/applications/${selected.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ company: String(form.get("company") || "").trim(), position_title: String(form.get("position_title") || "").trim() }),
+    });
+    const result = await response.json();
+    if (!response.ok) return setNotice(result.detail || "Could not update the job details.");
+    setApplications((current) => current.map((item) => item.id === result.id ? result : item));
+    setConfirmedApplication(null); setQualityResult(null); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+    setNotice("Job details updated. Regenerate older documents before applying.");
+  }
+
   function detectContact(sourceText: string): ContactGuess {
     const lines = sourceText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     const email = sourceText.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] || "";
@@ -391,28 +433,13 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       return;
     }
     setNotice(resumeSaveSuccessMessage(Number(result.unresolved_experience_count || 0)));
-    if (response.ok) {
-      setApplicationDecision(null);
-      setResumeContentCheck(null);
-      setResumeCheckState("idle");
-      refresh();
-    }
-  }
-
-  async function runResumeContentCheck(resumeId = resumes[0]?.id) {
-    if (!resumeId) return setNotice("Upload or save your Master Resume before running Content Check.");
-    setResumeCheckState("checking");
-    const response = await authenticatedFetch(`${api}/resumes/${resumeId}/content-check`);
-    const result = await response.json();
-    if (!response.ok) {
-      setResumeCheckState("error");
-      return setNotice(result.detail || "Could not compare the extracted details with your CV.");
-    }
-    setResumeContentCheck(result);
-    setResumeCheckState("done");
-    setNotice(result.ready
-      ? "CV Content Check passed. Every extracted field was found in the uploaded CV."
-      : "CV Content Check finished. Review the highlighted details before generating documents.");
+    const saved = resumeSaveState(result);
+    setResumes([saved.resume]);
+    setExperiences(saved.experiences);
+    setResumeReviewIssues(saved.reviewIssues);
+    setResumeScanIssues(saved.reviewIssues);
+    setResumeContentCheck(saved.contentCheck);
+    setApplicationDecision(null);
   }
 
   function addExperience() {
@@ -465,12 +492,16 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         setResumeUploadState(uploadFailureState());
         return;
       }
-      let extractedExperienceCount = 0;
-      try { extractedExperienceCount = JSON.parse(result.experiences_json || "[]").length; } catch { extractedExperienceCount = 0; }
+      const saved = resumeSaveState(result);
+      const extractedExperienceCount = saved.experiences.length;
       const guess = detectContact(result.source_text || "");
       setContactGuess(guess);
       const contactSaved = await saveDetectedContact(guess);
-      await refresh(); await runResumeContentCheck(result.id);
+      setResumes([saved.resume]);
+      setExperiences(saved.experiences);
+      setResumeReviewIssues(saved.reviewIssues);
+      setResumeScanIssues(saved.reviewIssues);
+      setResumeContentCheck(saved.contentCheck);
       const unresolvedCount = Number(result.unresolved_experience_count || 0);
       const experienceMessage = (extractedExperienceCount ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.` : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.")
         + (unresolvedCount ? ` ${unresolvedCount} work ${unresolvedCount === 1 ? "experience still needs" : "experiences still need"} your decision before documents can be generated.` : "");
@@ -823,14 +854,11 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     setReleaseChecklist(null);
     setPackReviewResult(null);
     setAtsResult(null);
-    const [response, decisionResponse] = await Promise.all([
-      authenticatedFetch(`${api}/applications/${id}/documents`),
+    const [decisionResponse] = await Promise.all([
       authenticatedFetch(`${api}/applications/${id}/decision`),
       loadApplicationRequirements(id),
       loadSources(id),
     ]);
-    const loaded = response.ok ? await response.json() : [];
-    setDocuments(loaded);
     const result = await decisionResponse.json() as {
       decision?: ApplicationDecision;
       current?: boolean;
@@ -842,7 +870,16 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         setApplicationDecisionCurrent(Boolean(result.current));
       }
     } else handleResumeSnapshotError(result);
-    const firstAvailable = packTypes.find((type) => loaded.some((document: GeneratedDocument) => document.document_type === type));
+    const [response, historyResponse] = await Promise.all([
+      authenticatedFetch(`${api}/applications/${id}/documents`),
+      authenticatedFetch(`${api}/applications/${id}/document-history`),
+    ]);
+    const loaded = response.ok ? await response.json() as GeneratedDocument[] : [];
+    const history = historyResponse.ok ? await historyResponse.json() as GeneratedDocument[] : [];
+    setDocumentHistory(history);
+    const visible = [...loaded, ...history.filter((historical) => !loaded.some((current) => current.id === historical.id))];
+    setDocuments(visible);
+    const firstAvailable = packTypes.find((type) => visible.some((document: GeneratedDocument) => document.document_type === type));
     setActiveType(firstAvailable || "tailored_resume");
     await loadReleaseChecklist(id, submissionFormat, exportTemplate);
   }
@@ -1435,7 +1472,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const generationLabel = requiredPackTypes.length
     ? `Generate ${requiredPackTypes.map((type) => labels[type]).join(requiredPackTypes.length > 1 ? ", " : "")}`.replace(/, ([^,]+)$/, " & $1")
     : "Generate Resume & Cover Letter";
-  const packReady = requiredPackTypes.length > 0 && requiredPackTypes.every((type) => latestDocuments[type]);
+  const packReady = requiredPackTypes.length > 0 && requiredPackTypes.every((type) => latestDocuments[type] && latestDocuments[type].quality_state !== "outdated");
   const active = activeApplications(applications);
   const archived = archivedApplications(applications);
   const statusCounts = useMemo(() => Object.fromEntries(applicationStatuses.map((status) => [status, activeApplications(applications).filter((application) => application.status === status).length])), [applications]);
@@ -1555,8 +1592,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       <details className="panel">
         <summary><span>↻</span><div><strong>Backup &amp; Restore</strong><small>Protect your local profile, resumes, jobs and generated documents</small></div></summary>
         <div className="formBody backupPanel">
-          <div className="backupActions"><button type="button" onClick={createLocalBackup}>Create Backup</button><p className="helper">Backups stay on this computer and never include API keys, passwords or verification codes.</p></div>
-          <div className="backupList">{backups.length ? backups.map((backup) => <div className="backupRow" key={backup.filename}><div><strong>{new Date(backup.created_at).toLocaleString()}</strong><small>{Math.max(1, Math.round(backup.size / 1024))} KB · {backup.filename}</small></div><div><button type="button" className="secondary" onClick={() => window.open(`${api}/backups/${encodeURIComponent(backup.filename)}/download`, "_blank", "noopener,noreferrer")}>Download</button><button type="button" className="secondary" onClick={() => restoreLocalBackup(backup)}>Restore</button></div></div>) : <p className="helper">No backups yet.</p>}</div>
+          {backupsAvailable === false ? <p className="helper">Local backups are not available in the online service.</p> : <><div className="backupActions"><button type="button" onClick={createLocalBackup}>Create Backup</button><p className="helper">Backups stay on this computer and never include API keys, passwords or verification codes.</p></div>
+          <div className="backupList">{backups.length ? backups.map((backup) => <div className="backupRow" key={backup.filename}><div><strong>{new Date(backup.created_at).toLocaleString()}</strong><small>{Math.max(1, Math.round(backup.size / 1024))} KB · {backup.filename}</small></div><div><button type="button" className="secondary" onClick={() => window.open(`${api}/backups/${encodeURIComponent(backup.filename)}/download`, "_blank", "noopener,noreferrer")}>Download</button><button type="button" className="secondary" onClick={() => restoreLocalBackup(backup)}>Restore</button></div></div>) : <p className="helper">No backups yet.</p>}</div></>}
         </div>
       </details>
 
@@ -1594,7 +1631,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
             {!experiences.length && <p className="helper">Add each relevant role as a separate experience. You can still keep the full resume text above.</p>}
           </div>
           {resumes[0] && <div className="resumeContentCheck">
-            <div className="contentCheckHeading"><div><strong>CV Content Check</strong><p className="helper">Compare personal details and extracted experience with the original uploaded CV.</p></div><button type="button" className="secondary" onClick={() => runResumeContentCheck()} disabled={resumeCheckState === "checking"}>{resumeCheckState === "checking" ? "Checking…" : "Check extracted details"}</button></div>
+            <div className="contentCheckHeading"><div><strong>CV Content Check</strong><p className="helper">Runs automatically whenever the Master Resume is saved.</p></div></div>
             {resumeContentCheck && <div className={resumeContentCheck.ready ? "contentCheckSummary pass" : "contentCheckSummary review"}>
               <strong>{resumeContentCheck.ready ? "All extracted details matched" : "Review the highlighted details"}</strong>
               <p>{resumeContentCheck.matched_count} matched · {resumeContentCheck.review_count} need confirmation · {resumeContentCheck.missing_count} missing</p>
@@ -1652,13 +1689,13 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 {selected.status === "draft" && <div className="jobEditDiscard"><strong>Start over with a different job description</strong><p className="helper">This permanently removes this draft and all documents generated for it.</p><button className="discardDraftButton" type="button" onClick={() => deleteDraftApplication(selected)}>Discard this draft and start again</button></div>}
               </details>
               <details className="jobEditPanel" key={`materials-${selected.id}-${selected.resume_snapshot_json}`}>
-                <summary>Resume materials for this application</summary>
+                <summary>Change resume materials <span className="helper">optional</span></summary>
                 <form onSubmit={updateApplicationResume} className="compactForm">
-                  <p className="helper">This updates only this application. Earlier documents remain available. Your Master Resume and other applications stay unchanged.</p>
+                  <p className="helper">The latest Master Resume is applied automatically. Use this only to give this application different material.</p>
                   <label>Source<select name="source" defaultValue="application"><option value="application">Edit this application's resume</option><option value="master">Use latest Master Resume</option></select></label>
                   <label className="full">Resume and confirmed facts<textarea name="source_text" rows={12} defaultValue={(() => { try { return JSON.parse(selected.resume_snapshot_json || "{}").source_text || ""; } catch { return ""; } })()} /></label>
                   <p className="helper">Include only facts you can confirm. Applying these materials keeps previous drafts as older versions.</p>
-                  <button type="submit">Apply materials to this application</button>
+                  <button type="submit">Save custom materials</button>
                 </form>
               </details>
               <details className="jobEditPanel" onToggle={async (event) => {
@@ -1679,7 +1716,18 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
               {resumeUpdateAvailable && <button type="button" onClick={() => saveApplicationResume(true)}>Update to latest Master Resume</button>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
-                <div><strong>Check application details</strong><p>Applicant name for every document: {profile ? `${profile.first_name} ${profile.last_name}` : "No saved profile"}<br />Use this name even if an older resume or preferred name differs. To use another name, update Profile before confirming.<br />Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}<br />Work rights: {profile?.work_rights.replaceAll("_", " ") || "Not confirmed"}<br />Availability: {({not_specified: "Do not state in documents", immediate: "Available immediately", two_weeks: "Two weeks’ notice", one_month: "One month’s notice", negotiable: "Start date negotiable"} as Record<string, string>)[profile?.availability_notice || "not_specified"]} — edit in Profile</p></div>
+                <div><strong>Check application details</strong><p>Applicant name for every document: {profile ? `${profile.first_name} ${profile.last_name}` : "No saved profile"}<br />Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}<br />Work rights: {profile?.work_rights.replaceAll("_", " ") || "Not confirmed"}<br />Availability: {({not_specified: "Do not state in documents", immediate: "Available immediately", two_weeks: "Two weeks’ notice", one_month: "One month’s notice", negotiable: "Start date negotiable"} as Record<string, string>)[profile?.availability_notice || "not_specified"]}</p>
+                  <details className="quickProfileEdit"><summary>Edit these details</summary>
+                    {profile && <form onSubmit={saveApplicationProfileDetails} className="compactForm">
+                      <label className="full">Full name<input name="full_name" defaultValue={`${profile.first_name} ${profile.last_name}`} required /></label>
+                      <label>Phone<input name="phone" defaultValue={profile.phone} required /></label><label>Email<input name="email" type="email" defaultValue={profile.email} required /></label>
+                      <label>Work rights<select name="work_rights" defaultValue={profile.work_rights}><option value="not_specified">Do not state in documents</option><option value="citizen">Australian citizen</option><option value="permanent_resident">Permanent resident</option><option value="visa">Visa holder</option></select></label>
+                      <label>Availability<select name="availability_notice" defaultValue={profile.availability_notice}><option value="not_specified">Do not state in documents</option><option value="immediate">Available immediately</option><option value="two_weeks">Available after two weeks</option><option value="one_month">Available after one month</option><option value="negotiable">Start date negotiable</option></select></label>
+                      <button type="submit">Save applicant details</button>
+                    </form>}
+                    <form onSubmit={saveApplicationJobIdentity} className="compactForm"><label>Position<input name="position_title" defaultValue={selected.position_title} required /></label><label>Organisation<input name="company" defaultValue={selected.company} required /></label><button type="submit">Save job details</button></form>
+                  </details>
+                </div>
                 <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={confirmReleaseDetails}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
               </div>
               <section className={`requirementsCard ${applicationRequirements && requirementsHasUnknown(applicationRequirements) ? "needs_confirmation" : applicationRequirements?.review_status || "loading"}`} aria-live="polite">
@@ -1699,19 +1747,19 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                     <summary onClick={(event) => { event.preventDefault(); isEditingRequirements ? cancelRequirementsEdit() : beginRequirementsEdit(); }}>Advanced format options</summary>
                     {requirementsEditDraft && <div className="advancedFormatFields">{(["resume", "cover_letter", "selection_criteria"] as const).filter((name) => name === "resume" || requirementsEditDraft.documents[name].requirement === "required").map((name) => <label key={name}>{name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"}<select value={requirementsEditDraft.documents[name].format} onChange={(event) => updateRequirementDocument(name, { format: event.target.value as DocumentFormat })}><option value="standalone">Standalone</option><option value="portal_fields">Portal fields</option>{!["standalone", "portal_fields"].includes(requirementsEditDraft.documents[name].format) && <option value={requirementsEditDraft.documents[name].format}>{formatDocumentFormat(requirementsEditDraft.documents[name].format)}</option>}</select></label>)}<div className="advancedFormatActions"><button type="button" onClick={() => void saveApplicationRequirementsCorrections()} disabled={requirementsSaveState === "saving"}>{requirementsSaveState === "saving" ? "Saving…" : "Save formats"}</button><button type="button" className="secondary" onClick={cancelRequirementsEdit}>Close</button></div></div>}
                   </details>
-                  <div className="requirementsEvidence"><span>Why this matches</span>
-                    <details className="requirementsSource"><summary>View requirement details</summary><div className="requirementsGrid">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; return <article key={name}><strong>{name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"}</strong><dl><div><dt>Choice</dt><dd>{formatRequirementLabel(document.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(document.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(document.limit)}</dd></div></dl></article>; })}</div></details>
-                    <details className="requirementsSource"><summary>View source notes</summary>{applicationRequirements.warnings.length > 0 ? <ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p>No source warnings were detected.</p>}</details>
-                    <details className="requirementsSource"><summary>Why this was detected</summary>{applicationRequirements.source_excerpt ? <blockquote>{applicationRequirements.source_excerpt}</blockquote> : applicationRequirements.source === "legacy_inference" ? <p>No source excerpt is available for this legacy application.</p> : <p>No source excerpt was identified.</p>}{applicationRequirements.source_text && <details><summary>Show full source</summary><pre>{applicationRequirements.source_text}</pre></details>}</details>
-                  </div>
+                  <details className="requirementsEvidence"><summary>查看匹配依据</summary>
+                    <div className="requirementsGrid">{(["resume", "cover_letter", "selection_criteria"] as const).map((name) => { const document = applicationRequirements.documents[name]; return <article key={name}><strong>{name === "resume" ? "Resume" : name === "cover_letter" ? "Cover Letter" : "Selection Criteria"}</strong><dl><div><dt>Choice</dt><dd>{formatRequirementLabel(document.requirement)}</dd></div><div><dt>Format</dt><dd>{formatDocumentFormat(document.format)}</dd></div><div><dt>Limit</dt><dd>{formatSubmissionLimit(document.limit)}</dd></div></dl></article>; })}</div>
+                    {applicationRequirements.warnings.length > 0 ? <ul>{applicationRequirements.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p>No source warnings were detected.</p>}
+                    {applicationRequirements.source_excerpt ? <blockquote>{applicationRequirements.source_excerpt}</blockquote> : applicationRequirements.source === "legacy_inference" ? <p>No source excerpt is available for this legacy application.</p> : <p>No source excerpt was identified.</p>}{applicationRequirements.source_text && <details><summary>Show full source</summary><pre>{applicationRequirements.source_text}</pre></details>}
+                  </details>
                   {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                   {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
                   <div className="generateAction"><button type="button" disabled={busy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div>
                 </>}
               </section>
               {generationFailure && <section className="requirementsError generationFailure" role="alert"><strong>{labels[generationFailure.documentType]} was not created</strong><p>{generationFailure.message}</p><button type="button" onClick={retryFailedDocument} disabled={busy}>{busy ? "Retrying…" : `Retry ${labels[generationFailure.documentType]}`}</button></section>}
-              <section className="sourcesCard" aria-live="polite">
-                <div className="requirementsHeading"><div><strong>Application Sources</strong><small>Documents found or referenced for this application.</small></div></div>
+              <details className="sourcesCard" aria-live="polite" open={sourcesLoadState === "error" || applicationSourcesOpen(sources)}>
+                <summary><strong>Application Sources</strong> <small>Documents found or referenced for this application.</small></summary>
                 {sourcesLoadState === "loading" && <p className="helper">Loading application sources…</p>}
                 {sourcesLoadState === "error" && <div className="requirementsError" role="alert"><strong>Sources could not be loaded</strong><p>{sourcesError}</p><button type="button" className="secondary" onClick={() => loadSources(selected.id)}>Retry</button></div>}
                 {sourcesLoadState === "success" && <div className="sourceList">{sources.map((source) => {
@@ -1723,7 +1771,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                   </article>;
                 })}</div>}
                 {sourcesLoadState === "success" && sourcesError && <p className="requirementsError" role="alert">{sourcesError}</p>}
-              </section>
+              </details>
               <section className={`requirementsCard ${applicationDecision?.status || "loading"}`} aria-live="polite">
                 <div className="requirementsHeading"><div><strong>Application diagnosis</strong><small>Optional guidance about evidence coverage and application risks.</small></div>{applicationDecision && <span className="requirementsStatus">{decisionLabel(applicationDecision.application_recommendation)}</span>}</div>
                 {!applicationDecision ? <><p className="helper">Generate when you are ready, or run a diagnosis first for tailored suggestions.</p><button type="button" onClick={diagnoseApplication} disabled={decisionBusy || !resumes.length}>{decisionBusy ? "Checking…" : "Check application"}</button></> : <>
@@ -1736,7 +1784,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 </>}
               </section>
               {documents.length ? <>
-                {documentsNeedRegeneration && <div className="requirementsWarnings"><strong>Earlier documents need regeneration</strong><p>They were created before the latest job details or document choices were saved.</p></div>}
+                {(documentsNeedRegeneration || documents.some((document) => document.quality_state === "outdated")) && <div className="requirementsWarnings"><strong>基于旧版 Master Resume 生成</strong><p>这些文档没有随 Master Resume 快照自动更新，请重新生成后再投递。</p></div>}
                 {releaseChecklist && <section className={`releaseChecklist ${releaseChecklist.ready ? "pass" : "pending"}`}>
                   <div className="requirementsHeading"><div><strong>Check application</strong><small>Checks accuracy, consistency and Resume compatibility before you apply.</small></div><span className="requirementsStatus">{releaseChecklist.ready ? "Ready to apply" : documents.some((document) => { try { return ["pending", "provider_failed"].includes(JSON.parse(document.reviewer_json || "{}").status); } catch { return false; } }) ? "Needs attention" : releaseChecklist.checks.final_check.ready ? "Documents reviewed" : "Draft"}</span></div>
                   <ul className="releaseChecks">
@@ -1758,7 +1806,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 <nav className="tabs">{requiredPackTypes.map((type) => <button key={type} className={activeType === type ? "activeTab" : "tab"} onClick={() => setActiveType(type)} disabled={!latestDocuments[type]}>{labels[type]}{latestDocuments[type] ? " ✓" : ""}</button>)}</nav>
                 {activeReviewer?.results?.flatMap(result => result.issues).filter(issue => ["insufficient_source_detail", "generation_under_utilized", "resume_too_brief"].includes(issue.type)).map((issue, index) => <div className="requirementsWarnings" role="status" key={`${issue.type}-${index}`}><strong>{issue.type === "insufficient_source_detail" ? "More source detail would help" : issue.type === "generation_under_utilized" ? "Generation needs review" : "Source detail needs assessment"}</strong><p>{issue.description}</p><p>{issue.recommended_action}</p></div>)}
                 <div className="templatePicker"><div><strong>Selected Resume submission artifact</strong><small>Changing format or style requires ATS verification for the new artifact.</small></div><select aria-label="Submission format" value={submissionFormat} onChange={(event) => { const value = event.target.value as "docx" | "pdf"; setSubmissionFormat(value); setAtsResult(null); void loadReleaseChecklist(selectedApplication, value, exportTemplate); }}><option value="docx">DOCX</option><option value="pdf">PDF</option></select><select aria-label="Export style" value={exportTemplate} onChange={(event) => { const value = event.target.value as "classic" | "modern" | "traditional" | "career_modern"; setExportTemplate(value); setAtsResult(null); void loadReleaseChecklist(selectedApplication, submissionFormat, value); }}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option><option value="career_modern">Career Modern — Arial</option></select></div>
-                {activeDocument && <div className="editor"><p className="helper"><strong>Latest generated:</strong> {new Date(activeDocument.created_at).toLocaleString()} · Document #{activeDocument.id}</p>{activeEvidence.length > 0 && <details className="evidenceTrace"><summary>View evidence and check details</summary><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></details>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button>{(!activeReviewer || activeReviewer.status === "provider_failed" || activeReviewer.status === "pending" || activeReviewer.status === "fail") && draftSaveState === "saved" && <button type="button" onClick={reviewEditedDocument} disabled={documentReviewState === "reviewing"}>{documentReviewState === "reviewing" ? "Reviewing…" : activeReviewer?.status === "provider_failed" ? `Retry ${labels[activeType]} review` : activeReviewer?.status === "fail" ? "Re-run document review" : "Review edited document"}</button>}<button className="secondary" onClick={() => downloadDocument("docx")}>Draft DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>Draft PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>Draft pack DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>Draft pack PDF</button><button onClick={reviewAndApply} disabled={!releaseChecklist?.ready} title={!releaseChecklist?.ready ? "Check your application before applying." : ""}>Download &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status !== "ready_to_apply"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Application content checks passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
+                {activeDocument && <div className="editor">{activeDocument.quality_state === "outdated" && <p className="requirementsWarnings"><strong>基于旧版 Master Resume 生成 — 需要重新生成</strong></p>}<p className="helper"><strong>Latest generated:</strong> {new Date(activeDocument.created_at).toLocaleString()} · Document #{activeDocument.id}</p>{activeEvidence.length > 0 && <details className="evidenceTrace"><summary>View evidence and check details</summary><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></details>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button>{(!activeReviewer || activeReviewer.status === "provider_failed" || activeReviewer.status === "pending" || activeReviewer.status === "fail") && draftSaveState === "saved" && <button type="button" onClick={reviewEditedDocument} disabled={documentReviewState === "reviewing"}>{documentReviewState === "reviewing" ? "Reviewing…" : activeReviewer?.status === "provider_failed" ? `Retry ${labels[activeType]} review` : activeReviewer?.status === "fail" ? "Re-run document review" : "Review edited document"}</button>}<button className="secondary" onClick={() => downloadDocument("docx")}>Draft DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>Draft PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>Draft pack DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>Draft pack PDF</button><button onClick={reviewAndApply} disabled={!releaseChecklist?.ready} title={!releaseChecklist?.ready ? "Check your application before applying." : ""}>Download &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status !== "ready_to_apply"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Application content checks passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
               </> : <div className="emptyState"><strong>Your required application documents will appear here.</strong><p>A standalone Selection Criteria document is created only when the confirmed employer requirements request one.</p></div>}
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
           </div>
