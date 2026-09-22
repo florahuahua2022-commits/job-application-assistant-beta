@@ -33,7 +33,7 @@ from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest, utc_now
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -131,14 +131,14 @@ def resume_snapshot(resume: Resume, ckb_json: str | None = None) -> dict:
 
 def apply_resume_snapshot(application: JobApplication, resume: Resume, ckb_json: str | None = None) -> None:
     snapshot = resume_snapshot(resume, ckb_json)
-    snapshot.update(material_version=str(uuid4()), updated_at=datetime.utcnow().isoformat())
+    snapshot.update(material_version=str(uuid4()), updated_at=utc_now().isoformat())
     application.resume_snapshot_json = json.dumps(snapshot, ensure_ascii=False)
     application.evidence_matches_json = "{}"
     application.application_decision_json = "{}"
     application.selection_plan_json = "{}"
     application.selection_confirmations_json = "[]"
     require_current_generation_contract(application)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     if application.status == "ready_to_apply":
         application.status = "draft"
 
@@ -310,7 +310,7 @@ def repair_legacy_resume_evidence(session: Session, master_resume: Resume, user_
     master_resume.ckb_json = serialise_ckb(
         master_resume.source_text, repaired, master_resume.experience_exclusions_json,
     )
-    master_resume.updated_at = datetime.utcnow()
+    master_resume.updated_at = utc_now()
     session.add(master_resume)
     refreshed = 0
     for application in session.exec(select_for_user(JobApplication, user_id)).all():
@@ -1396,7 +1396,7 @@ def scan_resume_risks(
         risky = [index for index, item in enumerate(items, start=1) if item.get("needs_review")]
         if risky and marked != resume.experiences_json:
             resume.experiences_json = marked
-            resume.updated_at = datetime.utcnow()
+            resume.updated_at = utc_now()
             session.add(resume)
         review_resume = resume.model_copy(update={"experiences_json": marked})
         review_experiences = resume_review_experiences(review_resume)
@@ -1431,13 +1431,13 @@ def update_resume_exclusion(
         if not matching and not already:
             raise HTTPException(422, "This experience is no longer an unresolved candidate. Refresh and try again.")
         if not already:
-            exclusions.append({**matching, "status": "excluded_by_user", "excluded_at": datetime.utcnow().isoformat()})
+            exclusions.append({**matching, "status": "excluded_by_user", "excluded_at": utc_now().isoformat()})
     else:
         exclusions = [item for item in exclusions if item.get("candidate_id") != payload.candidate_id]
     reconciled = reconcile_experience_exclusions(resume.source_text, experiences, json.dumps(exclusions, ensure_ascii=False))
     if reconciled != resume.experience_exclusions_json:
         resume.experience_exclusions_json = reconciled
-        resume.updated_at = datetime.utcnow()
+        resume.updated_at = utc_now()
         session.add(resume); session.commit(); session.refresh(resume)
         invalidate_evidence_matches(session, user_id)
     current_exclusions = resume_exclusions(resume)
@@ -1498,7 +1498,7 @@ def update_resume(
         values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
     for key, value in values.items():
         setattr(resume, key, value)
-    resume.updated_at = datetime.utcnow()
+    resume.updated_at = utc_now()
     session.add(resume); session.commit(); session.refresh(resume)
     invalidate_evidence_matches(session, user_id)
     profile = session.exec(select_for_user(ApplicantProfile, user_id)).first()

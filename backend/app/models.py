@@ -12,6 +12,10 @@ class ApplicationStatus(str, Enum):
     applied = "applied"
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class Resume(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: UUID | None = Field(default=None, index=True)
@@ -20,8 +24,8 @@ class Resume(SQLModel, table=True):
     experiences_json: str = "[]"
     ckb_json: str = "[]"
     experience_exclusions_json: str = "[]"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class ApplicantProfile(SQLModel, table=True):
@@ -44,8 +48,8 @@ class ApplicantProfile(SQLModel, table=True):
     motivation: str | None = None
     writing_tone: str = "natural_professional"
     preferences_notes: str | None = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class Referee(SQLModel, table=True):
@@ -88,8 +92,8 @@ class JobApplication(SQLModel, table=True):
     submission_reference: str | None = None
     submitted_at: datetime | None = None
     archived_at: datetime | None = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class JobSource(SQLModel, table=True):
@@ -115,8 +119,8 @@ class JobSource(SQLModel, table=True):
     classification_reasons_json: str = "[]"
     warnings_json: str = "[]"
     discovery_context: str = ""
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class GeneratedDocument(SQLModel, table=True):
@@ -131,7 +135,7 @@ class GeneratedDocument(SQLModel, table=True):
     trace_json: str = "{}"
     used_experiences_json: str = "[]"
     closing_styles_json: str = "[]"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class GenerationUsage(SQLModel, table=True):
@@ -139,7 +143,7 @@ class GenerationUsage(SQLModel, table=True):
     user_id: UUID = Field(index=True)
     application_id: int | None = None
     pack_id: UUID
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    generated_at: datetime = Field(default_factory=utc_now, index=True)
     completed_at: datetime | None = Field(default=None, index=True)
 
 
@@ -150,7 +154,7 @@ class CreditLedger(SQLModel, table=True):
     reason: str
     reference_id: str | None = None
     idempotency_key: str = Field(unique=True, index=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
 
 
 class Referral(SQLModel, table=True):
@@ -159,8 +163,8 @@ class Referral(SQLModel, table=True):
     invited_user_id: UUID = Field(unique=True, index=True)
     status: str = "earned"
     reward_credits: int = 1
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    earned_at: datetime | None = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    earned_at: datetime | None = Field(default_factory=utc_now)
 
 
 class ResumeCreate(SQLModel):
