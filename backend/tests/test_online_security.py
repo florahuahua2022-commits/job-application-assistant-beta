@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -47,11 +47,30 @@ class OnlineSecurityTests(unittest.TestCase):
             session.add(GenerationUsage(
                 user_id=user_id,
                 pack_id=pack_id,
-                generated_at=datetime.utcnow(),
+                generated_at=datetime.now(timezone.utc),
             ))
             session.commit()
             with patch.object(settings, "deployment_mode", "online"):
                 self.assertFalse(check_generation_quota(session, user_id, pack_id))
+
+    def test_generation_usage_quota_uses_timezone_aware_utc_datetimes(self):
+        class Result:
+            def first(self): return None
+            def one(self): return 0
+
+        class RecordingSession:
+            def __init__(self): self.datetimes = []
+            def exec(self, statement):
+                self.datetimes.extend(value for value in statement.compile().params.values() if isinstance(value, datetime))
+                return Result()
+
+        session = RecordingSession()
+        with patch.object(settings, "deployment_mode", "online"):
+            self.assertTrue(check_generation_quota(session, uuid4(), uuid4()))
+
+        self.assertEqual(len(session.datetimes), 2)
+        self.assertTrue(all(value.utcoffset() == timedelta(0) for value in session.datetimes))
+        self.assertEqual(GenerationUsage(user_id=uuid4(), pack_id=uuid4()).generated_at.utcoffset(), timedelta(0))
 
     def test_daily_pack_limit_stops_a_new_pack(self):
         user_id = uuid4()
@@ -59,8 +78,8 @@ class OnlineSecurityTests(unittest.TestCase):
             session.add(GenerationUsage(
                 user_id=user_id,
                 pack_id=uuid4(),
-                generated_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
+                generated_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
             ))
             session.commit()
             with patch.object(settings, "deployment_mode", "online"), patch.object(
@@ -75,7 +94,7 @@ class OnlineSecurityTests(unittest.TestCase):
             session.add(GenerationUsage(
                 user_id=user_id,
                 pack_id=uuid4(),
-                generated_at=datetime.utcnow(),
+                generated_at=datetime.now(timezone.utc),
             ))
             session.commit()
             with patch.object(settings, "deployment_mode", "online"), patch.object(

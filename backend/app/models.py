@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Literal
 from uuid import UUID, uuid4
@@ -139,7 +139,7 @@ class GenerationUsage(SQLModel, table=True):
     user_id: UUID = Field(index=True)
     application_id: int | None = None
     pack_id: UUID
-    generated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
     completed_at: datetime | None = Field(default=None, index=True)
 
 

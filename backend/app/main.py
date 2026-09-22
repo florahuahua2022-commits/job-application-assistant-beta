@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -820,9 +820,9 @@ def check_generation_quota(session: Session, user_id: UUID | None, pack_id: UUID
     if existing:
         return False
 
-    now = datetime.utcnow()
-    start_of_day = datetime(now.year, now.month, now.day)
-    start_of_month = datetime(now.year, now.month, 1)
+    now = datetime.now(timezone.utc)
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_month = start_of_day.replace(day=1)
     daily_count = session.exec(
         select(func.count(GenerationUsage.id)).where(
             GenerationUsage.user_id == user_id,
@@ -3554,7 +3554,7 @@ def generate_document(
         )
         session.add(usage)
     if usage is not None and pack_is_complete and usage.completed_at is None:
-        usage.completed_at = datetime.utcnow()
+        usage.completed_at = datetime.now(timezone.utc)
         session.add(usage)
     session.commit(); session.refresh(document)
     return document
