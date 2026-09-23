@@ -549,11 +549,37 @@ Use pass with an empty issues array when there is no material issue."""
             result = normalise_document_review(raw, "cover_letter")
             result = reconcile_review_grounding(result, content)
             result = reconcile_availability_findings(result, confirmed_availability_wording(availability_value))
+            result = reconcile_cover_letter_plan_findings(result, plan)
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
         except (OpenAIError, ValueError) as error:
             last_error = str(error)
     raise AIServiceError(f"Cover Letter Reviewer failed validation: {last_error or 'unknown error'}")
+
+
+def reconcile_cover_letter_plan_findings(review: dict, plan: dict) -> dict:
+    """Keep required letter dates and partial plan coverage from becoming blockers."""
+    current_dates = {date.today().isoformat(), date.today().strftime("%d %B %Y").lstrip("0")}
+    partial_ids = {
+        str(item.get("criteria_id")) for item in plan.get("priorities") or []
+        if str(item.get("coverage") or "").lower() != "strong"
+    }
+    all_ids = {str(item.get("criteria_id")) for item in plan.get("priorities") or []}
+    for result in review.get("results") or []:
+        kept = []
+        for issue in result.get("issues") or []:
+            description = str(issue.get("description") or "")
+            if (issue.get("type") == "contradiction" and str(issue.get("location") or "").strip() in current_dates
+                    and "date" in description.lower()):
+                continue
+            mentioned_ids = {criteria_id for criteria_id in all_ids if criteria_id in description}
+            if issue.get("type") == "requirement_omission" and mentioned_ids and mentioned_ids <= partial_ids:
+                issue.update(severity="advisory", blocks_release=False)
+            kept.append(issue)
+        result["issues"] = kept
+        result["status"] = "fail" if any(item.get("blocks_release") for item in kept) else "pass"
+    review["status"] = "fail" if any(item.get("status") == "fail" for item in review.get("results") or []) else "pass"
+    return review
 
 
 def auto_fix_cover_letter(

@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +10,26 @@ from app import ai
 
 
 class GenerateDraftTests(unittest.TestCase):
+
+    def test_cover_review_does_not_block_on_required_date_or_partial_priority_omission(self):
+        review = {
+            "status": "fail",
+            "results": [{"criteria_id": "cover_letter", "status": "fail", "issues": [
+                {"type": "contradiction", "severity": "critical", "blocks_release": True,
+                 "description": "The current review date is not an applicant fact.",
+                 "location": date.today().strftime("%d %B %Y").lstrip("0")},
+                {"type": "requirement_omission", "severity": "major", "blocks_release": True,
+                 "description": "Priority PARTIAL is not fully addressed.", "location": "Document-wide"},
+            ]}],
+        }
+        plan = {"priorities": [{"criteria_id": "PARTIAL", "coverage": "partial"}]}
+
+        ai.reconcile_cover_letter_plan_findings(review, plan)
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(len(review["results"][0]["issues"]), 1)
+        self.assertEqual(review["results"][0]["issues"][0]["severity"], "advisory")
+        self.assertFalse(review["results"][0]["issues"][0]["blocks_release"])
     def test_deepseek_captures_content_free_termination_telemetry(self):
         response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"status":"pass"}'), finish_reason="length")],
