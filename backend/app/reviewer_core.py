@@ -41,6 +41,9 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
     issue_type = reported_type if reported_type in SHARED_REVIEW_ISSUE_TYPES else "unknown_reviewer_issue"
     severity = ISSUE_SEVERITY[issue_type]
     description = str(issue.get("description") or "Review required.").strip()
+    recommended_action = str(issue.get("recommended_action") or "Review or regenerate the affected content.").strip()
+    if recommended_action.casefold().startswith("no change required"):
+        return None
     if issue_type == "unknown_reviewer_issue":
         description = f"Reviewer returned unsupported issue type '{reported_type}': {description}"
     finding = {
@@ -49,7 +52,7 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
         "description": description,
         "evidence": str(issue.get("evidence") or "").strip(),
         "location": str(issue.get("location") or "").strip(),
-        "recommended_action": str(issue.get("recommended_action") or "Review or regenerate the affected content.").strip(),
+        "recommended_action": recommended_action,
         "blocks_release": severity in {"critical", "major"},
     }
     if issue.get("location_kind") in {"exact_quote", "section", "document_wide"}:
@@ -112,6 +115,12 @@ def _description_document_quotes(description: str) -> list[str]:
         context = f" {description[max(0, match.start() - 120):match.start()].casefold()} "
         document_position = max((context.rfind(term) for term in document_terms), default=-1)
         source_position = max((context.rfind(term) for term in source_terms), default=-1)
+        document_claims = list(re.finditer(
+            r"\b(?:letter|cv|document|response)\s+(?:uses|includes|contains|states|claims)\b(?:.{0,80}\bevidence\b)?",
+            context,
+        ))
+        if document_claims:
+            document_position = max(document_position, document_claims[-1].end())
         if document_position > source_position:
             result.append(match.group(1))
     return result
@@ -124,8 +133,7 @@ def reconcile_review_grounding(review: dict[str, Any], content: str | dict[str, 
         for issue in result.get("issues") or []:
             kind = issue.get("location_kind")
             phrases = [issue.get("location", "")] if kind == "exact_quote" else []
-            if kind not in {"section", "document_wide"}:
-                phrases.extend(_description_document_quotes(str(issue.get("description") or "")))
+            phrases.extend(_description_document_quotes(str(issue.get("description") or "")))
             phrases = [str(phrase).strip() for phrase in phrases if str(phrase).strip()]
             if not phrases:
                 continue

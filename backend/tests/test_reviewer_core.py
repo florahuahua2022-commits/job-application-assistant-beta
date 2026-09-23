@@ -139,6 +139,30 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertEqual(review["status"], "pass")
         self.assertEqual(review["results"][0]["issues"][0]["grounding_status"], "unverified")
 
+    def test_section_finding_cannot_block_on_document_text_that_is_absent(self):
+        review = normalise_document_review({"issues": [{
+            "type": "unmatched_evidence_used",
+            "description": "The letter uses Chevron evidence ('more than 10,000 community residents').",
+            "location": "Evidence paragraph",
+            "location_kind": "section",
+        }]}, "cover_letter")
+
+        reconcile_review_grounding(review, "At Avaintec, I coordinated meetings and maintained documentation.")
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"][0]["grounding_status"], "unverified")
+
+    def test_reviewer_non_issue_with_no_change_required_is_discarded(self):
+        review = normalise_document_review({"issues": [{
+            "type": "unsupported_claim",
+            "description": "The work-rights statement matches the Applicant Profile and is supported.",
+            "location": "I hold permanent resident work rights.",
+            "recommended_action": "No change required.",
+        }]}, "cover_letter")
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -706,6 +706,7 @@ November 2017 - January 2019
         self.assertIn("Do not convert analogous evidence into direct experience", prompt)
         self.assertIn("Do not add a causal explanation", prompt)
         self.assertIn("avoid generic recap paragraphs", prompt)
+        self.assertIn("Do not infer that listed activities happened concurrently", prompt)
 
     def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
         ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'
