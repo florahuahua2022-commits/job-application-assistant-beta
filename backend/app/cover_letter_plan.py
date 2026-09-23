@@ -157,6 +157,10 @@ def build_cover_letter_plan(
     chosen_groups = set()
     ranked_ids = []
     remaining = list(evidence_candidates)
+    needs_independent_case = any(
+        re.search(r"\b(time management|organisational|multitask)\b", priority["requirement"], re.IGNORECASE)
+        for priority in priorities
+    )
     while remaining and len(chosen_groups) < 3:
         def rank(evidence_id):
             item = evidence_by_id[evidence_id]
@@ -166,7 +170,8 @@ def build_cover_letter_plan(
             end = str(period.get("end") or "")
             recent = date.today().toordinal() if re.fullmatch(r"(?i)present|current|ongoing|now", end) else (_employment_end(end) or date.min).toordinal()
             detail = str(item.get("action") or item.get("source_text") or "")
-            return (len(direct), len(coverage - covered_priorities), len(detail.split()), recent, evidence_id not in detailed)
+            independent_case = needs_independent_case and "independent" in detail.lower()
+            return (len(direct), len(coverage - covered_priorities), independent_case, len(detail.split()), recent, evidence_id not in detailed)
         winner = max(remaining, key=rank)
         item = evidence_by_id[winner]
         group = item.get("source_group_id") or item.get("source_section") or winner

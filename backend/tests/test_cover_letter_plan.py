@@ -126,6 +126,27 @@ class CoverLetterPlanTests(unittest.TestCase):
 
         self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["SPECIFIC", "RECENT"])
 
+    def test_plan_keeps_independent_work_case_for_time_management_priorities(self):
+        job_model = {"criteria": [
+            {"criteria_id": "TIME", "criteria_text": "Excellent time management and organisational skills.", "criteria_type": "essential"},
+            {"criteria_id": "MULTI", "criteria_text": "Ability to multitask.", "criteria_type": "essential"},
+            {"criteria_id": "COMMS", "criteria_text": "Communication with diverse stakeholders.", "criteria_type": "essential"},
+        ]}
+        matches = {"matches": [
+            {"criteria_id": key, "matched_evidence": ["EXEC", "INDEPENDENT"], "match_type": "direct", "coverage": "strong"}
+            for key in ("TIME", "MULTI", "COMMS")
+        ]}
+        ckb = [
+            {"evidence_id": "EXEC", "source_group_id": "exec", "source_section": "Avaintec",
+             "source_text": "Coordinated internal and external meetings, workshops and events, prepared agendas and minutes, and planned a three-month international visit for ten delegates while liaising with government, hospital and supplier stakeholders."},
+            {"evidence_id": "INDEPENDENT", "source_group_id": "mable", "source_section": "Mable",
+             "source_text": "Managed scheduling and direct client communication independently while maintaining professional service records."},
+        ]
+
+        plan = build_cover_letter_plan(job_model, matches, ckb)
+
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["INDEPENDENT", "EXEC"])
+
     def test_plan_forbids_invented_values_when_motivation_is_missing(self):
         profile = SimpleNamespace(
             target_direction="", motivation="", writing_tone="natural_professional", preferences_notes="",
