@@ -147,6 +147,37 @@ class CoverLetterPlanTests(unittest.TestCase):
 
         self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["INDEPENDENT", "EXEC"])
 
+    def test_plan_prioritises_role_aligned_project_administration_evidence(self):
+        job_model = {
+            "job_identity": {"role_title": "Project Administrator / Document Controller"},
+            "criteria": [
+                {"criteria_id": "TIME", "criteria_text": "Excellent time management and organisational skills."},
+                {"criteria_id": "MULTI", "criteria_text": "Ability to multitask."},
+                {"criteria_id": "COMMS", "criteria_text": "Communication with diverse stakeholders."},
+            ],
+        }
+        matches = {"matches": [
+            {"criteria_id": "TIME", "matched_evidence": ["MABLE", "PRATT", "AVAINTEC"], "match_type": "direct", "coverage": "strong"},
+            {"criteria_id": "MULTI", "matched_evidence": ["PRATT", "MABLE", "AVAINTEC"], "match_type": "direct", "coverage": "partial"},
+            {"criteria_id": "COMMS", "matched_evidence": ["AVAINTEC", "CCCC", "CHEVRON", "MABLE"], "match_type": "direct", "coverage": "strong"},
+        ]}
+        ckb = [
+            {"evidence_id": "AVAINTEC", "source_group_id": "avaintec", "role_title": "Executive Assistant", "source_text": "Coordinated meetings and stakeholder communication."},
+            {"evidence_id": "MABLE", "source_group_id": "mable", "role_title": "Support Worker", "source_text": "Worked independently and managed scheduling."},
+            {"evidence_id": "CCCC", "source_group_id": "cccc", "role_title": "Project Administration Officer", "source_text": "Supported infrastructure project reporting and records."},
+            {"evidence_id": "CHEVRON", "source_group_id": "chevron", "role_title": "Project Administration Officer", "source_text": "Supported project documentation and stakeholder engagement."},
+            {"evidence_id": "PRATT", "source_group_id": "pratt", "role_title": "Project Assistant", "source_text": "Supported multiple engineering projects and supplier schedules."},
+        ]
+
+        plan = build_cover_letter_plan(job_model, matches, ckb)
+
+        self.assertEqual(
+            [item["evidence_id"] for item in plan["selected_evidence"]],
+            ["CCCC", "CHEVRON", "PRATT"],
+        )
+        close = next(item for item in plan["narrative_plan"] if item["section"] == "close")
+        self.assertIn("separate sentence", close["purpose"])
+
     def test_plan_forbids_invented_values_when_motivation_is_missing(self):
         profile = SimpleNamespace(
             target_direction="", motivation="", writing_tone="natural_professional", preferences_notes="",

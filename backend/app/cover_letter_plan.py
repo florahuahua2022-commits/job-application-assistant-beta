@@ -123,6 +123,11 @@ def build_cover_letter_plan(
     evidence_already_detailed: list[str] | None = None,
     evidence_allocation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    role_title = str(job_model.get("position_title") or (job_model.get("job_identity") or {}).get("role_title") or "")
+    role_terms = {}
+    for segment in re.split(r"[/|]", role_title.casefold()):
+        words = re.findall(r"[a-z]{4,}", segment)
+        role_terms.update({word[:7]: 2 if index < len(words) - 1 else 1 for index, word in enumerate(words)})
     matches_by_id = {str(item.get("criteria_id")): item for item in matches.get("matches") or []}
     evidence_by_id = {str(item.get("evidence_id")): item for item in ckb}
     detailed = set(evidence_already_detailed or [])
@@ -170,8 +175,11 @@ def build_cover_letter_plan(
             end = str(period.get("end") or "")
             recent = date.today().toordinal() if re.fullmatch(r"(?i)present|current|ongoing|now", end) else (_employment_end(end) or date.min).toordinal()
             detail = str(item.get("action") or item.get("source_text") or "")
+            evidence_role = str(item.get("role_title") or item.get("source_section") or "")
+            evidence_role_terms = {word[:7] for word in re.findall(r"[a-z]{4,}", evidence_role.casefold())}
+            role_overlap = sum(weight for term, weight in role_terms.items() if term in evidence_role_terms)
             independent_case = needs_independent_case and "independent" in detail.lower()
-            return (len(direct), len(coverage - covered_priorities), independent_case, len(detail.split()), recent, evidence_id not in detailed)
+            return (role_overlap, len(direct), len(coverage - covered_priorities), independent_case, len(detail.split()), recent, evidence_id not in detailed)
         winner = max(remaining, key=rank)
         item = evidence_by_id[winner]
         group = item.get("source_group_id") or item.get("source_section") or winner
@@ -223,6 +231,6 @@ def build_cover_letter_plan(
                 "Use neutral advertised-role and organisation facts only; do not invent applicant motivation, values or purpose."
             ), "target_share": 0.20},
             {"section": "evidence", "purpose": "Develop selected concrete cases: action, object or context, and relevance to the role. Preserve supported tools and scope; avoid copying resume wording.", "target_share": 0.55},
-            {"section": "close", "purpose": "Close naturally and confirm only supported requirements.", "target_share": 0.10},
+            {"section": "close", "purpose": "Close naturally and confirm only supported requirements. Connect role fit to the invitation to discuss the application, then state work rights in a separate sentence rather than splicing unrelated facts together.", "target_share": 0.10},
         ],
     }
