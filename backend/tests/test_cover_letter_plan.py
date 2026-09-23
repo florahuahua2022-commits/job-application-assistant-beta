@@ -105,6 +105,27 @@ class CoverLetterPlanTests(unittest.TestCase):
         self.assertEqual(plan["selected_evidence"][0]["evidence_id"], "EV2")
         self.assertFalse(plan["selected_evidence"][0]["previously_detailed"])
 
+    def test_plan_prefers_specific_case_before_recency_when_priority_coverage_is_equal(self):
+        job_model = {"criteria": [{
+            "criteria_id": "C1", "criteria_text": "Stakeholder communication", "criteria_type": "essential",
+        }]}
+        matches = {"matches": [{
+            "criteria_id": "C1", "matched_evidence": ["RECENT", "SPECIFIC"],
+            "match_type": "direct", "coverage": "strong",
+        }]}
+        ckb = [{
+            "evidence_id": "RECENT", "source_group_id": "recent", "source_section": "Recent role",
+            "source_text": "Communicated with clients.", "time_period": {"end": "August 2026"},
+        }, {
+            "evidence_id": "SPECIFIC", "source_group_id": "specific", "source_section": "Earlier role",
+            "source_text": "Liaised with government, healthcare, legal and supplier stakeholders while coordinating an international delegation.",
+            "time_period": {"end": "January 2019"},
+        }]
+
+        plan = build_cover_letter_plan(job_model, matches, ckb)
+
+        self.assertEqual([item["evidence_id"] for item in plan["selected_evidence"]], ["SPECIFIC", "RECENT"])
+
     def test_plan_forbids_invented_values_when_motivation_is_missing(self):
         profile = SimpleNamespace(
             target_direction="", motivation="", writing_tone="natural_professional", preferences_notes="",

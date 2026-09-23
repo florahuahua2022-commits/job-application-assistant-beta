@@ -113,6 +113,8 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("government employer", prompt)
         self.assertIn("Work rights: permanent resident", prompt)
         self.assertIn("The CV may omit availability entirely", prompt)
+        self.assertIn("unqualified summary capability", prompt)
+        self.assertIn("same skill evidence across Key Skills and Technical Skills", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
@@ -421,6 +423,10 @@ November 2017 - January 2019
         self.assertIn("never name tools that do not literally appear", prompt)
         self.assertIn("never infer policies, procedures, government requirements", prompt)
         self.assertIn("if it says 'permanent resident' without a country", prompt)
+        self.assertIn("specific supported scope", prompt)
+        self.assertIn("Do not call an experience recent", prompt)
+        self.assertIn("one section only", prompt)
+        self.assertIn("Do not open the summary with generic", prompt)
 
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
@@ -439,6 +445,8 @@ November 2017 - January 2019
         self.assertIn("short organisation field is not an exclusive canonical name", prompt)
         self.assertIn("used only to identify or honestly acknowledge an evidence gap", prompt)
         self.assertIn("The letter may omit availability entirely", prompt)
+        self.assertIn("JD-only responsibility as the applicant's experience", prompt)
+        self.assertIn("unsupported causal or motivational explanation", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "major")
 
@@ -695,6 +703,9 @@ November 2017 - January 2019
         self.assertIn("when Selection Criteria is embedded", prompt)
         self.assertIn("If motivation is absent or 'Not provided'", prompt)
         self.assertIn("Prefer a distinct comparable differentiator", prompt)
+        self.assertIn("Do not convert analogous evidence into direct experience", prompt)
+        self.assertIn("Do not add a causal explanation", prompt)
+        self.assertIn("avoid generic recap paragraphs", prompt)
 
     def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
         ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'

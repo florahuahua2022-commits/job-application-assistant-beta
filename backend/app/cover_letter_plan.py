@@ -166,7 +166,7 @@ def build_cover_letter_plan(
             end = str(period.get("end") or "")
             recent = date.today().toordinal() if re.fullmatch(r"(?i)present|current|ongoing|now", end) else (_employment_end(end) or date.min).toordinal()
             detail = str(item.get("action") or item.get("source_text") or "")
-            return (len(direct), len(coverage - covered_priorities), recent, len(detail.split()), evidence_id not in detailed)
+            return (len(direct), len(coverage - covered_priorities), len(detail.split()), recent, evidence_id not in detailed)
         winner = max(remaining, key=rank)
         item = evidence_by_id[winner]
         group = item.get("source_group_id") or item.get("source_section") or winner
