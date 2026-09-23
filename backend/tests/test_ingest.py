@@ -44,6 +44,21 @@ Education"""
         self.assertEqual(find_uncovered_experience_candidates(source, saved), [])
         self.assertEqual(reconcile_experience_exclusions(source, [], "not-json"), "[]")
 
+    def test_finds_multiple_uncovered_experiences_on_one_source_line(self):
+        source = """WORK EXPERIENCE
+Sodex: Utility, December 2023 - April 2024. Woolworths: Cashier, May 2023 - November 2023.
+EDUCATION"""
+
+        candidates = find_uncovered_experience_candidates(source, [])
+
+        self.assertEqual([
+            (item["organization"], item["role_title"], item["time_period_text"])
+            for item in candidates
+        ], [
+            ("Sodex", "Utility", "December 2023 - April 2024"),
+            ("Woolworths", "Cashier", "May 2023 - November 2023"),
+        ])
+
     def test_finds_real_resume_roles_missing_from_nonempty_structured_experiences(self):
         source = """WORK EXPERIENCE
 Department of Communities - Disability Services, WA State Government February 2026 - August 2026
