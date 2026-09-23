@@ -573,7 +573,7 @@ def reconcile_cover_letter_plan_findings(review: dict, plan: dict) -> dict:
                     and "date" in description.lower()):
                 continue
             mentioned_ids = {criteria_id for criteria_id in all_ids if criteria_id in description}
-            if issue.get("type") == "requirement_omission" and mentioned_ids and mentioned_ids <= partial_ids:
+            if issue.get("type") == "requirement_omission" and mentioned_ids & partial_ids:
                 issue.update(severity="advisory", blocks_release=False)
             kept.append(issue)
         result["issues"] = kept

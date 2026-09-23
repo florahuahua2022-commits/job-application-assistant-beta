@@ -22,7 +22,11 @@ class GenerateDraftTests(unittest.TestCase):
                  "description": "Priority PARTIAL is not fully addressed.", "location": "Document-wide"},
             ]}],
         }
-        plan = {"priorities": [{"criteria_id": "PARTIAL", "coverage": "partial"}]}
+        review["results"][0]["issues"][1]["description"] = "Priority STRONG is covered, while PARTIAL is under-represented."
+        plan = {"priorities": [
+            {"criteria_id": "STRONG", "coverage": "strong"},
+            {"criteria_id": "PARTIAL", "coverage": "partial"},
+        ]}
 
         ai.reconcile_cover_letter_plan_findings(review, plan)
 
