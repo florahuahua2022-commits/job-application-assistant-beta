@@ -163,6 +163,17 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertEqual(review["status"], "pass")
         self.assertEqual(review["results"][0]["issues"], [])
 
+    def test_reviewer_non_issue_with_no_action_required_is_discarded(self):
+        review = normalise_document_review({"issues": [{
+            "type": "unmatched_evidence_used",
+            "description": "Re-check: the evidence is selected. No issue.",
+            "location": "Evidence paragraph",
+            "recommended_action": "No action required.",
+        }]}, "cover_letter")
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
