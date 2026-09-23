@@ -42,7 +42,12 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
     severity = ISSUE_SEVERITY[issue_type]
     description = str(issue.get("description") or "Review required.").strip()
     recommended_action = str(issue.get("recommended_action") or "Review or regenerate the affected content.").strip()
-    if recommended_action.casefold().startswith(("no change required", "no action required")):
+    action = recommended_action.casefold().strip(" .")
+    if (
+        recommended_action.casefold().startswith(("no change required", "no action required"))
+        or action in {"none", "advisory only"}
+        or re.search(r"\bno (?:actual )?defect\.?$", description.casefold())
+    ):
         return None
     if issue_type == "unknown_reviewer_issue":
         description = f"Reviewer returned unsupported issue type '{reported_type}': {description}"

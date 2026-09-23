@@ -1172,6 +1172,11 @@ def auto_polish_cover_letter(
         polished,
     )
     if generic_salutation:
+        polished = re.sub(
+            r"(?im)^Dear (?:Hiring Manager|Recruitment Team|Sir or Madam)\s*,?\s*$",
+            "Dear Sir/Madam",
+            polished,
+        )
         polished = re.sub(r"(?im)^Yours sincerely\s*,?\s*$", "Yours faithfully", polished)
 
     # Remove common speculative recruiter/client sentences. The prompt only permits

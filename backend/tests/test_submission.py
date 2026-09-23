@@ -69,6 +69,8 @@ class SubmissionRecordTests(unittest.TestCase):
             None,
         )
 
+        self.assertIn("Dear Sir/Madam", polished)
+        self.assertNotIn("Dear Hiring Manager", polished)
         self.assertIn("Yours faithfully", polished)
         self.assertNotIn("Yours sincerely", polished)
 

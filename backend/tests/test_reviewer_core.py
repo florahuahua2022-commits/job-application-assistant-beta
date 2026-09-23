@@ -174,6 +174,23 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertEqual(review["status"], "pass")
         self.assertEqual(review["results"][0]["issues"], [])
 
+    def test_reviewer_explicit_no_defect_and_advisory_only_findings_are_discarded(self):
+        review = normalise_document_review({"issues": [
+            {
+                "type": "unsupported_claim",
+                "description": "The selected evidence is retained. No actual defect.",
+                "recommended_action": "None.",
+            },
+            {
+                "type": "ai_tone",
+                "description": "The summary opens with a concrete supported setting. No defect.",
+                "recommended_action": "Advisory only.",
+            },
+        ]}, "tailored_resume")
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
