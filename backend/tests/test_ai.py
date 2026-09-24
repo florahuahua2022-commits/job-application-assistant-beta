@@ -274,6 +274,17 @@ Jan 2020 - Present
         self.assertEqual(review["status"], "fail")
         self.assertIn("missing_role_header", {issue["type"] for issue in findings})
 
+    def test_resume_word_ceiling_overrides_ai_pass(self):
+        content = " ".join(["supported"] * 751)
+        plan = {"maximum_words": 750, "selected_evidence": [{"evidence_id": "EV1"}], "roles": []}
+
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        findings = [issue for result in review["results"] for issue in result["issues"]]
+        self.assertEqual(review["status"], "fail")
+        self.assertTrue(any("exceeds" in issue["description"] for issue in findings))
+
     def test_role_named_fabricated_responsibility_is_not_discarded(self):
         content, plan = self._correct_two_role_resume()
         reviewer_output = json.dumps({"status": "fail", "issues": [{
