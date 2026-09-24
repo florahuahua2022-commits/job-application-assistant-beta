@@ -437,6 +437,7 @@ def build_resume_curation_plan(
         "schema_version": RESUME_PLAN_SCHEMA_VERSION,
         "timeline": timeline,
         "target_words": target_words,
+        "maximum_words": 750,
         "target_pages": 2,
         "maximum_pages": None,
         "required_sections": ["Professional Summary", "Key Skills", "Work Experience"],

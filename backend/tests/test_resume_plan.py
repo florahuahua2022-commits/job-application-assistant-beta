@@ -11,6 +11,12 @@ def evidence(evidence_id, section, action="Grounded work", *, period=None, resul
 
 
 class ResumeCurationPlanTests(unittest.TestCase):
+    def test_default_plan_sets_a_firm_resume_word_ceiling(self):
+        plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [])
+
+        self.assertEqual(plan["target_words"], 650)
+        self.assertEqual(plan["maximum_words"], 750)
+
     def test_explicit_dates_control_presentation_while_relevance_controls_budget(self):
         ckb = [
             evidence("OLD", "Work > Older Relevant", "Executive support", period={"start": "2018", "end": "2020"}),

@@ -456,6 +456,11 @@ November 2017 - January 2019
         self.assertIn("explain relevance using only the selected CKB's own action, object, tool, context or scope", prompt)
         self.assertIn("If the explanation needs a JD-only noun, duty, causal link or role requirement", prompt)
         self.assertIn("A summary or closing synthesis must not introduce a broader capability", prompt)
+        self.assertIn("develop no more than two concrete evidence anchors", prompt)
+        self.assertIn("do not give each selected role its own summary sentence", prompt)
+        self.assertIn("Key Skills as short capability labels", prompt)
+        self.assertIn("Do not copy complete source actions, quantities or sentences into Key Skills", prompt)
+        self.assertIn("plan.target_words and plan.maximum_words", prompt)
 
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
