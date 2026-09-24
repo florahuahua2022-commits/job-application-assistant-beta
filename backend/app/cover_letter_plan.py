@@ -231,6 +231,6 @@ def build_cover_letter_plan(
                 "Use neutral advertised-role and organisation facts only; do not invent applicant motivation, values or purpose."
             ), "target_share": 0.20},
             {"section": "evidence", "purpose": "Develop selected concrete cases: action, object or context, and relevance to the role. Preserve supported tools and scope; avoid copying resume wording.", "target_share": 0.55},
-            {"section": "close", "purpose": "Close naturally and confirm only supported requirements. Connect role fit to the invitation to discuss the application, then state work rights in a separate sentence rather than splicing unrelated facts together.", "target_share": 0.10},
+            {"section": "close", "purpose": "Close naturally without adding a new capability or recap. Invite further discussion, confirm only supported requirements, and state work rights in a separate sentence rather than splicing unrelated facts together.", "target_share": 0.10},
         ],
     }

@@ -30,7 +30,7 @@ class GenerationTraceTests(unittest.TestCase):
         self.assertEqual(trace["review"], {
             "status": "fail", "factual_status": "fail", "quality_status": "not_run", "finding_count": 1,
         })
-        self.assertEqual(trace["versions"]["government_writing_rules"], "1.0")
+        self.assertEqual(trace["versions"]["government_writing_rules"], "1.1")
         self.assertEqual(trace["versions"]["applicant_profile_schema"], "1.0")
         self.assertEqual(trace["versions"]["review_policy"], "2.0")
         self.assertEqual(trace["runtime"]["status"], "completed")

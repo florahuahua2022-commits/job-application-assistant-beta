@@ -452,6 +452,10 @@ November 2017 - January 2019
         self.assertIn("Do not call an experience recent", prompt)
         self.assertIn("one section only", prompt)
         self.assertIn("Do not open the summary with generic", prompt)
+        self.assertIn("JD may select or prioritise evidence", prompt)
+        self.assertIn("explain relevance using only the selected CKB's own action, object, tool, context or scope", prompt)
+        self.assertIn("If the explanation needs a JD-only noun, duty, causal link or role requirement", prompt)
+        self.assertIn("A summary or closing synthesis must not introduce a broader capability", prompt)
 
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
@@ -587,7 +591,7 @@ November 2017 - January 2019
         self.assertEqual(review["generation_status"], "clean")
         self.assertEqual(review["telemetry"]["repair_rounds"], 1)
         self.assertNotIn("trust", repaired["content"].lower())
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", provider.call_args.args[0])
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", provider.call_args.args[0])
         self.assertIn("assisted/supported/contributed/liaised", provider.call_args.args[0])
         self.assertIn("does not support \"discretion\"", provider.call_args.args[0])
 
@@ -732,6 +736,10 @@ November 2017 - January 2019
         self.assertIn("Do not add a causal explanation", prompt)
         self.assertIn("avoid generic recap paragraphs", prompt)
         self.assertIn("Do not infer that listed activities happened concurrently", prompt)
+        self.assertIn("JD may select or prioritise evidence", prompt)
+        self.assertIn("explain relevance using only the selected CKB's own action, object, tool, context or scope", prompt)
+        self.assertIn("If the explanation needs a JD-only noun, duty, causal link or role requirement", prompt)
+        self.assertIn("A summary or closing synthesis must not introduce a broader capability", prompt)
 
     def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
         ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'

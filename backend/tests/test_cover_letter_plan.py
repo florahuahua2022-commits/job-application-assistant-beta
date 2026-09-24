@@ -176,6 +176,8 @@ class CoverLetterPlanTests(unittest.TestCase):
             ["CCCC", "CHEVRON", "PRATT"],
         )
         close = next(item for item in plan["narrative_plan"] if item["section"] == "close")
+        self.assertIn("without adding a new capability or recap", close["purpose"])
+        self.assertNotIn("Connect role fit", close["purpose"])
         self.assertIn("separate sentence", close["purpose"])
 
     def test_plan_forbids_invented_values_when_motivation_is_missing(self):

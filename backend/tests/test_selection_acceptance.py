@@ -158,7 +158,9 @@ class FrozenSelectionCriteriaAcceptanceTests(unittest.TestCase):
             "word_count": 11,
         })
 
-        with patch.object(ai, "_openai_draft", return_value=conservative) as provider:
+        with patch.object(ai.settings, "ai_provider", "openai"), patch.object(
+            ai, "_openai_draft", return_value=conservative
+        ) as provider:
             result = ai.generate_selection_criteria_bundle(ckb, plan)
 
         prompt = provider.call_args.args[0]

@@ -9,14 +9,17 @@ class GovernmentWritingRulesTests(unittest.TestCase):
     def test_shared_rules_are_versioned_and_preserve_grounding_boundaries(self):
         rules = government_writing_rules()
 
-        self.assertEqual(GOVERNMENT_WRITING_RULES_VERSION, "1.0")
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", rules)
+        self.assertEqual(GOVERNMENT_WRITING_RULES_VERSION, "1.1")
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", rules)
         self.assertIn("traceable to supplied CKB source_text", rules)
         self.assertIn("not as evidence", rules)
         self.assertIn("only when the supporting source_text contains the number", rules)
         self.assertIn("Cover Letter: [POSITION TITLE]", rules)
         self.assertIn("must not become managed, led, owned", rules)
         self.assertIn("does not by itself support claims of discretion", rules)
+        self.assertIn("JD may select or prioritise evidence", rules)
+        self.assertIn("explain relevance using only the selected CKB's own action", rules)
+        self.assertIn("cover-letter close must add no new applicant fact or generic recap", rules)
 
     def test_variant_is_configurable_without_forking_rules(self):
         self.assertIn("professional British English", government_writing_rules("British English"))
@@ -28,21 +31,23 @@ class GovernmentWritingRulesTests(unittest.TestCase):
         generated = '{"criteria_id":"C1","evidence_used":["EV001"],"star":{"situation":"Monthly cycle","task":"Prepare reports","action":"Compiled records","result":"Reports submitted"},"final_response":"I prepared monthly reports from verified records."}'
         review = '{"results":[{"criteria_id":"C1","status":"pass","issues":[]}]}'
 
-        with patch.object(ai, "_openai_draft", side_effect=[generated, review]) as provider:
+        with patch.object(ai.settings, "ai_provider", "openai"), patch.object(
+            ai, "_openai_draft", side_effect=[generated, review]
+        ) as provider:
             bundle = ai.generate_selection_criteria_bundle(ckb, plan)
             ai.review_selection_criteria_batch(ckb, plan, bundle)
 
         generator_prompt = provider.call_args_list[0].args[0]
         reviewer_prompt = provider.call_args_list[1].args[0]
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", generator_prompt)
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", reviewer_prompt)
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", generator_prompt)
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", reviewer_prompt)
         self.assertIn("traceable to supplied CKB source_text", generator_prompt)
         self.assertIn("traceable to supplied CKB source_text", reviewer_prompt)
 
     def test_general_safety_instruction_uses_shared_rules(self):
         instruction = ai.safety_instruction()
 
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.0", instruction)
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", instruction)
         self.assertIn("traceable to supplied CKB source_text", instruction)
 
     def test_transferable_evidence_rules_avoid_self_deprecation_without_hiding_gaps(self):
