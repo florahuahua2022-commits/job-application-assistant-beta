@@ -1786,7 +1786,7 @@ def update_application_requirements(
     application.selection_plan_json = "{}"
     application.selection_confirmations_json = "[]"
     require_current_generation_contract(application)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application)
     session.commit()
     return ApplicationRequirementsResponse(application_id=application.id, requirements=updated)

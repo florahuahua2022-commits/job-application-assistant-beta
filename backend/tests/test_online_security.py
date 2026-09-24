@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -10,8 +11,9 @@ from sqlmodel import Session, SQLModel, create_engine
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_session
-from app.main import app, check_generation_quota, check_selection_criteria_credit, selection_criteria_access
-from app.models import CreditLedger, GeneratedDocument, GenerationUsage, Resume
+from app.application_requirements import empty_application_requirements
+from app.main import app, check_generation_quota, check_selection_criteria_credit, selection_criteria_access, update_application_requirements
+from app.models import ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GenerationUsage, JobApplication, Resume
 
 
 class OnlineSecurityTests(unittest.TestCase):
@@ -84,6 +86,34 @@ class OnlineSecurityTests(unittest.TestCase):
 
         self.assertEqual(resume.created_at.utcoffset(), timedelta(0))
         self.assertEqual(resume.updated_at.utcoffset(), timedelta(0))
+
+    def test_application_requirements_update_uses_timezone_aware_utc(self):
+        application = JobApplication(
+            id=1,
+            company="Private",
+            position_title="Administration & Warehouse Assistant",
+            job_description="General duties",
+            application_requirements_json=json.dumps(empty_application_requirements("General duties")),
+        )
+        requirements = empty_application_requirements("General duties")
+        requirements["documents"]["cover_letter"].update(
+            requirement="required", format="standalone", basis="user_confirmed"
+        )
+        session = unittest.mock.Mock()
+
+        with patch("app.main.get_for_user", return_value=application):
+            update_application_requirements(
+                1,
+                ApplicationRequirementsUpdate(
+                    action="correct",
+                    documents=requirements["documents"],
+                    additional_documents=[],
+                ),
+                session,
+                uuid4(),
+            )
+
+        self.assertEqual(application.updated_at.utcoffset(), timedelta(0))
 
     def test_daily_pack_limit_stops_a_new_pack(self):
         user_id = uuid4()
