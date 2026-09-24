@@ -155,6 +155,26 @@ Oct 2007 - Aug 2012
         self.assertIn("missing_role_header", [item["code"] for item in omitted["issues"]])
         self.assertIn("ambiguous_role_header", [item["code"] for item in repeated["issues"]])
 
+    def test_summary_role_mentions_do_not_duplicate_work_experience_headers(self):
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [{
+            "employer_marker": "Pratt & Whitney",
+            "role_marker": "Project Assistant",
+            "display_period": "October 2007 - August 2012",
+            "include_role_header": True,
+        }]}
+        content = """## Professional Summary
+As Project Assistant at Pratt & Whitney (October 2007-August 2012), provided project support.
+## Work Experience
+### Project Assistant
+Pratt & Whitney | October 2007 - August 2012
+- Provided project support.
+## Education
+Bachelor of Arts"""
+
+        result = validate_resume_content(content, plan, [])
+
+        self.assertTrue(result["valid"], result["issues"])
+
     def test_omitted_role_and_full_plan_order_are_checked_deterministically(self):
         plan = {"required_sections": [], "selected_evidence": [], "roles": [
             {"employer_marker": "CCCC Kenya", "role_marker": "Project Administration Officer", "include_role_header": True},

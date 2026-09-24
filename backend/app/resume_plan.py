@@ -50,7 +50,9 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         issues.append({"code": "resume_too_long", "message": "The CV exceeds the employer's explicit word limit."})
     if set(map(str, evidence_used)) - selected_resume_evidence_ids(plan):
         issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
-    normalised_lines = [_normalise_identity_text(line) for line in content.splitlines()]
+    work_section = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", content)
+    role_content = work_section.group(1) if work_section else content
+    normalised_lines = [_normalise_identity_text(line) for line in role_content.splitlines()]
     normalised_lines = [line for line in normalised_lines if line]
     all_roles = plan.get("roles") or []
     visible_roles = [role for role in all_roles if role.get("include_role_header")]
