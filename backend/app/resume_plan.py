@@ -460,7 +460,9 @@ def build_resume_curation_plan(
         })
     roles.sort(key=lambda role: (
         not role["is_current"],
-        -max((_date_value((item.get("time_period") or {}).get("end")) for item in role_groups[role["source_section"]]), default=0),
+        -max((_date_value((item.get("time_period") or {}).get("end"))
+              or _date_value((item.get("time_period") or {}).get("start"))
+              for item in role_groups[role["source_section"]]), default=0),
         -max((_date_value((item.get("time_period") or {}).get("start")) for item in role_groups[role["source_section"]]), default=0),
         role["source_order"],
     ))

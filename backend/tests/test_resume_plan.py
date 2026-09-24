@@ -31,6 +31,17 @@ class ResumeCurationPlanTests(unittest.TestCase):
         self.assertEqual(plan["roles"][1]["curation_action"], "promote")
         self.assertEqual(plan["roles"][0]["display_period"], "2023 - 2025")
 
+    def test_single_year_role_is_sorted_by_its_start_year(self):
+        ckb = [
+            evidence("YEAR", "Work > Core Color > E-commerce Operations", period={"start": "2022", "end": None}),
+            evidence("OLDER", "Work > Avaintec > Executive Assistant", period={"start": "2017", "end": "2019"}),
+        ]
+        matches = {"matches": [{"criteria_id": "C1", "matched_evidence": ["YEAR", "OLDER"], "match_type": "direct"}]}
+
+        plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb)
+
+        self.assertEqual([role["employer_marker"] for role in plan["roles"]], ["Core Color", "Avaintec"])
+
     def test_updated_kenya_period_reorders_plan_ahead_of_avaintec(self):
         ckb = [
             evidence("A", "Work Experience > Avaintec > Executive Assistant", period={"start": "Nov 2017", "end": "Jan 2019"}),
