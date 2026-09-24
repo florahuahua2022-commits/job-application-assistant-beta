@@ -140,6 +140,9 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("The CV may omit availability entirely", prompt)
         self.assertIn("unqualified summary capability", prompt)
         self.assertIn("same skill evidence across Key Skills and Technical Skills", prompt)
+        self.assertIn("unsupported setting named in the Summary", prompt)
+        self.assertIn("thin selected evidence repeated across CV sections", prompt)
+        self.assertIn("adjacent evidence presented without explicit transferable framing", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
@@ -472,6 +475,10 @@ November 2017 - January 2019
         self.assertIn("Key Skills as short capability labels", prompt)
         self.assertIn("Do not copy complete source actions, quantities or sentences into Key Skills", prompt)
         self.assertIn("plan.target_words and plan.maximum_words", prompt)
+        self.assertIn("Do not name a setting in the Summary unless selected evidence explicitly supports it", prompt)
+        self.assertIn("evidence_thin", prompt)
+        self.assertIn("at most one CV section", prompt)
+        self.assertIn("explicitly label the relationship as transferable", prompt)
 
     def test_cover_letter_reviewer_checks_grounding_intent_and_priorities(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
