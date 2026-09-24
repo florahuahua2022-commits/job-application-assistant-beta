@@ -29,6 +29,7 @@ ISSUE_SEVERITY = {
     "concise_but_relevant": "advisory",
     "source_parsing_uncertain": "advisory",
     "resume_repetitive_opening": "advisory",
+    "thin_evidence_repeated": "major",
     "missing_role_header": "critical",
     "role_order_mismatch": "critical",
     "omitted_role_expanded": "critical",

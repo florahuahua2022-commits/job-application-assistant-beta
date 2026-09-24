@@ -288,6 +288,26 @@ Jan 2020 - Present
         self.assertEqual(review["status"], "fail")
         self.assertTrue(any("exceeds" in issue["description"] for issue in findings))
 
+    def test_thin_evidence_repetition_reaches_auto_repair_as_supported_issue(self):
+        content = """## Professional Summary
+Processed supplier orders through a CRM system.
+## Work Experience
+### E-commerce Operations | Core Color
+- Processed supplier orders through a CRM system.
+"""
+        plan = {"selected_evidence": [{"evidence_id": "THIN", "evidence_thin": True}], "roles": [],
+                "source_groups": [{"source_section": "Core Color", "evidence_ids": ["THIN"],
+                                   "source_detail": "Processed supplier orders through a CRM system."}]}
+
+        with patch.object(ai, "_selection_provider_response", return_value='{"status":"pass","issues":[]}'):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        errors = ai.classify_resume_review_errors(review)
+        self.assertIn("thin_evidence_repeated", {
+            issue["type"] for result in review["results"] for issue in result["issues"]
+        })
+        self.assertEqual(errors[0]["fix_type"], "remove_or_soften")
+
     def test_role_named_fabricated_responsibility_is_not_discarded(self):
         content, plan = self._correct_two_role_resume()
         reviewer_output = json.dumps({"status": "fail", "issues": [{
