@@ -291,6 +291,8 @@ Jan 2020 - Present
     def test_thin_evidence_repetition_reaches_auto_repair_as_supported_issue(self):
         content = """## Professional Summary
 Processed supplier orders through a CRM system.
+## Technical Skills
+- CRM supplier order processing
 ## Work Experience
 ### E-commerce Operations | Core Color
 - Processed supplier orders through a CRM system.
@@ -306,7 +308,12 @@ Processed supplier orders through a CRM system.
         self.assertIn("thin_evidence_repeated", {
             issue["type"] for result in review["results"] for issue in result["issues"]
         })
+        self.assertEqual(errors[0]["issue_type"], "thin_evidence_repeated")
         self.assertEqual(errors[0]["fix_type"], "remove_or_soften")
+        with patch.object(ai, "_selection_provider_response") as provider:
+            fixed = ai.auto_fix_tailored_resume(content, errors, "[]", resume_plan_json=json.dumps(plan))
+        provider.assert_not_called()
+        self.assertEqual(fixed.casefold().count("crm"), 1)
 
     def test_role_named_fabricated_responsibility_is_not_discarded(self):
         content, plan = self._correct_two_role_resume()

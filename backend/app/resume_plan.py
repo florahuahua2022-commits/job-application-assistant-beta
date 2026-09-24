@@ -21,6 +21,16 @@ def _contains_identity(line: str, marker: str) -> bool:
     return bool(marker and f" {marker} " in f" {line} ")
 
 
+def _thin_fact_tokens(value: str) -> set[str]:
+    return {re.sub(r"(?:ing|ed|s)$", "", token) for token in re.findall(r"[a-z0-9]+", value.casefold())
+            if token not in {"a", "an", "and", "the", "through", "to", "in", "with"}}
+
+
+def _uses_thin_fact(value: str, signature: set[str]) -> bool:
+    overlap = signature & _thin_fact_tokens(value)
+    return len(overlap) >= 2 and len(overlap) / max(len(signature), 1) >= .6
+
+
 def _role_identity_positions(lines: list[str], role: dict[str, Any]) -> list[int]:
     role_marker = _normalise_identity_text(role.get("role_marker"))
     employer_marker = _normalise_identity_text(role.get("employer_marker"))
@@ -111,6 +121,26 @@ def repair_resume_role_blocks(content: str, plan: dict[str, Any], remove_omitted
     return "".join(lines[:ordered_starts[0]] + reordered + lines[section_end:])
 
 
+def repair_thin_evidence_repetition(content: str, plan: dict[str, Any]) -> str:
+    """Keep thin experience facts in Work Experience instead of padding other sections."""
+    thin_ids = {str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []
+                if item.get("evidence_thin") and item.get("evidence_id")}
+    signatures = [_thin_fact_tokens(str(group.get("source_detail") or ""))
+                  for group in plan.get("source_groups") or []
+                  if thin_ids.intersection(map(str, group.get("evidence_ids") or []))]
+
+    def clean(match: re.Match) -> str:
+        heading, body = match.group(1), match.group(2)
+        if heading.strip().casefold() == "work experience":
+            return match.group(0)
+        units = re.split(r"(?<=[.!?])\s+", body) if heading.strip().casefold() == "professional summary" else body.splitlines()
+        kept = [unit for unit in units if not any(_uses_thin_fact(unit, signature) for signature in signatures)]
+        separator = " " if heading.strip().casefold() == "professional summary" else "\n"
+        return f"## {heading}\n{separator.join(kept).strip()}\n"
+
+    return re.sub(r"(?ims)^##\s*([^\n]+)\s*$\n(.*?)(?=^##\s|\Z)", clean, content).rstrip()
+
+
 def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any]:
     """Apply cheap, objective quality checks after factual review."""
     issues = []
@@ -132,16 +162,12 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
     sections = {match.group(1).strip(): match.group(2) for match in re.finditer(
         r"(?ims)^##\s*([^\n]+)\s*$\n(.*?)(?=^##\s|\Z)", content,
     )}
-    def thin_tokens(value: str) -> set[str]:
-        return {re.sub(r"(?:ing|ed|s)$", "", token) for token in re.findall(r"[a-z0-9]+", value.casefold())
-                if token not in {"a", "an", "and", "the", "through", "to", "in", "with"}}
     for group in plan.get("source_groups") or []:
         if not thin_ids.intersection(map(str, group.get("evidence_ids") or [])):
             continue
-        signature = thin_tokens(str(group.get("source_detail") or ""))
+        signature = _thin_fact_tokens(str(group.get("source_detail") or ""))
         used_in = [name for name, text in sections.items()
-                   if len(signature & thin_tokens(text)) >= 2
-                   and len(signature & thin_tokens(text)) / max(len(signature), 1) >= .6]
+                   if _uses_thin_fact(text, signature)]
         if len(used_in) > 1:
             issues.append({
                 "type": "thin_evidence_repeated", "severity": "major", "blocks_release": True,

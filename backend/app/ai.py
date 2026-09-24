@@ -10,7 +10,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding, reconcile_review_grounding
-from .resume_plan import repair_resume_role_blocks, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
+from .resume_plan import repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, confirmed_availability_wording, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
@@ -883,6 +883,7 @@ def classify_resume_review_errors(review: dict) -> list[dict]:
                 fix_type = "restore_supported_detail" if issue.get("type") in {"requirement_omission", "generation_under_utilized"} else "remove" if complete_absence else "remove_or_soften"
             errors.append({
                 "id": f"err_{len(errors) + 1}",
+                "issue_type": issue.get("type"),
                 "location": str(issue.get("location") or "Tailored CV"),
                 "claim": str(issue.get("location") or description),
                 "issue": description,
@@ -900,10 +901,18 @@ def auto_fix_tailored_resume(
 ) -> str:
     if not errors:
         return content
+    try:
+        plan = json.loads(resume_plan_json or "{}")
+    except json.JSONDecodeError:
+        plan = {}
+    if any(error.get("issue_type") == "thin_evidence_repeated" for error in errors):
+        content = repair_thin_evidence_repetition(content, plan)
+        errors = [error for error in errors if error.get("issue_type") != "thin_evidence_repeated"]
+        if not errors:
+            return content
     role_fixes = {error.get("fix_type") for error in errors} & {"role_order_mismatch", "omitted_role_expanded"}
     if role_fixes:
         try:
-            plan = json.loads(resume_plan_json or "{}")
             repaired = repair_resume_role_blocks(
                 content, plan, "omitted_role_expanded" in role_fixes,
             )
@@ -911,7 +920,7 @@ def auto_fix_tailored_resume(
             if remaining & role_fixes:
                 return content
             content = repaired
-        except json.JSONDecodeError:
+        except (TypeError, KeyError):
             return content
         errors = [error for error in errors if error.get("fix_type") not in role_fixes]
         if not errors:
