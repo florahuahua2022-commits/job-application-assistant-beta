@@ -127,6 +127,28 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
                 "location": group["source_section"], "evidence": detail, "owner": "user_add_source_detail",
                 "recommended_action": "Add the actual tasks, people, tools or scope for this role. Numbers are optional.",
             })
+    thin_ids = {str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []
+                if item.get("evidence_thin") and item.get("evidence_id")}
+    sections = {match.group(1).strip(): match.group(2) for match in re.finditer(
+        r"(?ims)^##\s*([^\n]+)\s*$\n(.*?)(?=^##\s|\Z)", content,
+    )}
+    def thin_tokens(value: str) -> set[str]:
+        return {re.sub(r"(?:ing|ed|s)$", "", token) for token in re.findall(r"[a-z0-9]+", value.casefold())
+                if token not in {"a", "an", "and", "the", "through", "to", "in", "with"}}
+    for group in plan.get("source_groups") or []:
+        if not thin_ids.intersection(map(str, group.get("evidence_ids") or [])):
+            continue
+        signature = thin_tokens(str(group.get("source_detail") or ""))
+        used_in = [name for name, text in sections.items()
+                   if len(signature & thin_tokens(text)) >= 2
+                   and len(signature & thin_tokens(text)) / max(len(signature), 1) >= .6]
+        if len(used_in) > 1:
+            issues.append({
+                "type": "thin_evidence_repeated", "severity": "major", "blocks_release": True,
+                "description": f"Thin evidence from {group['source_section']} is repeated across {', '.join(used_in)}.",
+                "location": ", ".join(used_in), "evidence": group.get("source_detail"), "owner": "system_rewrite",
+                "recommended_action": "Keep this fact once under its Work Experience role; do not reuse it to fill Summary or skills sections.",
+            })
     if target_words and word_count < target_words * .7 and not issues:
         issues.append({
             "type": "concise_but_relevant", "severity": "advisory", "blocks_release": False,

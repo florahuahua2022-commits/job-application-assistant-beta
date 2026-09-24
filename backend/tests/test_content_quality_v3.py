@@ -89,6 +89,25 @@ class QualityV3Tests(unittest.TestCase):
         plan = {"target_words": 650, "selected_evidence": [{"evidence_type": "experience", "evidence_thin": True}]}
         self.assertEqual({evaluate_resume_quality("word " * n, plan)["status"] for n in [451, 454, 455, 459, 650]}, {"pass"})
 
+    def test_thin_experience_fact_cannot_fill_multiple_cv_sections(self):
+        plan = {
+            "selected_evidence": [{"evidence_id": "THIN", "evidence_type": "experience", "evidence_thin": True}],
+            "source_groups": [{"source_section": "Core Color", "evidence_ids": ["THIN"],
+                               "source_detail": "Processed supplier orders through a CRM system."}],
+        }
+        content = """## Professional Summary
+Processed supplier orders through a CRM system.
+## Key Skills
+- CRM supplier order processing
+## Work Experience
+### E-commerce Operations | Core Color
+- Processed supplier orders through a CRM system.
+"""
+
+        issues = evaluate_resume_quality(content, plan)["issues"]
+
+        self.assertIn("thin_evidence_repeated", [issue["type"] for issue in issues])
+
     def test_generic_source_blocks_even_if_output_is_long(self):
         plan = {"source_groups": [{"source_section": "Officer at Agency", "source_detail": "Responsible for daily administrative work."}]}
         for content in ["Short CV.", "word " * 650]:
