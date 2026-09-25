@@ -37,7 +37,7 @@ from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePa
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
-from .resume_plan import build_resume_curation_plan, evaluate_resume_quality, selected_resume_evidence_ids, validate_resume_content
+from .resume_plan import build_resume_curation_plan, evaluate_resume_quality, repair_missing_timeline, selected_resume_evidence_ids, validate_resume_content
 from .release_state import ats_is_current, details_fingerprint, document_is_current, fingerprint, generation_inputs_fingerprint, load_release_state, pack_fingerprint, pack_review_is_current
 from .selection_logic import actual_word_count, build_selection_plan, criteria_requiring_confirmation
 from .source_acquisition import acquire_sources, process_uploaded_document
@@ -3392,6 +3392,7 @@ def generate_document(
                 if evidence_id in allowed_evidence_ids
             ]
     if payload.document_type == "tailored_resume":
+        content = repair_missing_timeline(content, resume_plan or {})
         validation = validate_resume_content(content, resume_plan or {}, metadata["used_experiences"])
         # Structural failures remain inspectable drafts; the final review blocks release.
     generation_provider = provider_response_telemetry()

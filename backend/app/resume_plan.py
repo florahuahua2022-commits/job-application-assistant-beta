@@ -92,6 +92,23 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
     return {"valid": not issues, "word_count": word_count, "issues": issues}
 
 
+def repair_missing_timeline(content: str, plan: dict[str, Any]) -> str:
+    expected = timeline_text(plan)
+    if not expected or _normalise_identity_text(expected) in _normalise_identity_text(content):
+        return content
+    existing = re.search(r"(?im)^##\s*Additional Experience\s*$", content)
+    if existing:
+        next_section = re.search(r"(?im)^##\s+", content[existing.end():])
+        insert_at = existing.end() + (next_section.start() if next_section else len(content[existing.end():]))
+        return f"{content[:insert_at].rstrip()}\n\n{expected}\n{content[insert_at:].lstrip()}".rstrip()
+    next_section = re.search(
+        r"(?im)^##\s*(?:Education|Qualifications|Certifications|Training|Technical Skills|Additional Information)\b",
+        content,
+    )
+    insert_at = next_section.start() if next_section else len(content)
+    return f"{content[:insert_at].rstrip()}\n\n## Additional Experience\n\n{expected}\n\n{content[insert_at:].lstrip()}".rstrip()
+
+
 def repair_resume_role_blocks(content: str, plan: dict[str, Any], remove_omitted: bool = False) -> str:
     """Remove omitted roles and reorder complete role blocks without rewriting them."""
     lines = content.splitlines(keepends=True)

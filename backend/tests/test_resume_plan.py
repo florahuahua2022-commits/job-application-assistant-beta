@@ -2,7 +2,7 @@ import json
 import unittest
 
 from app.ckb import build_career_knowledge_base
-from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, evaluate_resume_quality, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
+from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, evaluate_resume_quality, repair_missing_timeline, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 from app.resume_timeline import timeline_text
 
 
@@ -13,6 +13,16 @@ def evidence(evidence_id, section, action="Grounded work", *, period=None, resul
 
 
 class ResumeCurationPlanTests(unittest.TestCase):
+    def test_repairs_missing_timeline_without_expanding_thin_role(self):
+        plan = {"timeline": {"groups": [{"entries": ["Core Color, E-commerce Operations | 2022"]}]}}
+        content = "## Work Experience\nCurrent role\n\n## Education & Qualifications\nBachelor of Arts"
+
+        repaired = repair_missing_timeline(content, plan)
+
+        self.assertIn("## Additional Experience\n\nCore Color, E-commerce Operations | 2022", repaired)
+        self.assertNotIn("Processed supplier orders", repaired)
+        self.assertLess(repaired.index("## Additional Experience"), repaired.index("## Education & Qualifications"))
+
     def test_default_plan_sets_a_firm_resume_word_ceiling(self):
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [])
 
