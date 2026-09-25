@@ -46,7 +46,7 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
     action = recommended_action.casefold().strip(" .")
     if (
         recommended_action.casefold().startswith(("no change required", "no action required"))
-        or action in {"none", "advisory only"}
+        or action in {"none", "advisory only", "no change", "no action"}
         or re.search(r"\bno (?:actual )?defect\.?$", description.casefold())
     ):
         return None

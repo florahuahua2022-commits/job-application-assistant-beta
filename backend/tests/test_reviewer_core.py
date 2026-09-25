@@ -163,6 +163,16 @@ class SharedReviewerCoreTests(unittest.TestCase):
         self.assertEqual(review["status"], "pass")
         self.assertEqual(review["results"][0]["issues"], [])
 
+    def test_reviewer_non_issue_with_plain_no_change_is_discarded(self):
+        review = normalise_document_review({"status": "fail", "issues": [{
+            "type": "generation_under_utilized",
+            "description": "This skills summary is acceptable and not a material issue.",
+            "recommended_action": "No change.",
+        }]}, "tailored_resume")
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
     def test_reviewer_non_issue_with_no_action_required_is_discarded(self):
         review = normalise_document_review({"issues": [{
             "type": "unmatched_evidence_used",
