@@ -6,7 +6,7 @@ from typing import Any
 from .experience_identity import experience_candidate_id
 
 
-CKB_SCHEMA_VERSION = "2.0"
+CKB_SCHEMA_VERSION = "2.1"
 EVIDENCE_THIN_WORD_THRESHOLD = 20
 EVIDENCE_TIMELINE_ONLY_WORD_THRESHOLD = 10
 
@@ -182,6 +182,26 @@ def _detail_evidence(source_text: str) -> list[dict[str, Any]]:
     return result
 
 
+def _normalise_claim(value: object) -> str:
+    ignored = {"self", "employed", "business", "company", "branch", "the", "of"}
+    return " ".join(word for word in re.findall(r"[a-z0-9]+", str(value or "").casefold()) if word not in ignored)
+
+
+def _excluded_claim_markers(exclusions: list[dict[str, Any]]) -> set[str]:
+    markers = set()
+    for item in exclusions:
+        for index, part in enumerate(re.split(r"\s[-–—]\s|,", str(item.get("organization") or ""))):
+            marker = _normalise_claim(part)
+            if marker and (index == 0 or len(marker.split()) > 1):
+                markers.add(marker)
+    return markers
+
+
+def _mentions_excluded_claim(item: dict[str, Any], markers: set[str]) -> bool:
+    claim = _normalise_claim(item.get("source_text"))
+    return any(re.search(rf"\b{re.escape(marker)}\b", claim) for marker in markers)
+
+
 def build_career_knowledge_base(
     source_text: str, experiences_json: str = "[]", experience_exclusions_json: str = "[]",
 ) -> list[dict[str, Any]]:
@@ -204,7 +224,11 @@ def build_career_knowledge_base(
                 item.get("organization"), item.get("role_title"), item.get("time_period_text")
             ) not in excluded_ids:
                 evidence.extend(_experience_evidence_items(item))
-    evidence.extend(_detail_evidence(source_text))
+    excluded_claim_markers = _excluded_claim_markers(
+        [item for item in exclusions if isinstance(item, dict)] if isinstance(exclusions, list) else []
+    )
+    evidence.extend(item for item in _detail_evidence(source_text)
+                    if not _mentions_excluded_claim(item, excluded_claim_markers))
     unique: dict[str, dict[str, Any]] = {}
     for item in evidence:
         if item.get("source_paragraph") and item.get("source_location") is None:

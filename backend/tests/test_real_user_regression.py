@@ -798,7 +798,7 @@ Education"""
     def test_current_empty_date_states_are_reused_without_rebuild(self):
         for status in ("uncertain", "not_provided"):
             with self.subTest(status=status), Session(self.engine) as session:
-                ckb = [{"schema_version": "2.0", "evidence_type": "experience", "source_group_id": "role", "time_period": {"start": None, "end": None}, "time_period_status": status}]
+                ckb = [{"schema_version": "2.1", "evidence_type": "experience", "source_group_id": "role", "time_period": {"start": None, "end": None}, "time_period_status": status}]
                 resume = Resume(source_text="Authoritative source", experiences_json="[]", ckb_json=json.dumps(ckb))
                 session.add(resume); session.commit(); session.refresh(resume)
                 with patch("app.main.serialise_ckb", side_effect=AssertionError("current CKB must not rebuild")):

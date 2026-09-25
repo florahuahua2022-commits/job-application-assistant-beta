@@ -168,7 +168,9 @@ def application_master_resume(
             or snapshot.get("experiences_json", "[]") != latest.experiences_json
         ) and exclusion_anchor_ids(snapshot.get("experience_exclusions_json")) == exclusion_anchor_ids(latest.experience_exclusions_json) \
                 and not master_resume_integrity_issue(latest):
-            apply_resume_snapshot(application, latest, serialise_ckb(latest.source_text, latest.experiences_json))
+            apply_resume_snapshot(application, latest, serialise_ckb(
+                latest.source_text, latest.experiences_json, latest.experience_exclusions_json,
+            ))
             session.add(application); session.commit()
             snapshot = json.loads(application.resume_snapshot_json)
         return Resume(
@@ -186,11 +188,17 @@ def application_ckb(session: Session, application: JobApplication, resume: Resum
     if application.resume_snapshot_json not in {"", "{}", None}:
         try:
             snapshot_ckb = json.loads(resume.ckb_json or "[]")
-            if career_knowledge_base_is_current(snapshot_ckb):
+            if career_knowledge_base_is_current(snapshot_ckb) and (
+                snapshot_ckb or not build_career_knowledge_base(
+                    resume.source_text, resume.experiences_json, resume.experience_exclusions_json,
+                )
+            ):
                 return snapshot_ckb, "reused_snapshot"
         except (json.JSONDecodeError, TypeError):
             pass
-        refreshed = json.loads(serialise_ckb(resume.source_text, resume.experiences_json))
+        refreshed = json.loads(serialise_ckb(
+            resume.source_text, resume.experiences_json, resume.experience_exclusions_json,
+        ))
         snapshot = json.loads(application.resume_snapshot_json or "{}")
         snapshot["ckb_json"] = json.dumps(refreshed, ensure_ascii=False)
         resume.ckb_json = snapshot["ckb_json"]
@@ -401,7 +409,10 @@ def get_or_refresh_current_ckb(session: Session, master_resume: Resume, user_id:
         for section, start, end in recoveries
     )
     has_exclusions = bool(resume_exclusions(master_resume))
-    if career_knowledge_base_is_current(persisted) and source_periods_current and not experiences_changed and not has_exclusions:
+    empty_cache_is_valid = bool(persisted) or not build_career_knowledge_base(
+        master_resume.source_text, recovered_experiences, master_resume.experience_exclusions_json,
+    )
+    if career_knowledge_base_is_current(persisted) and empty_cache_is_valid and source_periods_current and not experiences_changed and not has_exclusions:
         return persisted, "reused_current"
     refreshed = json.loads(serialise_ckb(
         master_resume.source_text, recovered_experiences, master_resume.experience_exclusions_json,
@@ -1350,11 +1361,11 @@ async def upload_resume(
     except ValueError as error:
         raise HTTPException(400, str(error))
     experiences_json = json.dumps(extract_resume_experiences(source_text), ensure_ascii=False)
-    ckb_json = serialise_ckb(source_text, experiences_json)
     current = session.exec(select_for_user(Resume, user_id).order_by(Resume.updated_at.desc())).first()
     exclusions_json = reconcile_experience_exclusions(
         source_text, json.loads(experiences_json), current.experience_exclusions_json if current else "[]"
     )
+    ckb_json = serialise_ckb(source_text, experiences_json, exclusions_json)
     if current:
         current.title = title.strip() or "Master Resume"
         current.source_text = source_text
@@ -1500,7 +1511,9 @@ def update_resume(
             )
         values["experiences_json"] = next_experiences_json
         values["experience_exclusions_json"] = proposed.experience_exclusions_json
-        values["ckb_json"] = serialise_ckb(next_source_text, next_experiences_json)
+        values["ckb_json"] = serialise_ckb(
+            next_source_text, next_experiences_json, proposed.experience_exclusions_json,
+        )
     for key, value in values.items():
         setattr(resume, key, value)
     resume.updated_at = utc_now()
