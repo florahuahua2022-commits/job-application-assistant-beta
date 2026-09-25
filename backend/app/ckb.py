@@ -8,6 +8,7 @@ from .experience_identity import experience_candidate_id
 
 CKB_SCHEMA_VERSION = "2.0"
 EVIDENCE_THIN_WORD_THRESHOLD = 20
+EVIDENCE_TIMELINE_ONLY_WORD_THRESHOLD = 10
 
 
 def evidence_density(item: dict[str, Any]) -> dict[str, Any]:

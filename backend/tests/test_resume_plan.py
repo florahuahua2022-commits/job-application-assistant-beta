@@ -3,10 +3,12 @@ import unittest
 
 from app.ckb import build_career_knowledge_base
 from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, evaluate_resume_quality, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
+from app.resume_timeline import timeline_text
 
 
-def evidence(evidence_id, section, action="Grounded work", *, period=None, result=""):
+def evidence(evidence_id, section, action="Grounded work", *, period=None, result="", thin=False):
     return {"evidence_id": evidence_id, "evidence_type": "experience", "source_section": section, "source_text": action,
+            "source_paragraph": action if thin else f"{action} Verified source context also records the work scope, systems, stakeholders and supporting employment detail.",
             "time_period": period or {"start": None, "end": None}, "action": action, "evidence_quality": "medium", "result": result}
 
 
@@ -41,6 +43,33 @@ class ResumeCurationPlanTests(unittest.TestCase):
         plan = build_resume_curation_plan({"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb)
 
         self.assertEqual([role["employer_marker"] for role in plan["roles"]], ["Core Color", "Avaintec"])
+
+    def test_single_thin_action_is_timeline_only_but_multiple_actions_remain_full(self):
+        thin = evidence("THIN", "Work > Core Color > E-commerce Operations",
+                        "Processed supplier orders through a CRM system.", period={"start": "2022", "end": None}, thin=True)
+        rich = [
+            evidence("R1", "Work > Example Logistics > Warehouse Administrator",
+                     "Processed inbound supplier orders.", period={"start": "2023", "end": "2024"}, thin=True),
+            evidence("R2", "Work > Example Logistics > Warehouse Administrator",
+                     "Maintained warehouse dispatch records.", period={"start": "2023", "end": "2024"}, thin=True),
+        ]
+        ckb = [thin, *rich]
+        matches = {"matches": [{
+            "criteria_id": "C1", "matched_evidence": ["THIN", "R1", "R2"],
+            "match_type": "direct", "coverage": "strong",
+        }]}
+
+        plan = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "C1", "criteria_type": "essential"}]}, matches, ckb,
+        )
+
+        thin_role = next(role for role in plan["roles"] if role["employer_marker"] == "Core Color")
+        rich_role = next(role for role in plan["roles"] if role["employer_marker"] == "Example Logistics")
+        self.assertEqual((thin_role["display_mode"], thin_role["include_role_header"]), ("timeline_only", False))
+        self.assertEqual((rich_role["display_mode"], rich_role["include_role_header"]), ("full", True))
+        self.assertEqual(timeline_text(plan), "Core Color, E-commerce Operations | 2022")
+        self.assertNotIn("THIN", selected_resume_evidence_ids(plan))
+        self.assertTrue({"R1", "R2"}.issubset(selected_resume_evidence_ids(plan)))
 
     def test_updated_kenya_period_reorders_plan_ahead_of_avaintec(self):
         ckb = [
@@ -309,14 +338,20 @@ Jan 2010 - Dec 2010"""
     def test_short_resume_attributes_source_density_and_names_experience(self):
         section = "Work Experience > Example Department > Finance Administration Officer"
         matches = {"matches": [{"criteria_id": "C1", "match_type": "direct", "matched_evidence": ["FIN"]}]}
-        for source, reason in (("负责日常行政工作", "insufficient_source_detail"),
-                               ("Reconciled weekly invoices in the finance system, checked supplier details against purchase orders, investigated discrepancies with business units and maintained an audit register for monthly reporting.", "generation_under_utilized")):
-            plan = build_resume_curation_plan({"criteria": []}, matches, [evidence("FIN", section, source)])
-            quality = evaluate_resume_quality("Short draft.", plan)
-            issue = quality["issues"][0]
-            self.assertEqual(issue["type"], reason if reason == "insufficient_source_detail" else "concise_but_relevant")
-            self.assertEqual(issue["blocks_release"], reason == "insufficient_source_detail")
-            self.assertNotIn("new application", issue["recommended_action"])
+        thin_plan = build_resume_curation_plan(
+            {"criteria": []}, matches, [evidence("FIN", section, "负责日常行政工作", thin=True)],
+        )
+        self.assertEqual(thin_plan["roles"][0]["display_mode"], "timeline_only")
+        self.assertEqual(evaluate_resume_quality("Short draft.", thin_plan)["status"], "pass")
+
+        detailed = "Reconciled weekly invoices in the finance system, checked supplier details against purchase orders, investigated discrepancies with business units and maintained an audit register for monthly reporting."
+        detailed_plan = build_resume_curation_plan(
+            {"criteria": []}, matches, [evidence("FIN", section, detailed, thin=True)],
+        )
+        issue = evaluate_resume_quality("Short draft.", detailed_plan)["issues"][0]
+        self.assertEqual(issue["type"], "concise_but_relevant")
+        self.assertFalse(issue["blocks_release"])
+        self.assertNotIn("new application", issue["recommended_action"])
 
     def test_split_duties_use_combined_role_detail_for_quality_gate(self):
         section = "Work Experience > Example Department > Project Officer"

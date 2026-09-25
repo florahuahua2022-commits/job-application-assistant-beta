@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from collections import defaultdict
 from typing import Any
-from .ckb import evidence_density
+from .ckb import EVIDENCE_TIMELINE_ONLY_WORD_THRESHOLD, evidence_density
 from .resume_timeline import apply_timeline, timeline_text
 from .job_model import match_advertised_tags
 
@@ -447,6 +447,11 @@ def build_resume_curation_plan(
             "max_bullets": None if role_selected else 0,
             "supports_requirements": sorted({link[0] for link in links}),
             "evidence_framing": framing,
+            "timeline_only_due_to_thin_evidence": (
+                len(role_selected) == 1
+                and evidence_density(evidence_by_id[role_selected[0]])["source_detail_words"]
+                    < EVIDENCE_TIMELINE_ONLY_WORD_THRESHOLD
+            ),
             "rationale": {
                 "promote": (
                     "Verified direct support for an essential requirement."

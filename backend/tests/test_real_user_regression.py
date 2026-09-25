@@ -736,9 +736,10 @@ Education"""
             ("Project Assistant", "Pratt & Whitney", "Oct 2007", "Aug 2012"),
         ]
         authoritative = [{
-            "role_title": role, "organization": employer, "responsibility": f"Distinct grounded duty {index}.",
+            "role_title": role, "organization": employer,
+            "responsibility": f"Distinct grounded duty {index} involving verified records, systems, stakeholders, schedules and reporting support.",
             "source_section": f"Work Experience > {employer} > {role}",
-            "source_text": f"{role}\n{employer}\n{start} – {end}\nDistinct grounded duty {index}.",
+            "source_text": f"{role}\n{employer}\n{start} – {end}\nDistinct grounded duty {index} involving verified records, systems, stakeholders, schedules and reporting support.",
         } for index, (role, employer, start, end) in enumerate(roles)]
         source_text = "Work Experience\n" + "\n".join(item["source_text"] for item in authoritative)
         experiences = json.loads(json.dumps(authoritative))

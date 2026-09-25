@@ -19,7 +19,9 @@ from app.resume_plan import build_resume_curation_plan
 
 
 def ckb_item(evidence_id, text, framing="experience"):
-    return {"evidence_id": evidence_id, "evidence_type": framing, "source_section": f"Work > {evidence_id}", "source_text": text, "action": text, "evidence_quality": "medium"}
+    return {"evidence_id": evidence_id, "evidence_type": framing, "source_section": f"Work > {evidence_id}",
+            "source_text": text, "source_paragraph": f"{text} Verified context records systems, stakeholders, schedules, reporting scope and supporting employment detail.",
+            "action": text, "evidence_quality": "medium"}
 
 
 def historical(application_id, evidence_id="E1", text="Same evidence", market="AU", title="project officer", events=("interview",), excluded=False, document_id=10):
