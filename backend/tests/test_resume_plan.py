@@ -23,6 +23,17 @@ class ResumeCurationPlanTests(unittest.TestCase):
         self.assertNotIn("Processed supplier orders", repaired)
         self.assertLess(repaired.index("## Additional Experience"), repaired.index("## Education & Qualifications"))
 
+    def test_timeline_entries_are_plain_lines_not_bullets(self):
+        plan = {"timeline": {"groups": [{"entries": ["Core Color, E-commerce Operations | 2022"]}]}}
+
+        repaired = repair_missing_timeline(
+            "## Work Experience\nCurrent role\n\n## Additional Experience\n- Core Color, E-commerce Operations | 2022",
+            plan,
+        )
+
+        self.assertIn("\nCore Color, E-commerce Operations | 2022", repaired)
+        self.assertNotIn("\n- Core Color, E-commerce Operations | 2022", repaired)
+
     def test_default_plan_sets_a_firm_resume_word_ceiling(self):
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [])
 

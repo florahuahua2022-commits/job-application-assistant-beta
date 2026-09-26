@@ -161,6 +161,7 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("visible role header even when max_bullets is zero", prompt)
         self.assertIn("Every action in a sentence naming multiple employers", prompt)
         self.assertIn("Do not replace supported wording with a broader workflow descriptor", prompt)
+        self.assertIn("Remove a Key Skills label when the same fact already appears", prompt)
 
     def test_resume_role_order_fix_moves_complete_kenya_block_only(self):
         content = """## Work Experience
@@ -841,6 +842,7 @@ November 2017 - January 2019
         self.assertIn("continuity_only", prompt)
         self.assertIn("Every action in a sentence naming multiple employers", prompt)
         self.assertIn("Do not replace supported wording with a broader workflow descriptor", prompt)
+        self.assertIn("Remove a Key Skills label when the same fact already appears", prompt)
 
     def test_empty_resume_plan_does_not_fall_back_to_matched_evidence(self):
         with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(

@@ -94,7 +94,15 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
 
 def repair_missing_timeline(content: str, plan: dict[str, Any]) -> str:
     expected = timeline_text(plan)
-    if not expected or _normalise_identity_text(expected) in _normalise_identity_text(content):
+    if not expected:
+        return content
+    for entry in expected.splitlines():
+        content = re.sub(
+            rf"(?m)^[ \t]*[-*+][ \t]+{re.escape(entry)}[ \t]*$",
+            entry,
+            content,
+        )
+    if _normalise_identity_text(expected) in _normalise_identity_text(content):
         return content
     existing = re.search(r"(?im)^##\s*Additional Experience\s*$", content)
     if existing:
