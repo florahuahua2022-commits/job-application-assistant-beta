@@ -143,6 +143,9 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("unsupported setting named in the Summary", prompt)
         self.assertIn("thin selected evidence repeated across CV sections", prompt)
         self.assertIn("adjacent evidence presented without explicit transferable framing", prompt)
+        self.assertIn("may name selected earlier examples without enumerating every intervening role", prompt)
+        self.assertIn("Concise Key Skills labels may reuse supported action nouns", prompt)
+        self.assertIn("Never flag an exact plan.timeline entry", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
