@@ -601,6 +601,7 @@ November 2017 - January 2019
         self.assertIn("Do not expand the letter to answer non-priority criteria", provider.call_args.args[0])
         self.assertIn("Remove duplicate Cover Letter headings", provider.call_args.args[0])
         self.assertIn("Do not end evidence paragraphs with stock relevance-signposting sentences", provider.call_args.args[0])
+        self.assertIn("must not name or recap any role, employer, project or capability", provider.call_args.args[0])
 
     def test_cover_letter_repair_receives_only_selected_evidence(self):
         review = {"status":"fail","results":[{"issues":[{"type":"unsupported_inference","severity":"major","description":"Managed is too strong.","location":"managed reports"}]}]}
@@ -819,6 +820,7 @@ November 2017 - January 2019
         self.assertIn("A summary or closing synthesis must not introduce a broader capability", prompt)
         self.assertIn("Do not end evidence paragraphs with stock relevance-signposting sentences", prompt)
         self.assertIn("Never attach a JD-only duty such as data entry", prompt)
+        self.assertIn("must not name or recap any role, employer, project or capability", prompt)
 
     def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
         ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'
