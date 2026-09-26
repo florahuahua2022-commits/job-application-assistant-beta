@@ -10,7 +10,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding, reconcile_review_grounding
-from .resume_plan import repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
+from .resume_plan import repair_missing_timeline, repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, confirmed_availability_wording, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
@@ -996,10 +996,21 @@ def repair_tailored_resume(
     applicant_profile: str | None = None,
     max_rounds: int = 2,
 ) -> tuple[str, dict]:
+    def repair_and_restore_timeline(text: str, review: dict) -> str:
+        fixed = auto_fix_tailored_resume(
+            text, classify_resume_review_errors(review), ckb_json, applicant_profile,
+            resume_plan_json=resume_plan_json,
+        )
+        try:
+            plan = json.loads(resume_plan_json or "{}")
+        except json.JSONDecodeError:
+            plan = {}
+        return repair_missing_timeline(fixed, plan)
+
     return _repair_document(
         content,
         lambda text: review_tailored_resume(ckb_json, job_model_json, resume_plan_json, text, applicant_profile),
-        lambda text, review: auto_fix_tailored_resume(text, classify_resume_review_errors(review), ckb_json, applicant_profile, resume_plan_json=resume_plan_json),
+        repair_and_restore_timeline,
         max_rounds,
     )
 

@@ -114,6 +114,24 @@ class GenerateDraftTests(unittest.TestCase):
         fixer.assert_not_called()
         self.assertEqual(review["generation_status"], "clean")
 
+    def test_resume_repair_restores_timeline_after_each_ai_fix(self):
+        failed = {"status": "fail", "results": [{"issues": [{
+            "type": "unsupported_claim", "severity": "major", "location": "claim",
+        }]}]}
+        passed = {"status": "pass", "results": [{"issues": []}]}
+        plan = '{"timeline":{"groups":[{"entries":["Core Color, E-commerce Operations | 2022"]}]},"selected_evidence":[]}'
+        with patch.object(ai, "review_tailored_resume", side_effect=[failed, passed]) as reviewer, patch.object(
+            ai, "auto_fix_tailored_resume", return_value="## Work Experience\nCurrent role"
+        ):
+            content, review = ai.repair_tailored_resume(
+                "## Work Experience\nCurrent role\n\n## Additional Experience\nCore Color, E-commerce Operations | 2022",
+                "[]", "{}", plan,
+            )
+
+        self.assertEqual(review["status"], "pass")
+        self.assertIn("Core Color, E-commerce Operations | 2022", content)
+        self.assertIn("Core Color, E-commerce Operations | 2022", reviewer.call_args_list[1].args[3])
+
     def test_resume_reviewer_checks_factual_curation_and_relevance(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
