@@ -577,6 +577,8 @@ November 2017 - January 2019
         self.assertIn("fabricated_entity", provider.call_args.args[0])
         self.assertIn("motivation is absent or \"Not provided\"", provider.call_args.args[0])
         self.assertIn("Do not expand the letter to answer non-priority criteria", provider.call_args.args[0])
+        self.assertIn("Remove duplicate Cover Letter headings", provider.call_args.args[0])
+        self.assertIn("Do not end evidence paragraphs with stock relevance-signposting sentences", provider.call_args.args[0])
 
     def test_cover_letter_repair_receives_only_selected_evidence(self):
         review = {"status":"fail","results":[{"issues":[{"type":"unsupported_inference","severity":"major","description":"Managed is too strong.","location":"managed reports"}]}]}
@@ -769,6 +771,7 @@ November 2017 - January 2019
         self.assertIn("Do not infer a recruiter/client relationship", prompt)
         self.assertIn("use 'Yours faithfully' after a generic salutation", prompt)
         self.assertIn("'Cover Letter: [POSITION TITLE]'", prompt)
+        self.assertIn("Include that heading exactly once, after the contact line", prompt)
 
     def test_cover_letter_prompt_uses_traceable_priority_and_narrative_plan(self):
         plan = '{"schema_version":"1.0","priorities":[{"criteria_id":"C1","requirement":"Stakeholder engagement"}],"selected_evidence":[{"evidence_id":"EV1"}],"narrative_plan":[{"section":"role_and_organisation_alignment","target_share":0.45}]}'
@@ -792,6 +795,8 @@ November 2017 - January 2019
         self.assertIn("explain relevance using only the selected CKB's own action, object, tool, context or scope", prompt)
         self.assertIn("If the explanation needs a JD-only noun, duty, causal link or role requirement", prompt)
         self.assertIn("A summary or closing synthesis must not introduce a broader capability", prompt)
+        self.assertIn("Do not end evidence paragraphs with stock relevance-signposting sentences", prompt)
+        self.assertIn("Never attach a JD-only duty such as data entry", prompt)
 
     def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
         ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'
