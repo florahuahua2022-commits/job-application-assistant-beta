@@ -79,6 +79,9 @@ class ResumeCurationPlanTests(unittest.TestCase):
         self.assertEqual((rich_role["display_mode"], rich_role["include_role_header"]), ("full", True))
         self.assertEqual(timeline_text(plan), "Core Color, E-commerce Operations | 2022")
         self.assertNotIn("THIN", selected_resume_evidence_ids(plan))
+        self.assertIn("THIN", plan["timeline_evidence_ids"])
+        self.assertNotIn("THIN", plan["omitted_evidence_ids"])
+        self.assertNotIn("THIN", plan["omission_reasons"])
         self.assertTrue({"R1", "R2"}.issubset(selected_resume_evidence_ids(plan)))
 
     def test_updated_kenya_period_reorders_plan_ahead_of_avaintec(self):

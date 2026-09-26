@@ -493,6 +493,14 @@ def build_resume_curation_plan(
 
     timeline = apply_timeline(roles, role_groups, generation_date)
     ineligible = {section for section in role_groups if next(role for role in roles if role["source_section"] == section)["display_mode"] in {"timeline_only", "hidden"}}
+    timeline_sections = {
+        role["source_section"] for role in roles if role["display_mode"] == "timeline_only"
+    }
+    timeline_evidence_ids = {
+        str(item["evidence_id"])
+        for section in timeline_sections
+        for item in role_groups[section]
+    }
     selected = [item for item in selected if item["source_section"] not in ineligible]
     selected_set = {item["evidence_id"] for item in selected}
     source_groups = {}
@@ -508,6 +516,7 @@ def build_resume_curation_plan(
     return {
         "schema_version": RESUME_PLAN_SCHEMA_VERSION,
         "timeline": timeline,
+        "timeline_evidence_ids": sorted(timeline_evidence_ids),
         "target_words": target_words,
         "maximum_words": 750,
         "target_pages": 2,
@@ -517,11 +526,12 @@ def build_resume_curation_plan(
         "selected_evidence": selected,
         "source_groups": list(source_groups.values()),
         "advertised_skill_tags": match_advertised_tags(job_model, matches, ckb),
-        "omitted_evidence_ids": sorted(set(evidence_by_id) - selected_set),
+        "omitted_evidence_ids": sorted(set(evidence_by_id) - selected_set - timeline_evidence_ids),
         "omission_reasons": {evidence_id: (
             "duplicate" if re.sub(r"\s+", " ", str(item.get("source_text") or "").strip().lower()) in seen_content
             else "explicit_evidence_budget" if support[evidence_id] else "low_relevance"
-        ) for evidence_id, item in evidence_by_id.items() if evidence_id not in selected_set},
+        ) for evidence_id, item in evidence_by_id.items()
+            if evidence_id not in selected_set and evidence_id not in timeline_evidence_ids},
         "section_budget": {"professional_summary": 80, "key_skills": 90, "work_experience": max(target_words - 220, 250), "education_qualifications_references": 50},
         "rules": [
             "Relevant roles normally use 4–6 distinct bullets and condensed roles 0–2; these are guidance, never a reason to omit a unique fact.",
