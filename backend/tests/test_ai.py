@@ -299,7 +299,7 @@ Bachelor of Arts
             "timeline": {"groups": [{"entries": ["Core Color, E-commerce Operations | 2022"]}]},
         }
         reviewer_output = json.dumps({"status": "fail", "issues": [{
-            "type": "requirement_omission",
+            "type": "unsupported_inference",
             "description": "Core Color is presented under Additional Experience with no duties, so the heading suggests an expanded role.",
             "evidence": "display_mode timeline_only; curation_action omit",
             "location": "Core Color, E-commerce Operations | 2022",

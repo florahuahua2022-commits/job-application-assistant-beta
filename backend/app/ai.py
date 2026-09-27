@@ -850,7 +850,7 @@ def _role_structure_finding(issue: dict, roles: list[dict]) -> bool:
 
 def _timeline_only_false_positive(issue: dict, plan: dict, content: str) -> bool:
     if issue.get("type") not in ROLE_STRUCTURE_TYPES | {
-        "evidence_mismatch", "requirement_omission", "generation_under_utilized",
+        "evidence_mismatch", "requirement_omission", "generation_under_utilized", "unsupported_inference",
     }:
         return False
     roles = [role for role in plan.get("roles") or [] if role.get("display_mode") == "timeline_only"]
