@@ -8,6 +8,31 @@ from app.ingest import extract_resume_experiences
 
 
 class CareerKnowledgeBaseTests(unittest.TestCase):
+    def test_user_edited_responsibility_replaces_stale_source_fields_atomically(self):
+        old_block = (
+            "E-commerce Operations\nCore Color\n2022\n"
+            "Processed supplier orders through a CRM system.\nPrepared promotion plans."
+        )
+        new_action = "Led digital marketing strategy, SEO research and an influencer network."
+        ckb = build_career_knowledge_base(
+            old_block.replace("Processed supplier orders through a CRM system.", new_action),
+            json.dumps([{
+                "role_title": "E-commerce Operations",
+                "organization": "Core Color",
+                "time_period_text": "2022",
+                "responsibility": new_action,
+                "source_text": old_block,
+                "source_paragraph": old_block,
+            }]),
+        )
+
+        self.assertEqual(len(ckb), 1)
+        self.assertEqual(ckb[0]["action"], new_action)
+        self.assertIn(new_action, ckb[0]["source_text"])
+        self.assertIn(new_action, ckb[0]["source_paragraph"])
+        self.assertNotIn("Processed supplier orders", ckb[0]["source_text"])
+        self.assertNotIn("Processed supplier orders", ckb[0]["source_paragraph"])
+
     def test_builds_versioned_experience_with_stable_provenance(self):
         source = "Project Officer\nExample Agency\nJanuary 2022 - Present\nPrepared monthly reports."
         experiences = json.dumps([{
@@ -39,6 +64,18 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         for status in ("verified", "uncertain", "not_provided"):
             with self.subTest(status=status):
                 self.assertTrue(career_knowledge_base_is_current([{**base, "time_period_status": status}]))
+
+    def test_currentness_rejects_half_updated_experience_evidence(self):
+        self.assertFalse(career_knowledge_base_is_current([{
+            "schema_version": "2.1",
+            "evidence_type": "experience",
+            "source_group_id": "core-color",
+            "time_period_status": "verified",
+            "time_period": {"start": "2022", "end": None},
+            "source_text": "Processed supplier orders through a CRM system.",
+            "source_paragraph": "Processed supplier orders through a CRM system.",
+            "action": "Led digital marketing strategy and SEO research.",
+        }]))
 
     def test_coarse_old_schema_is_refreshed_and_multiline_role_duties_stay_atomic(self):
         source = """Project Officer

@@ -38,6 +38,10 @@ EMPLOYMENT_PERIOD_PATTERN = re.compile(
 )
 
 
+def _contains_text(source: str, value: str) -> bool:
+    return re.sub(r"\s+", " ", value).strip().casefold() in re.sub(r"\s+", " ", source).strip().casefold()
+
+
 def stable_evidence_id(evidence_type: str, source_text: str) -> str:
     digest = hashlib.sha1(f"{evidence_type}|{source_text.strip()}".encode("utf-8")).hexdigest()[:12].upper()
     return f"EV{digest}"
@@ -69,7 +73,11 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
     task = str(item.get("task") or "").strip()
     result = str(item.get("result") or "").strip()
     raw_source = str(item.get("source_text") or "").strip()
-    source_text = raw_source or "\n".join(value for value in (role, organisation, situation, action, result) if value)
+    action_is_sourced = not action or _contains_text(raw_source, action)
+    source_text = raw_source if action_is_sourced else ""
+    source_text = source_text or "\n".join(value for value in (
+        role, organisation, str(item.get("time_period_text") or "").strip(), situation, action, result,
+    ) if value)
     if not source_text:
         return None
     date_text = str(item.get("time_period_text") or "").strip()
@@ -87,15 +95,18 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
     if evidence_type not in EVIDENCE_TYPES:
         evidence_type = "experience"
     evidence_id = str(item.get("evidence_id") or "").strip() or stable_evidence_id(evidence_type, source_text)
+    source_paragraph = str(item.get("source_paragraph") or raw_source or source_text)
+    if action and not _contains_text(source_paragraph, action):
+        source_paragraph = source_text
     return {
         "schema_version": CKB_SCHEMA_VERSION,
         "evidence_id": evidence_id,
         "evidence_type": evidence_type,
         "source_section": str(item.get("source_section") or f"Work Experience > {organisation or 'Unknown organisation'} > {role or 'Unknown role'}"),
         "source_text": source_text,
-        "source_paragraph": str(item.get("source_paragraph") or raw_source or source_text),
+        "source_paragraph": source_paragraph,
         "source_group_id": str(item.get("source_group_id") or stable_evidence_id("role", f"{organisation}|{role}|{supplied_period}")),
-        "source_location": item.get("source_location"),
+        "source_location": item.get("source_location") if source_paragraph == raw_source else None,
         "parsing_confidence": "high" if raw_source and date_status == "verified" else "uncertain",
         "time_period": supplied_period,
         "time_period_status": date_status,
@@ -108,13 +119,18 @@ def experience_to_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
         "evidence_quality": str(item.get("evidence_quality") or _quality(item)),
         "fact_verification": "explicit",
         "competency_inference": str(item.get("competency_inference") or "derived"),
-        **evidence_density({**item, "source_text": source_text}),
+        **evidence_density({**item, "source_text": source_text, "source_paragraph": source_paragraph}),
     }
 
 
 def _experience_evidence_items(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Keep separately written CV duties separate so a tailored CV can reuse them."""
     raw_source = str(item.get("source_text") or "").strip()
+    edited_action = str(item.get("responsibility") or item.get("action") or "").strip()
+    stored_paragraph = str(item.get("source_paragraph") or "").strip()
+    if stored_paragraph and edited_action and not _contains_text(stored_paragraph, edited_action):
+        evidence = experience_to_evidence({**item, "source_text": "", "source_paragraph": "", "source_location": None})
+        return [evidence] if evidence else []
     lines = [line.strip(" •▪■*-\t") for line in raw_source.splitlines() if line.strip()]
     date_index = next((index for index, line in enumerate(lines) if EMPLOYMENT_PERIOD_PATTERN.fullmatch(line)), -1)
     duties = [
@@ -250,6 +266,9 @@ def career_knowledge_base_is_current(items: Any) -> bool:
     return isinstance(items, list) and all(isinstance(item, dict) for item in items) and all(
         item.get("schema_version") == CKB_SCHEMA_VERSION and (item.get("evidence_type") != "experience" or (
             "time_period_status" in item and "source_group_id" in item and len(_experience_evidence_items(item)) <= 1
+            and (not item.get("action") or _contains_text(
+                str(item.get("source_paragraph") or item.get("source_text") or ""), str(item.get("action")),
+            ))
         ))
         for item in items
     )
