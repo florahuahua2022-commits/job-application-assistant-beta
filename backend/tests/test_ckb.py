@@ -33,6 +33,26 @@ class CareerKnowledgeBaseTests(unittest.TestCase):
         self.assertNotIn("Processed supplier orders", ckb[0]["source_text"])
         self.assertNotIn("Processed supplier orders", ckb[0]["source_paragraph"])
 
+    def test_multiline_edit_cannot_restore_old_source_paragraph_after_splitting(self):
+        old_block = "E-commerce Operations\nCore Color\n2022\nProcessed supplier orders through a CRM system."
+        actions = [
+            "Led digital marketing strategy and SEO research across online channels.",
+            "Developed brand content and advertising for product launches and events.",
+            "Coordinated social media content schedules and membership programmes.",
+            "Built and managed an influencer network and its budget.",
+        ]
+        ckb = build_career_knowledge_base("\n".join(actions), json.dumps([{
+            "role_title": "E-commerce Operations",
+            "organization": "Core Color",
+            "time_period_text": "2022",
+            "responsibility": "\n".join(actions),
+            "source_text": old_block,
+        }]))
+
+        self.assertEqual([item["action"] for item in ckb], actions)
+        self.assertTrue(all(item["action"] in item["source_paragraph"] for item in ckb))
+        self.assertTrue(all("Processed supplier orders" not in item["source_paragraph"] for item in ckb))
+
     def test_builds_versioned_experience_with_stable_provenance(self):
         source = "Project Officer\nExample Agency\nJanuary 2022 - Present\nPrepared monthly reports."
         experiences = json.dumps([{

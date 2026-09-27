@@ -147,7 +147,6 @@ def _experience_evidence_items(item: dict[str, Any]) -> list[dict[str, Any]]:
         detail = {**item, "evidence_id": "", "responsibility": duty, "source_paragraph": raw_source, "source_text": f"{header}\n{duty}"}
         evidence = experience_to_evidence(detail)
         if evidence:
-            evidence["source_paragraph"] = raw_source
             evidence_items.append(evidence)
     return evidence_items
 
