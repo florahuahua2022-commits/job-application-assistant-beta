@@ -617,6 +617,8 @@ November 2017 - January 2019
         self.assertIn("Supported monthly reporting", prompt)
         self.assertNotIn("Led procurement operations", prompt)
         self.assertIn("Do not import another story", prompt)
+        self.assertIn("every direct strong Cover Letter Plan priority", prompt)
+        self.assertIn("one separate employer-side sentence", prompt)
 
     def test_batch_reviewer_checks_all_responses_in_one_call_without_rewriting(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'

@@ -636,6 +636,8 @@ Repair every validator error using these rules:
 - A fuller advertised organisation name is permitted when it appears anywhere in the Shared Job Model, even if its organisation field contains an abbreviation.
 - Wording used solely to acknowledge an evidence gap may name the relevant JD requirement; it must not imply demonstrated capability.
 - Preserve correct case details, actions, tools and scope. Restore identified missing detail from the selected sources; do not delete a whole case to remove one unsupported claim.
+- For every requirement_omission, add one applicant-side sentence that states the selected CKB fact explicitly and one separate employer-side sentence that identifies the advertised priority. Repeating the advertised requirement without the applicant fact does not repair the omission.
+- Before returning, verify that every direct strong Cover Letter Plan priority with selected_evidence_ids is represented by an explicit applicant fact from those selected sources.
 - Preserve the letter's contact details, position title, salutation, sign-off and natural readability.
 - Remove duplicate Cover Letter headings; keep exactly one heading after the contact line.
 - Do not end evidence paragraphs with stock relevance-signposting sentences. Let supported facts carry the connection.
