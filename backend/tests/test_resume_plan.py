@@ -65,6 +65,45 @@ E-commerce Operations - Core Color | 2022
         self.assertEqual(plan["target_words"], 650)
         self.assertEqual(plan["maximum_words"], 750)
 
+    def test_summary_contract_rejects_generic_role_opening_and_cross_employer_attribution(self):
+        plan = {"roles": [
+            {"employer_marker": "Avaintec"},
+            {"employer_marker": "China Communications Construction Company - Kenya Branch"},
+        ]}
+        generic = """## Professional Summary
+Finance Administration Officer with the Department of Communities, providing administrative support across reporting and records management.
+## Key Skills
+Records
+## Work Experience
+Experience
+"""
+        mixed = """## Professional Summary
+Coordinated meetings at Avaintec and maintained project records and databases at China Communications Construction Company - Kenya Branch.
+## Key Skills
+Records
+## Work Experience
+Experience
+"""
+
+        self.assertIn("ai_tone", {item["type"] for item in evaluate_resume_quality(generic, plan)["issues"]})
+        self.assertIn("unsupported_inference", {item["type"] for item in evaluate_resume_quality(mixed, plan)["issues"]})
+
+    def test_summary_contract_accepts_separate_action_led_employer_anchors(self):
+        plan = {"roles": [
+            {"employer_marker": "Avaintec"},
+            {"employer_marker": "China Communications Construction Company - Kenya Branch"},
+        ]}
+        content = """## Professional Summary
+Coordinated internal and external meetings at Avaintec. Maintained project records and databases at China Communications Construction Company - Kenya Branch.
+## Key Skills
+Records
+## Work Experience
+Experience
+"""
+
+        issue_types = {item["type"] for item in evaluate_resume_quality(content, plan)["issues"]}
+        self.assertFalse({"ai_tone", "unsupported_inference"} & issue_types)
+
     def test_explicit_dates_control_presentation_while_relevance_controls_budget(self):
         ckb = [
             evidence("OLD", "Work > Older Relevant", "Executive support", period={"start": "2018", "end": "2020"}),

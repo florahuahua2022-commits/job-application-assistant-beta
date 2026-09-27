@@ -1,4 +1,4 @@
-GOVERNMENT_WRITING_RULES_VERSION = "1.1"
+GOVERNMENT_WRITING_RULES_VERSION = "1.2"
 
 
 def government_writing_rules(english_variant: str = "Australian English") -> str:
@@ -16,7 +16,9 @@ def government_writing_rules(english_variant: str = "Australian English") -> str
 - Treat every duty, system and requirement in the Job Description as an employer requirement, not as evidence that the applicant has performed the work.
 - The JD may select or prioritise evidence, but it must never supply a missing link in an applicant claim. You may explain relevance using only the selected CKB's own action, object, tool, context or scope and a separately identified advertised need; keep the applicant side at the source's exact responsibility level.
 - If the explanation needs a JD-only noun, duty, causal link or role requirement to make the experience sound relevant, omit that bridge and retain the supported evidence instead.
-- Open summaries and letters with a concrete selected CKB role, setting, action, tool, context or scope rather than a broad professional identity or unsupported combined capability.
+- Open a Professional Summary with an action-led sentence grounded in one selected CKB record. A role label followed by a broad gerund phrase such as "Finance Administration Officer ..., providing administrative support" is not action-led.
+- In a Professional Summary, use one employer per sentence. Never join duties from different employers into a shared predicate or combined capability; attribute each action to its own selected source.
+- Repeating a JD requirement alone does not cover a Cover Letter priority. State a selected CKB fact as an applicant fact, and keep the separately identified advertised requirement on the employer side.
 - A summary or closing synthesis must not introduce a broader capability than its cited selected evidence. A cover-letter close must add no new applicant fact or generic recap; it may briefly invite further discussion and state only separately confirmed requirements.
 - Never imply direct experience when the evidence is only transferable. Describe the supported transferable evidence accurately and positively without opening with a first-person deficit such as "although I have not", "while I have not", "despite not having", "I lack" or "I do not have direct experience".
 - Do not hide or fabricate an evidence gap to avoid negative wording. If the employer explicitly requires disclosure of a qualification, experience or limitation, answer neutrally, briefly and factually at the exact level supported by the evidence.

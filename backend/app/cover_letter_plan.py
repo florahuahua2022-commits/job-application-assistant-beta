@@ -16,6 +16,16 @@ COVER_LETTER_FACT_RULES = (
     "Never infer government policies, procedures or governance expertise merely from a government employer."
 )
 
+_COVERAGE_STOPWORDS = {
+    "adequate", "advanced", "and", "ability", "computer", "demonstrated", "excellent", "experience",
+    "has", "knowledge", "literacy", "required", "requirement", "skills", "strong", "the", "with",
+}
+
+
+def _coverage_terms(value: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", str(value or "").casefold())
+            if len(token) >= 3 and token not in _COVERAGE_STOPWORDS}
+
 
 def _employment_end(value: str) -> date | None:
     # Month/year precision means the end of that month/year, not its first day.
@@ -99,6 +109,25 @@ def cover_letter_contract_issues(content: str, ckb: list[dict], plan: dict, as_o
             issues.append({"type": "contradiction", "description": "Present employment wording conflicts with an ended or unestablished employment period.",
                            "location": sentence, "evidence": json.dumps([item.get("time_period") for item in candidates]),
                            "recommended_action": "Use past tense or remove the unsupported current-employment claim."})
+    evidence_by_id = {str(item.get("evidence_id")): item for item in ckb}
+    applicant_sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+|\n+", body)
+                           if re.search(r"\b(?:I|my|me|we|our)\b", sentence, re.IGNORECASE)]
+    for priority in plan.get("priorities") or []:
+        if str(priority.get("match_type")) != "direct" or str(priority.get("coverage")) != "strong":
+            continue
+        selected = [evidence_by_id[value] for value in map(str, priority.get("selected_evidence_ids") or [])
+                    if value in evidence_by_id]
+        explicit_terms = _coverage_terms(priority.get("requirement")) & set().union(*(
+            _coverage_terms(item.get("source_text") or item.get("action")) for item in selected
+        )) if selected else set()
+        if explicit_terms and not any(explicit_terms <= _coverage_terms(sentence) for sentence in applicant_sentences):
+            issues.append({
+                "type": "requirement_omission",
+                "description": "A direct strong Cover Letter priority is not stated as a supported applicant fact.",
+                "evidence": f"{priority.get('criteria_id')}: {priority.get('requirement')} | terms: {', '.join(sorted(explicit_terms))}",
+                "location": "document_wide",
+                "recommended_action": "State the selected evidence as an applicant fact; repeating the advertised requirement alone does not count as coverage.",
+            })
     return issues
 
 
@@ -192,6 +221,28 @@ def build_cover_letter_plan(
         ranked_ids.extend(members)
         remaining = [value for value in remaining if value not in members]
     selected_ids = ranked_ids
+    for priority in priorities:
+        if priority["match_type"] != "direct" or priority["coverage"] != "strong":
+            continue
+        requirement_terms = _coverage_terms(priority["requirement"])
+        candidates_for_priority = priority["candidate_evidence_ids"]
+        if not candidates_for_priority:
+            continue
+        explicit = max(candidates_for_priority, key=lambda value: (
+            len(requirement_terms & _coverage_terms(evidence_by_id[value].get("source_text") or evidence_by_id[value].get("action"))),
+            str(evidence_by_id[value].get("evidence_type") or "") == "skill",
+        ))
+        explicit_score = len(requirement_terms & _coverage_terms(
+            evidence_by_id[explicit].get("source_text") or evidence_by_id[explicit].get("action")
+        ))
+        selected_score = max((len(requirement_terms & _coverage_terms(
+            evidence_by_id[value].get("source_text") or evidence_by_id[value].get("action")
+        )) for value in selected_ids if value in candidates_for_priority), default=0)
+        if (explicit_score > selected_score and explicit not in selected_ids
+                and (len(chosen_groups) < 3 or str(evidence_by_id[explicit].get("evidence_type")) == "skill")):
+            selected_ids.append(explicit)
+    for priority in priorities:
+        priority["selected_evidence_ids"] = [value for value in priority["candidate_evidence_ids"] if value in selected_ids]
     for evidence_id in evidence_candidates:
         item = evidence_by_id[evidence_id]
         comparisons.append({"evidence_id": evidence_id, "selected": evidence_id in selected_ids,

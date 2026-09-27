@@ -234,6 +234,33 @@ class CoverLetterPlanTests(unittest.TestCase):
         pack = cover_letter_evidence_pack(json.dumps(self.ckb), json.dumps({"selected_evidence": [{"evidence_id": "EV2"}]}))
         self.assertEqual([item["evidence_id"] for item in pack], ["EV2"])
 
+    def test_strong_tool_priority_selects_explicit_skill_evidence_and_requires_applicant_coverage(self):
+        job_model = {"criteria": [
+            {"criteria_id": "ORG", "criteria_text": "Excellent organisational and time-management skills."},
+            {"criteria_id": "TOOLS", "criteria_text": "Adequate computer literacy skills: Excel, Outlook and Word."},
+        ]}
+        matches = {"matches": [
+            {"criteria_id": "ORG", "matched_evidence": ["ROLE"], "match_type": "direct", "coverage": "strong"},
+            {"criteria_id": "TOOLS", "matched_evidence": ["ROLE", "SKILLS"], "match_type": "direct", "coverage": "strong"},
+        ]}
+        ckb = [
+            {"evidence_id": "ROLE", "source_group_id": "role", "source_section": "Department role",
+             "source_text": "Collated reports and maintained records."},
+            {"evidence_id": "SKILLS", "source_group_id": "skills", "source_section": "SKILLS",
+             "evidence_type": "skill", "source_text": "Microsoft Excel (Advanced), Word, Outlook and Teams."},
+        ]
+
+        plan = build_cover_letter_plan(job_model, matches, ckb)
+        self.assertIn("SKILLS", selected_cover_letter_evidence_ids(plan))
+        tools = next(item for item in plan["priorities"] if item["criteria_id"] == "TOOLS")
+        self.assertIn("SKILLS", tools["selected_evidence_ids"])
+
+        jd_only = "The advertised role calls for adequate computer literacy skills in Excel, Outlook and Word."
+        issue_types = {item["type"] for item in cover_letter_contract_issues(jd_only, ckb, plan)}
+        self.assertIn("requirement_omission", issue_types)
+        applicant_fact = "My confirmed technical skills include Microsoft Excel, Outlook and Word."
+        self.assertNotIn("requirement_omission", {item["type"] for item in cover_letter_contract_issues(applicant_fact, ckb, plan)})
+
 
 if __name__ == "__main__":
     unittest.main()

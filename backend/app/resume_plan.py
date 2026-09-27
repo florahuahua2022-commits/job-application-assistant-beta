@@ -187,6 +187,31 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
     sections = {match.group(1).strip(): match.group(2) for match in re.finditer(
         r"(?ims)^##\s*([^\n]+)\s*$\n(.*?)(?=^##\s|\Z)", content,
     )}
+    summary = next((text for name, text in sections.items() if name.casefold() == "professional summary"), "").strip()
+    summary_sentences = [value.strip() for value in re.split(r"(?<=[.!?])\s+", summary) if value.strip()]
+    if summary_sentences:
+        first_word = (re.search(r"[A-Za-z][A-Za-z'-]*", summary_sentences[0]) or [""])[0].casefold()
+        action_led = first_word not in {"experienced", "professional", "administrator", "officer"} and (
+            first_word.endswith("ed") or first_word in {"built", "led", "made", "ran", "wrote"}
+        )
+        if not action_led:
+            issues.append({
+                "type": "ai_tone", "severity": "major", "blocks_release": True,
+                "description": "The Professional Summary must open with a concrete supported action, not a role label or broad identity phrase.",
+                "location": "Professional Summary", "evidence": summary_sentences[0], "owner": "system_rewrite",
+                "recommended_action": "Start with a selected evidence action and retain its employer or setting in the same sentence.",
+            })
+        employers = [_normalise_identity_text(role.get("employer_marker")) for role in plan.get("roles") or []]
+        for sentence in summary_sentences:
+            normalised = _normalise_identity_text(sentence)
+            mentioned = [name for name in employers if name and _contains_identity(normalised, name)]
+            if len(set(mentioned)) > 1:
+                issues.append({
+                    "type": "unsupported_inference", "severity": "critical", "blocks_release": True,
+                    "description": "One Professional Summary sentence attributes actions across multiple employers, making source ownership ambiguous.",
+                    "location": sentence, "evidence": ", ".join(sorted(set(mentioned))), "owner": "system_rewrite",
+                    "recommended_action": "Use one employer per sentence and keep only actions supported by that employer's selected evidence.",
+                })
     for group in plan.get("source_groups") or []:
         if not thin_ids.intersection(map(str, group.get("evidence_ids") or [])):
             continue

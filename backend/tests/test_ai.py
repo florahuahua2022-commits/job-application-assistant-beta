@@ -181,6 +181,8 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("continuity_only", prompt)
         self.assertIn("visible role header even when max_bullets is zero", prompt)
         self.assertIn("Every action in a sentence naming multiple employers", prompt)
+        self.assertIn("one employer per sentence", prompt)
+        self.assertIn("action-led", prompt)
         self.assertIn("Do not replace supported wording with a broader workflow descriptor", prompt)
         self.assertIn("Remove a Key Skills label when the same fact already appears", prompt)
 
@@ -668,7 +670,7 @@ November 2017 - January 2019
         self.assertEqual(review["generation_status"], "clean")
         self.assertEqual(review["telemetry"]["repair_rounds"], 1)
         self.assertNotIn("trust", repaired["content"].lower())
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", provider.call_args.args[0])
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.2", provider.call_args.args[0])
         self.assertIn("assisted/supported/contributed/liaised", provider.call_args.args[0])
         self.assertIn("does not support \"discretion\"", provider.call_args.args[0])
 
@@ -821,6 +823,7 @@ November 2017 - January 2019
         self.assertIn("Do not end evidence paragraphs with stock relevance-signposting sentences", prompt)
         self.assertIn("Never attach a JD-only duty such as data entry", prompt)
         self.assertIn("must not name or recap any role, employer, project or capability", prompt)
+        self.assertIn("Repeating a JD requirement alone does not cover", prompt)
 
     def test_cover_letter_prompt_receives_only_plan_selected_evidence(self):
         ckb = '[{"evidence_id":"KEEP","source_text":"Selected fact"},{"evidence_id":"OMIT","source_text":"Broader matched fact"}]'

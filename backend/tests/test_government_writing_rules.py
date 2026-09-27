@@ -9,8 +9,8 @@ class GovernmentWritingRulesTests(unittest.TestCase):
     def test_shared_rules_are_versioned_and_preserve_grounding_boundaries(self):
         rules = government_writing_rules()
 
-        self.assertEqual(GOVERNMENT_WRITING_RULES_VERSION, "1.1")
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", rules)
+        self.assertEqual(GOVERNMENT_WRITING_RULES_VERSION, "1.2")
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.2", rules)
         self.assertIn("traceable to supplied CKB source_text", rules)
         self.assertIn("not as evidence", rules)
         self.assertIn("only when the supporting source_text contains the number", rules)
@@ -20,6 +20,9 @@ class GovernmentWritingRulesTests(unittest.TestCase):
         self.assertIn("JD may select or prioritise evidence", rules)
         self.assertIn("explain relevance using only the selected CKB's own action", rules)
         self.assertIn("cover-letter close must add no new applicant fact or generic recap", rules)
+        self.assertIn("one employer per sentence", rules)
+        self.assertIn("action-led", rules)
+        self.assertIn("Repeating a JD requirement alone does not cover", rules)
 
     def test_variant_is_configurable_without_forking_rules(self):
         self.assertIn("professional British English", government_writing_rules("British English"))
@@ -39,15 +42,15 @@ class GovernmentWritingRulesTests(unittest.TestCase):
 
         generator_prompt = provider.call_args_list[0].args[0]
         reviewer_prompt = provider.call_args_list[1].args[0]
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", generator_prompt)
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", reviewer_prompt)
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.2", generator_prompt)
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.2", reviewer_prompt)
         self.assertIn("traceable to supplied CKB source_text", generator_prompt)
         self.assertIn("traceable to supplied CKB source_text", reviewer_prompt)
 
     def test_general_safety_instruction_uses_shared_rules(self):
         instruction = ai.safety_instruction()
 
-        self.assertIn("GOVERNMENT_WRITING_RULES_v1.1", instruction)
+        self.assertIn("GOVERNMENT_WRITING_RULES_v1.2", instruction)
         self.assertIn("traceable to supplied CKB source_text", instruction)
 
     def test_transferable_evidence_rules_avoid_self_deprecation_without_hiding_gaps(self):
