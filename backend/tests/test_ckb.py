@@ -2,6 +2,9 @@ import json
 import unittest
 
 from app.ckb import EVIDENCE_TYPES, build_career_knowledge_base, career_knowledge_base_is_current, stable_evidence_id, validate_career_knowledge_base
+from app.experience_identity import source_fingerprint
+from app.experience_identity import experience_candidate_id
+from app.ingest import extract_resume_experiences
 
 
 class CareerKnowledgeBaseTests(unittest.TestCase):
@@ -119,6 +122,78 @@ Kenya regional stakeholder engagement
         self.assertEqual(core_color["action"], "Processed supplier orders through a CRM system.")
         self.assertTrue(any(item["source_text"] == "Microsoft Office" for item in evidence))
         self.assertTrue(any(item["source_text"] == "Kenya regional stakeholder engagement" for item in evidence))
+
+    def test_source_fingerprint_exclusion_survives_parsed_identity_drift(self):
+        block = "Alpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 - July 2021\nManaged dispatch."
+        anchored_excerpt = "Alpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 - July 2021"
+        experiences = json.dumps([{
+            "organization": "Alpha Logistics Pty Ltd", "role_title": "Warehouse Supervisor",
+            "time_period_text": "March 2019 - July 2021", "responsibility": "Managed dispatch.",
+            "source_text": block,
+        }])
+        exclusions = json.dumps([{
+            "status": "excluded_by_user", "organization": "Warehouse Supervisor",
+            "role_title": "Alpha Logistics Pty Ltd", "time_period_text": "March 2019 - July 2021",
+            "anchor_version": "source_fingerprint_v1", "source_fingerprint": source_fingerprint(anchored_excerpt),
+            "source_excerpt": anchored_excerpt,
+        }])
+
+        evidence = build_career_knowledge_base(block, experiences, exclusions)
+
+        self.assertEqual(evidence, [])
+
+    def test_parser_version_anchor_drift_matrix_keeps_source_exclusions_effective(self):
+        dash = "–"
+        samples = [
+            f"Alpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 {dash} July 2021\nManaged dispatch.",
+            f"Senior Coordinator\nDepartment of Health and\nHuman Services, Victoria\n2015 {dash} 2018\nCoordinated reporting.",
+            f"Retail Assistant\nBunnings Warehouse\nJoondalup, WA\nJan 2020 {dash} Dec 2020\nAssisted customers.",
+            f"Office Administrator, Chevron Australia Pty Ltd | Feb 2016 {dash} Aug 2019\nProvided support.",
+            f"Finance Officer {dash} Woolworths Group | 2021 {dash} 2023\nReconciled reports.",
+            f"Independent Consultant\n2022 {dash} Present\nDelivered freelance services.",
+            f"Sichuan Trading Company\n2013 {dash} 2015\nHandled documentation.",
+            f"2017 {dash} 2019\nProject Engineer\nGlobal Construction\nSolutions Ltd\nOversaw logistics.",
+        ]
+        expected_drift = [False, True, True, True, True, False, True, True]
+
+        def legacy_anchor(source):
+            lines = source.splitlines()
+            date_index = next(i for i, line in enumerate(lines) if any(char.isdigit() for char in line) and dash in line)
+            period = lines[date_index]
+            previous = lines[max(0, date_index - 2):date_index]
+            if len(previous) == 2:
+                first, second = previous
+                role_words = ("officer", "assistant", "administrator", "coordinator", "manager", "consultant", "engineer")
+                first_role = any(word in first.casefold() for word in role_words)
+                second_role = any(word in second.casefold() for word in role_words)
+                if first_role != second_role:
+                    return (first, second, period) if first_role else (second, first, period)
+                company_words = ("pty", "ltd", "company", "department", "university", "group")
+                first_company = any(word in first.casefold() for word in company_words)
+                second_company = any(word in second.casefold() for word in company_words)
+                if first_company != second_company:
+                    return (second, first, period) if first_company else (first, second, period)
+                return first, second, period
+            if previous:
+                return previous[-1], "", period
+            return "", "", period
+
+        for index, (source, drift_expected) in enumerate(zip(samples, expected_drift), start=1):
+            with self.subTest(sample=index):
+                new_item = extract_resume_experiences("Work Experience\n" + source + "\nEducation")[0]
+                old_role, old_org, old_period = legacy_anchor(source)
+                old_id = experience_candidate_id(old_org, old_role, old_period)
+                new_id = experience_candidate_id(
+                    new_item["organization"], new_item["role_title"], new_item["time_period_text"]
+                )
+                self.assertEqual(old_id != new_id, drift_expected)
+                source_exclusion = json.dumps([{
+                    "status": "excluded_by_user", "organization": old_org, "role_title": old_role,
+                    "time_period_text": old_period, "anchor_version": "source_fingerprint_v1",
+                    "source_fingerprint": source_fingerprint(new_item["source_text"]),
+                    "source_excerpt": new_item["source_text"], "source_occurrence": 1,
+                }])
+                self.assertEqual(build_career_knowledge_base(source, json.dumps([new_item]), source_exclusion), [])
 
     def test_validation_rejects_unverified_or_unknown_evidence(self):
         item = {

@@ -14,7 +14,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 from pypdf import PdfReader
 from .ckb import EMPLOYMENT_PERIOD_PATTERN, stable_evidence_id
-from .experience_identity import experience_candidate_id, experience_identity_value
+from .experience_identity import experience_candidate_id, experience_identity_value, source_anchor_present, source_fingerprint
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -81,10 +81,17 @@ def _resume_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-_ROLE_WORDS = r"officer|assistant|administrator|coordinator|manager|director|advisor|adviser|consultant|analyst|specialist|lead|engineer|accountant|clerk|secretary|executive"
+_ROLE_WORDS = r"officer|assistant|administrator|coordinator|supervisor|manager|director|advisor|adviser|consultant|analyst|specialist|lead|engineer|accountant|clerk|secretary|executive|worker|operator|operations"
 _ROLE_HINT = re.compile(fr"(?i)\b(?:{_ROLE_WORDS})\b")
 _COVERAGE_ROLE_HINT = re.compile(fr"(?i)\b(?:{_ROLE_WORDS}|worker|operator|operations|roles)\b")
-_COMPANY_HINT = re.compile(r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|council|department|university|college|government|authority|agency|company|corporation|corp|project|branch)\b")
+_COMPANY_HINT = re.compile(r"(?i)\b(?:pty|ltd|limited|inc|group|services|solutions|warehouse|council|department|university|college|government|authority|agency|company|corporation|corp|project|branch|self-employed)\b")
+_ROLE_MODIFIER_HINT = re.compile(r"(?i)\b(?:senior|junior|lead|independent|executive)\b")
+_ORGANISATION_PREFIX_HINT = re.compile(r"(?i)^(?:department|university|college|city|shire)\s+of\b")
+_LOCATION_HINT = re.compile(
+    r"(?i)^(?:(?:Perth|Adelaide|Melbourne|Sydney|Brisbane|Darwin|Hobart|Canberra)|"
+    r"(?:[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)*,\s*)?(?:WA|VIC|NSW|QLD|SA|TAS|NT|ACT)(?:\s+\d{4})?)$"
+)
+_EMBEDDED_LOCATION_HINT = re.compile(r"(?i)\b(?:Perth|Adelaide|Melbourne|Sydney|Brisbane|Darwin|Hobart|Canberra)\s*$")
 _DUTY_START = re.compile(
     r"(?i)^(?:assisted|provided|prepared|supported|managed|coordinated|maintained|processed|reviewed|delivered|developed|"
     r"responsible|led|collated|served|handled|created|implemented|monitored|organised|organized)\b"
@@ -105,6 +112,167 @@ def _employment_identity(first: str, second: str) -> tuple[str, str]:
     return first, second
 
 
+def _identity_choice_needs_review(best_score: int, runner_up_score: int) -> bool:
+    return best_score - runner_up_score < 2
+
+
+def _qualified_identity_fields(role: str, role_score: int, organisation: str, organisation_score: int) -> tuple[str, str]:
+    return (role if role_score >= 4 else "", organisation if organisation_score >= 4 else "")
+
+
+def _delimiter_split_is_confident(
+    role_score: int, role_organisation_score: int, organisation_score: int, organisation_role_score: int,
+) -> bool:
+    return (
+        role_score >= 4
+        and role_score - role_organisation_score >= 2
+        and organisation_score >= 4
+        and organisation_score - organisation_role_score >= 2
+        and role_score + organisation_score >= 9
+    )
+
+
+def _identity_scores(line: str) -> tuple[int, int, int, int]:
+    words = re.findall(r"[A-Za-z0-9&'-]+", line)
+    is_location = bool(_LOCATION_HINT.fullmatch(line))
+    is_duty = bool(_DUTY_START.match(line)) or bool(re.search(r"[.!?]$", line))
+    is_period = bool(EMPLOYMENT_PERIOD_PATTERN.search(line))
+    role = 4 * bool(_ROLE_HINT.search(line)) + 2 * bool(_ROLE_MODIFIER_HINT.search(line))
+    organisation = 5 * bool(_COMPANY_HINT.search(line) and not _ROLE_HINT.search(line)) + 3 * bool(_ORGANISATION_PREFIX_HINT.search(line))
+    if 2 <= len(words) <= 10:
+        role += 1
+    if words and all(word == "&" or word[:1].isupper() or word.casefold() in {"of", "and", "the"} for word in words):
+        organisation += 2
+    if _COMPANY_HINT.search(line) and not _ROLE_HINT.search(line):
+        role -= 4
+    if _ROLE_HINT.search(line) and not _COMPANY_HINT.search(line):
+        organisation -= 4
+    if is_location:
+        role -= 4
+        organisation -= 5
+    elif _EMBEDDED_LOCATION_HINT.search(line):
+        role -= 4
+        organisation -= 2
+    if is_duty or is_period:
+        role -= 6
+        organisation -= 6
+    return role, organisation, 5 if is_location else 0, 6 if is_duty else 0
+
+
+def _split_inline_identity(value: str) -> tuple[str, str] | None:
+    separators = [r"\s*\|\s*", r"\s*,\s*", r"\s+[–—-]\s+"]
+    for separator in separators:
+        parts = [part.strip() for part in re.split(separator, value, maxsplit=1) if part.strip()]
+        if len(parts) != 2:
+            continue
+        first_role, first_org, _, _ = _identity_scores(parts[0])
+        second_role, second_org, _, _ = _identity_scores(parts[1])
+        choices = []
+        if _delimiter_split_is_confident(first_role, first_org, second_org, second_role):
+            choices.append((first_role + second_org, parts[0], parts[1]))
+        if _delimiter_split_is_confident(second_role, second_org, first_org, first_role):
+            choices.append((second_role + first_org, parts[1], parts[0]))
+        if choices:
+            _, role, organisation = max(choices)
+            return role, organisation
+    return None
+
+
+def _header_identity(work_lines: list[str], date_index: int, inline: str) -> tuple[str, str, set[int], bool]:
+    if inline:
+        split = _split_inline_identity(inline)
+        if split:
+            return split[0], split[1], {date_index}, False
+        if ":" in inline:
+            role_score, organisation_score, _, _ = _identity_scores(inline)
+            role, organisation = _qualified_identity_fields(inline, role_score, inline, organisation_score)
+            return role, organisation, {date_index}, False
+
+    indexes: list[int] = []
+    for index in range(date_index - 1, max(-1, date_index - 4), -1):
+        line = work_lines[index]
+        if (_identity_scores(line)[3] or EMPLOYMENT_PERIOD_PATTERN.search(line)
+                or line.casefold().rstrip(":") in _NON_ROLE_HEADINGS):
+            break
+        indexes.append(index)
+    indexes.reverse()
+    for index in range(date_index + 1, min(len(work_lines), date_index + 4)):
+        line = work_lines[index]
+        if (_identity_scores(line)[3] or EMPLOYMENT_PERIOD_PATTERN.search(line)
+                or line.casefold().rstrip(":") in _NON_ROLE_HEADINGS):
+            break
+        indexes.append(index)
+    if inline:
+        indexes.append(date_index)
+
+    for index in indexes:
+        text = inline if index == date_index else work_lines[index]
+        split = _split_inline_identity(text)
+        if split:
+            return split[0], split[1], {index}, False
+
+    candidates = []
+    for index in indexes:
+        text = inline if index == date_index else work_lines[index]
+        role, organisation, location, duty = _identity_scores(text)
+        if not location and not duty:
+            candidates.append({"text": text, "indexes": {index}, "role": role, "organisation": organisation})
+
+    ordered = sorted(index for index in indexes if index != date_index)
+    for start_at in range(len(ordered)):
+        for width in (2, 3):
+            span = ordered[start_at:start_at + width]
+            if len(span) != width or span != list(range(span[0], span[0] + width)):
+                continue
+            parts = [work_lines[index] for index in span]
+            if any(_identity_scores(part)[0] >= 4 or _identity_scores(part)[2] for part in parts):
+                continue
+            text = " ".join(parts)
+            role, organisation, _, duty = _identity_scores(text)
+            if not duty:
+                candidates.append({"text": text, "indexes": set(span), "role": role,
+                                   "organisation": organisation + width - 1})
+
+    # A plain proper-name employer can lack a legal suffix. Immediate adjacency to a
+    # strong role is independent structural evidence, but still must lift the employer
+    # to the same per-field minimum score before it is accepted.
+    for candidate in candidates:
+        if candidate["role"] >= 4:
+            continue
+        if any(
+            other["role"] >= 4
+            and not candidate["indexes"] & other["indexes"]
+            and min(abs(a - b) for a in candidate["indexes"] for b in other["indexes"]) == 1
+            for other in candidates
+        ):
+            candidate["organisation"] += 2
+
+    combinations = []
+    roles = [item for item in candidates if item["role"] >= 4]
+    organisations = [item for item in candidates if item["organisation"] >= 4]
+    for role in roles:
+        for organisation in organisations:
+            if role["indexes"] & organisation["indexes"]:
+                continue
+            adjacent = min(abs(a - b) for a in role["indexes"] for b in organisation["indexes"]) == 1
+            qualified = _qualified_identity_fields(
+                role["text"], role["role"], organisation["text"], organisation["organisation"]
+            )
+            combinations.append((role["role"] + organisation["organisation"] + 2 * adjacent,
+                                 qualified[0], qualified[1], role["indexes"] | organisation["indexes"]))
+    for role in roles:
+        combinations.append((role["role"], role["text"], "", role["indexes"]))
+    for organisation in organisations:
+        if organisation["organisation"] >= 4:
+            combinations.append((organisation["organisation"], "", organisation["text"], organisation["indexes"]))
+    if not combinations:
+        return "", "", set(), False
+    combinations.sort(key=lambda item: item[0], reverse=True)
+    best = combinations[0]
+    ambiguous = len(combinations) > 1 and _identity_choice_needs_review(best[0], combinations[1][0])
+    return best[1], best[2], best[3], ambiguous
+
+
 def _experience_review_reasons(source_text: str, item: dict) -> list[str]:
     role = str(item.get("role_title") or "").strip()
     responsibility = str(item.get("responsibility") or "").strip()
@@ -112,6 +280,12 @@ def _experience_review_reasons(source_text: str, item: dict) -> list[str]:
     sentence_shaped = len(role) > 80 and bool(re.search(r"[.;!?]|\b(?:and|including|within|through)\b", role, re.IGNORECASE))
     duty_shaped = bool(_DUTY_START.match(role)) and (not responsibility or sentence_shaped)
     reasons: list[str] = []
+    if item.get("identity_ambiguous"):
+        reasons.append("ambiguous_employment_identity")
+    if not role and item.get("organization"):
+        reasons.append("missing_role_title")
+    if role and not item.get("organization"):
+        reasons.append("missing_organization")
     if duty_shaped or (not responsibility and sentence_shaped):
         reasons.append("duty_shaped_role_title")
 
@@ -141,6 +315,7 @@ def mark_resume_experience_risks(source_text: str, experiences: list[dict]) -> l
     for item in experiences:
         copy = dict(item)
         reasons = _experience_review_reasons(source_text, copy)
+        copy.pop("identity_ambiguous", None)
         copy["needs_review"] = bool(reasons)
         copy["review_reasons"] = reasons
         marked.append(copy)
@@ -170,12 +345,22 @@ def find_uncovered_experience_candidates(
         )
         for item in experiences if isinstance(item, dict)
     }
+    saved_periods = {identity[2] for identity in saved_identities}
+    saved_identity_pairs = {(identity[0], identity[1]) for identity in saved_identities}
     candidates = []
     seen = set()
     excluded_ids = {
         str(item.get("candidate_id") or "") for item in exclusions or []
         if isinstance(item, dict) and item.get("status") == "excluded_by_user"
     }
+    excluded_fingerprints = {
+        str(item.get("source_fingerprint") or "") for item in exclusions or []
+        if isinstance(item, dict) and item.get("status") == "excluded_by_user"
+    }
+    represented_organisations = [identity[0] for identity in saved_identities if identity[0]] + [
+        experience_identity_value(item.get("organization")) for item in exclusions or []
+        if isinstance(item, dict) and item.get("status") == "excluded_by_user" and item.get("organization")
+    ]
     for index, line in enumerate(work_lines):
         matches = list(EMPLOYMENT_PERIOD_PATTERN.finditer(line))
         if not matches or _DUTY_START.match(line):
@@ -207,15 +392,74 @@ def find_uncovered_experience_candidates(
                 continue
             seen.add(identity)
             candidate_id = experience_candidate_id(organization, role, period)
+            excerpt = "\n".join(work_lines[index:index + (2 if role_on_next_line else 1)])
+            fingerprint = source_fingerprint(excerpt)
             candidates.append({
                 "candidate_id": candidate_id,
-                "status": "excluded_by_user" if candidate_id in excluded_ids else "unresolved",
+                "status": "excluded_by_user" if candidate_id in excluded_ids or fingerprint in excluded_fingerprints else "unresolved",
+                "candidate_type": "parsed_identity",
                 "organization": organization,
                 "role_title": role,
                 "time_period_text": period,
-                "source_excerpt": "\n".join(work_lines[index:index + (2 if role_on_next_line else 1)]),
+                "source_excerpt": excerpt,
+                "source_fingerprint": fingerprint,
+                "source_occurrence": 1,
+                "anchor_version": "source_fingerprint_v1",
                 "review_reasons": ["possible_missing_experience"],
             })
+    candidate_periods = {experience_identity_value(item["time_period_text"]) for item in candidates}
+    for index, line in enumerate(work_lines):
+        match = EMPLOYMENT_PERIOD_PATTERN.search(line)
+        if not match:
+            continue
+        period = match.group(0).strip()
+        period_anchor = experience_identity_value(period)
+        if period_anchor in saved_periods or period_anchor in candidate_periods:
+            continue
+        inline = _resume_line(f"{line[:match.start()]} {line[match.end():]}").strip(" |–—-")
+        parsed_role, parsed_organisation, _, _ = _header_identity(work_lines, index, inline)
+        parsed_pair = (
+            experience_identity_value(parsed_organisation),
+            experience_identity_value(parsed_role),
+        )
+        if parsed_pair in saved_identity_pairs:
+            continue
+        nearby_values = {
+            experience_identity_value(value)
+            for value in work_lines[max(0, index - 3):index]
+        }
+        if any(org and role and org in nearby_values and role in nearby_values
+               for org, role in saved_identity_pairs):
+            continue
+        heading = inline or (work_lines[index - 1] if index else "")
+        role_score, organisation_score, location_score, duty_score = _identity_scores(heading)
+        if not heading or location_score or duty_score or role_score >= 4 or organisation_score >= 4:
+            continue
+        excerpt_lines = ([heading] if heading != line else []) + [line]
+        if index + 1 < len(work_lines) and _identity_scores(work_lines[index + 1])[3]:
+            excerpt_lines.append(work_lines[index + 1])
+        excerpt = "\n".join(excerpt_lines)
+        fingerprint = source_fingerprint(excerpt)
+        group_names = [experience_identity_value(part) for part in re.split(r"\s*/\s*", heading) if part.strip()]
+        excluded_group = len(group_names) > 1 and all(
+            any(name in organisation or organisation in name for organisation in represented_organisations)
+            for name in group_names
+        )
+        candidates.append({
+            "candidate_id": "EXSRC" + fingerprint[:12].upper(),
+            "status": "excluded_by_user" if fingerprint in excluded_fingerprints or excluded_group else "unresolved",
+            "candidate_type": "unparsed_block",
+            "organization": "",
+            "role_title": "",
+            "time_period_text": period,
+            "source_excerpt": excerpt,
+            "source_fingerprint": fingerprint,
+            "source_occurrence": 1,
+            "anchor_version": "source_fingerprint_v1",
+            "role_score": role_score,
+            "organization_score": organisation_score,
+            "review_reasons": ["insufficient_identity_signals"],
+        })
     return candidates
 
 
@@ -226,12 +470,31 @@ def reconcile_experience_exclusions(source_text: str, experiences: list[dict], e
         exclusions = []
     if not isinstance(exclusions, list):
         exclusions = []
+    exclusions = [dict(item) for item in exclusions if isinstance(item, dict)]
+    for item in exclusions:
+        if (item.get("status") == "excluded_by_user" and item.get("source_excerpt")
+                and item.get("anchor_version") != "source_fingerprint_v1"
+                and source_anchor_present(source_text, item)):
+            item.update(
+                anchor_version="source_fingerprint_v1",
+                source_fingerprint=source_fingerprint(item["source_excerpt"]),
+                source_occurrence=1,
+            )
     saved = {
         str(item.get("candidate_id") or ""): item for item in exclusions
-        if isinstance(item, dict) and item.get("status") == "excluded_by_user"
+        if item.get("status") == "excluded_by_user"
     }
     current = find_uncovered_experience_candidates(source_text, experiences, exclusions)
-    reconciled = [saved[item["candidate_id"]] for item in current if item["candidate_id"] in saved]
+    reconciled = [
+        item for item in exclusions
+        if isinstance(item, dict) and item.get("status") == "excluded_by_user"
+        and item.get("anchor_version") == "source_fingerprint_v1" and source_anchor_present(source_text, item)
+    ]
+    fingerprints = {item.get("source_fingerprint") for item in reconciled}
+    reconciled.extend(
+        saved[item["candidate_id"]] for item in current
+        if item["candidate_id"] in saved and saved[item["candidate_id"]].get("source_fingerprint") not in fingerprints
+    )
     return json.dumps(reconciled, ensure_ascii=False)
 
 
@@ -280,7 +543,8 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
         len(lines),
     )
     work_lines = lines[section_start:section_end]
-    date_indexes = [index for index, line in enumerate(work_lines) if EMPLOYMENT_PERIOD_PATTERN.search(line)
+    period_match = lambda value: EMPLOYMENT_PERIOD_PATTERN.search(value) or re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", value)
+    date_indexes = [index for index, line in enumerate(work_lines) if period_match(line)
                     and not re.match(r"(?i)^(?:prepared|supported|assisted|managed|coordinated|maintained|processed|reviewed|delivered|developed|provided|responsible|led|collated)\b", line)]
     if not date_indexes:
         # ponytail: only explicit short role/company header pairs are inferred;
@@ -299,55 +563,27 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
                                 "source_section": f"Work Experience > {work_lines[index + 1]} > {work_lines[index]}"})
         return records
 
-    headers: list[tuple[int, int, str, str, str]] = []
+    headers: list[tuple[int, int, str, str, str, bool]] = []
     for date_index in date_indexes:
         line = work_lines[date_index]
-        match = EMPLOYMENT_PERIOD_PATTERN.search(line)
+        match = period_match(line)
         period = match.group(0).strip()
         inline = _resume_line(f"{line[:match.start()]} {line[match.end():]}").strip(" |–—-")
-        previous = work_lines[max(0, date_index - 2):date_index]
-        responsibility_start = date_index + 1
-        if "|" in inline:
-            parts = [_resume_line(part) for part in inline.split("|") if _resume_line(part)]
-            role_title, organization = _employment_identity(parts[0], parts[1]) if len(parts) >= 2 else ("", "")
-            header_start = date_index
-        elif inline and _ROLE_HINT.search(inline):
-            role_title, organization = inline, previous[-1] if previous else ""
-            header_start = date_index - 1 if previous else date_index
-        elif inline:
-            next_line = work_lines[date_index + 1] if date_index + 1 < len(work_lines) else ""
-            if _ROLE_HINT.search(next_line):
-                role_title, organization = next_line, inline
-                header_start, responsibility_start = date_index, date_index + 2
-            else:
-                role_title, organization = (previous[-1], inline) if previous else ("", inline)
-                header_start = date_index - 1 if previous else date_index
-        elif previous and "|" in previous[-1]:
-            parts = [_resume_line(part) for part in previous[-1].split("|") if _resume_line(part)]
-            if len(previous) >= 2 and _ROLE_HINT.search(previous[-2]) and not any(_ROLE_HINT.search(part) for part in parts):
-                role_title, organization, header_start = previous[-2], previous[-1], date_index - 2
-            else:
-                role_title, organization = _employment_identity(parts[0], parts[1]) if len(parts) >= 2 else ("", "")
-                header_start = date_index - 1
-        elif len(previous) >= 2:
-            role_title, organization = _employment_identity(previous[-2], previous[-1])
-            header_start = date_index - 2
-        elif previous:
-            role_title, organization = previous[-1], ""
-            header_start = date_index - 1
-        else:
-            role_title, organization, header_start = "", "", date_index
-        headers.append((header_start, responsibility_start, role_title[:160], organization[:160], period))
+        role_title, organization, used_indexes, ambiguous = _header_identity(work_lines, date_index, inline)
+        header_start = min(used_indexes | {date_index})
+        used_after_date = [index for index in used_indexes if index > date_index]
+        responsibility_start = max(used_after_date, default=date_index) + 1
+        headers.append((header_start, responsibility_start, role_title[:160], organization[:160], period, ambiguous))
 
     experiences: list[dict] = []
-    for position, (header_start, responsibility_start, role_title, organization, period) in enumerate(headers):
+    for position, (header_start, responsibility_start, role_title, organization, period, ambiguous) in enumerate(headers):
         next_header_start = headers[position + 1][0] if position + 1 < len(headers) else len(work_lines)
         responsibility_lines = [
             line for line in work_lines[responsibility_start:next_header_start]
             if len(line) > 2 and not re.fullmatch(r"(?i)(?:responsibilities|key achievements|achievements|duties):?", line)
         ]
         responsibility = " ".join(responsibility_lines).strip()
-        if not role_title:
+        if not role_title and not organization:
             continue
         source_block = "\n".join(work_lines[max(0, header_start):next_header_start]).strip()
         evidence_id = stable_evidence_id("experience", source_block)
@@ -366,7 +602,15 @@ def extract_resume_experiences(source_text: str) -> list[dict]:
             "time_period_text": period,
             "competency_tags": [],
             "fact_verification": "explicit",
+            "identity_ambiguous": ambiguous,
         })
+    occurrences: dict[str, int] = {}
+    for item in experiences:
+        fingerprint = source_fingerprint(item["source_text"])
+        occurrences[fingerprint] = occurrences.get(fingerprint, 0) + 1
+        item["anchor_version"] = "source_fingerprint_v1"
+        item["source_fingerprint"] = fingerprint
+        item["source_occurrence"] = occurrences[fingerprint]
     return mark_resume_experience_risks(source_text, experiences)
 
 

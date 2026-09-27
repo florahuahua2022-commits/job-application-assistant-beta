@@ -5,11 +5,186 @@ from io import BytesIO
 from docx import Document
 
 from app.ckb import build_career_knowledge_base
+from app import ingest
 from app.ingest import _extract_scanned_pdf_text, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, parse_job_page, reconcile_experience_exclusions
+from app.experience_identity import source_fingerprint
 from app.job_model import build_job_model
 
 
 class IngestTests(unittest.TestCase):
+    def test_disordered_employment_headers_use_multiple_identity_signals(self):
+        cases = {
+            "employer_before_role": (
+                "Alpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 – July 2021\n- Managed daily dispatch operations for a 12-person team.",
+                ("Warehouse Supervisor", "Alpha Logistics Pty Ltd", "March 2019 – July 2021"),
+            ),
+            "multiline_employer": (
+                "Senior Coordinator\nDepartment of Health and\nHuman Services, Victoria\n2015 – 2018\n- Coordinated cross-agency reporting.",
+                ("Senior Coordinator", "Department of Health and Human Services, Victoria", "2015 – 2018"),
+            ),
+            "location_between_employer_and_date": (
+                "Retail Assistant\nBunnings Warehouse\nJoondalup, WA\nJan 2020 – Dec 2020\n- Assisted customers with product selection.",
+                ("Retail Assistant", "Bunnings Warehouse", "Jan 2020 – Dec 2020"),
+            ),
+            "comma_inline": (
+                "Office Administrator, Chevron Australia Pty Ltd | Feb 2016 – Aug 2019\n- Provided administrative support to the finance team.",
+                ("Office Administrator", "Chevron Australia Pty Ltd", "Feb 2016 – Aug 2019"),
+            ),
+            "dash_inline": (
+                "Finance Officer – Woolworths Group | 2021 – 2023\n- Reconciled daily transaction reports.",
+                ("Finance Officer", "Woolworths Group", "2021 – 2023"),
+            ),
+            "missing_employer": (
+                "Independent Consultant\n2022 – Present\n- Delivered freelance project management services to multiple clients.",
+                ("Independent Consultant", "", "2022 – Present"),
+            ),
+            "missing_role": (
+                "Sichuan Trading Company\n2013 – 2015\n- Handled import/export documentation and customs liaison.",
+                ("", "Sichuan Trading Company", "2013 – 2015"),
+            ),
+            "date_first_multiline_employer": (
+                "2017 – 2019\nProject Engineer\nGlobal Construction\nSolutions Ltd\n- Oversaw site logistics for infrastructure projects.",
+                ("Project Engineer", "Global Construction Solutions Ltd", "2017 – 2019"),
+            ),
+        }
+        for name, (header, expected) in cases.items():
+            with self.subTest(name=name):
+                records = extract_resume_experiences(f"Work Experience\n{header}\nEducation")
+                self.assertEqual(len(records), 1)
+                self.assertEqual(
+                    (records[0]["role_title"], records[0]["organization"], records[0]["time_period_text"]),
+                    expected,
+                )
+                self.assertNotIn("Joondalup", records[0]["responsibility"])
+
+    def test_identity_confidence_threshold_boundaries_are_explicit(self):
+        margin_check = getattr(ingest, "_identity_choice_needs_review", None)
+        delimiter_check = getattr(ingest, "_delimiter_split_is_confident", None)
+        self.assertIsNotNone(margin_check)
+        self.assertIsNotNone(delimiter_check)
+        if margin_check is None or delimiter_check is None:
+            return
+
+        self.assertFalse(margin_check(10, 8))  # difference exactly 2 is accepted
+        self.assertTrue(margin_check(10, 9))   # difference exactly 1 needs review
+        self.assertTrue(margin_check(10, 10))  # a tie needs review
+
+        self.assertTrue(delimiter_check(4, 2, 5, 3))   # both sides and total meet the boundary
+        self.assertFalse(delimiter_check(3, 1, 6, 2))  # role score misses by one
+        self.assertFalse(delimiter_check(5, 4, 5, 3))  # role dominance misses by one
+        self.assertFalse(delimiter_check(4, 2, 4, 2))  # complementary total misses by one
+
+    def test_each_identity_field_must_independently_reach_four(self):
+        qualify = getattr(ingest, "_qualified_identity_fields", None)
+        self.assertIsNotNone(qualify)
+        if qualify is None:
+            return
+        self.assertEqual(qualify("Role", 4, "Weak org", 3), ("Role", ""))
+        self.assertEqual(qualify("Weak role", 3, "Organisation", 4), ("", "Organisation"))
+        self.assertEqual(qualify("Weak role", 3, "Weak org", 3), ("", ""))
+        self.assertEqual(qualify("Role", 4, "Organisation", 4), ("Role", "Organisation"))
+
+    def test_weak_identity_block_is_unparsed_instead_of_fabricated(self):
+        for heading in ("Additional Australian experience", "E-commerce operations Adelaide"):
+            with self.subTest(heading=heading):
+                source = f"Work Experience\n{heading}\nMarch 2023 - May 2023\nHandled customer orders.\nEducation"
+                experiences = extract_resume_experiences(source)
+                candidates = find_uncovered_experience_candidates(source, experiences)
+                self.assertEqual(experiences, [])
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0]["candidate_type"], "unparsed_block")
+                self.assertEqual(candidates[0]["status"], "unresolved")
+                self.assertEqual(candidates[0]["review_reasons"], ["insufficient_identity_signals"])
+
+    def test_all_excluded_group_heading_does_not_reopen_as_unparsed(self):
+        source = """Work Experience
+Sodex / Woolworths / Puma 2023 - 2024
+Additional Australian experience
+Sodex: Utility, December 2023 - April 2024. Woolworths: Cashier, May 2023 - November 2023.
+Puma, Port Hedland: service station work, March 2023 - May 2023.
+Education"""
+        exclusions = [
+            {"status": "excluded_by_user", "organization": "Sodex"},
+            {"status": "excluded_by_user", "organization": "Woolworths"},
+            {"status": "excluded_by_user", "organization": "Puma, Port Hedland"},
+        ]
+
+        candidates = find_uncovered_experience_candidates(source, [], exclusions)
+
+        group = next(item for item in candidates if item["candidate_type"] == "unparsed_block")
+        self.assertEqual(group["status"], "excluded_by_user")
+
+    def test_plain_employer_with_operations_role_uses_context_without_lowering_threshold(self):
+        source = """Work Experience
+Core Color 2022
+E-commerce operations
+Adelaide
+Worked in e-commerce operations for mobile phone cases.
+Education"""
+
+        records = extract_resume_experiences(source)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            (records[0]["role_title"], records[0]["organization"], records[0]["time_period_text"]),
+            ("E-commerce operations", "Core Color", "2022"),
+        )
+
+    def test_weak_colon_header_cannot_borrow_the_next_experiences_role(self):
+        source = """Work Experience
+Puma, Port Hedland: service station work, March 2023 - May 2023.
+Core Color 2022
+E-commerce operations
+Adelaide
+Worked in e-commerce operations for mobile phone cases.
+Education"""
+
+        records = extract_resume_experiences(source)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["organization"], "Core Color")
+        self.assertEqual(records[0]["role_title"], "E-commerce operations")
+        self.assertEqual(records[0]["time_period_text"], "2022")
+
+    def test_source_fingerprint_normalises_formatting_but_not_facts(self):
+        plain = "Puma\nConsole Operator\nMarch 2023 - May 2023\n- Served customers."
+        formatted = " • Puma\r\nConsole   Operator\r\nMarch 2023 – May 2023\r\n* Served customers. "
+        changed = formatted.replace("May 2023", "June 2023")
+        self.assertEqual(source_fingerprint(plain), source_fingerprint(formatted))
+        self.assertNotEqual(source_fingerprint(plain), source_fingerprint(changed))
+
+    def test_reconcile_preserves_source_anchored_exclusion_when_identity_drifts(self):
+        source = "Work Experience\nAlpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 - July 2021\nManaged dispatch."
+        old = {"organization": "Warehouse Supervisor", "role_title": "Alpha Logistics Pty Ltd",
+               "time_period_text": "March 2019 - July 2021"}
+        block = "Alpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 - July 2021\nManaged dispatch."
+        exclusion = {**old, "status": "excluded_by_user", "source_excerpt": block,
+                     "source_fingerprint": source_fingerprint(block), "anchor_version": "source_fingerprint_v1"}
+        new = extract_resume_experiences(source)
+
+        self.assertNotEqual(
+            experience_candidate_id(old["organization"], old["role_title"], old["time_period_text"]),
+            experience_candidate_id(new[0]["organization"], new[0]["role_title"], new[0]["time_period_text"]),
+        )
+        reconciled = json.loads(reconcile_experience_exclusions(source, new, json.dumps([exclusion])))
+        self.assertEqual(len(reconciled), 1)
+        self.assertEqual(reconciled[0]["source_fingerprint"], exclusion["source_fingerprint"])
+
+    def test_reconcile_upgrades_legacy_exclusion_to_source_fingerprint(self):
+        block = "Alpha Logistics Pty Ltd\nWarehouse Supervisor\nMarch 2019 - July 2021"
+        source = f"Work Experience\n{block}\nManaged dispatch.\nEducation"
+        legacy = {
+            "candidate_id": "legacy-anchor", "status": "excluded_by_user",
+            "organization": "Warehouse Supervisor", "role_title": "Alpha Logistics Pty Ltd",
+            "time_period_text": "March 2019 - July 2021", "source_excerpt": block,
+        }
+
+        reconciled = json.loads(reconcile_experience_exclusions(source, extract_resume_experiences(source), json.dumps([legacy])))
+
+        self.assertEqual(len(reconciled), 1)
+        self.assertEqual(reconciled[0]["anchor_version"], "source_fingerprint_v1")
+        self.assertEqual(reconciled[0]["source_fingerprint"], source_fingerprint(block))
+
     def test_candidate_id_changes_only_when_an_anchor_changes(self):
         base = experience_candidate_id("Sodex", "Utility", "December 2023 - April 2024")
 
@@ -263,7 +438,7 @@ Bachelor of Business"""
             [],
         )
 
-    def test_marks_duty_between_role_and_employer_date_for_review(self):
+    def test_does_not_promote_duty_between_role_and_employer_date_to_role(self):
         source = """Work Experience
 Finance Administration Officer
 Assisted in prioritising competing tasks to support service delivery; used Dayforce within a WA Government environment.
@@ -273,11 +448,13 @@ Education"""
         result = extract_resume_experiences(source)
 
         self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["role_title"], "")
+        self.assertEqual(result[0]["organization"], "WA Government")
         self.assertTrue(result[0]["needs_review"])
-        self.assertIn("duty_shaped_role_title", result[0]["review_reasons"])
-        self.assertIn("excluded_role_header", result[0]["review_reasons"])
+        self.assertIn("missing_role_title", result[0]["review_reasons"])
+        self.assertNotIn("Assisted in prioritising", result[0]["role_title"])
 
-    def test_marks_multiple_undated_roles_swallowed_by_dated_experience(self):
+    def test_weak_mixed_header_is_unparsed_instead_of_structured(self):
         source = """Work Experience
 Puma, Port Hedland: service station work
 Mar 2023 – May 2023
@@ -289,10 +466,11 @@ Managed customer orders.
 Education"""
 
         result = extract_resume_experiences(source)
+        candidates = find_uncovered_experience_candidates(source, result)
 
-        self.assertEqual(len(result), 1)
-        self.assertTrue(result[0]["needs_review"])
-        self.assertIn("possible_merged_experiences", result[0]["review_reasons"])
+        self.assertEqual(result, [])
+        self.assertEqual(candidates[0]["candidate_type"], "unparsed_block")
+        self.assertIn("insufficient_identity_signals", candidates[0]["review_reasons"])
 
     def test_long_job_title_is_not_marked_without_duty_sentence_signals(self):
         source = """Work Experience

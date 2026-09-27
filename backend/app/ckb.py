@@ -3,7 +3,7 @@ import json
 import re
 from typing import Any
 
-from .experience_identity import experience_candidate_id
+from .experience_identity import experience_candidate_id, source_anchor_matches
 
 
 CKB_SCHEMA_VERSION = "2.1"
@@ -217,10 +217,17 @@ def build_career_knowledge_base(
         experience_candidate_id(item.get("organization"), item.get("role_title"), item.get("time_period_text"))
         for item in exclusions if isinstance(item, dict)
     } if isinstance(exclusions, list) else set()
+    source_exclusions = [
+        item for item in exclusions if isinstance(item, dict)
+        and item.get("anchor_version") == "source_fingerprint_v1" and item.get("source_fingerprint")
+    ] if isinstance(exclusions, list) else []
     evidence: list[dict[str, Any]] = []
     if isinstance(experiences, list):
         for item in experiences:
-            if isinstance(item, dict) and experience_candidate_id(
+            occurrence = int(item.get("source_occurrence") or 1) if isinstance(item, dict) else 1
+            source_excluded = any(source_anchor_matches(item.get("source_text"), occurrence, exclusion)
+                                  for exclusion in source_exclusions) if isinstance(item, dict) else False
+            if isinstance(item, dict) and not source_excluded and experience_candidate_id(
                 item.get("organization"), item.get("role_title"), item.get("time_period_text")
             ) not in excluded_ids:
                 evidence.extend(_experience_evidence_items(item))
