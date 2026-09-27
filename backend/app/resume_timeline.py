@@ -38,7 +38,7 @@ def apply_timeline(roles, role_groups, today=None):
         bounds = {(month_value(p.get("start"), today=today), month_value(p.get("end"), end=True, today=today)) for p in periods}
         if len(bounds) == 1:
             start, end = bounds.pop()
-            if role in forced_timeline and start and not end:
+            if start and not end and re.fullmatch(r"\d{4}", str(periods[0].get("start") or "").strip()):
                 end = month_value(periods[0].get("start"), end=True, today=today)
             if start and end and start <= end and start <= timeline_end:
                 intervals[role["source_section"]] = (start, min(end, timeline_end))

@@ -61,6 +61,16 @@ class ResumeTimelineTests(unittest.TestCase):
         self.assertEqual(roles[0]["display_mode"], "hidden")
         self.assertEqual(timeline["uncertain_sections"], ["0"])
 
+    def test_verified_year_only_role_can_preserve_a_real_timeline_gap(self):
+        roles, timeline = plan([
+            ("Nov 2017", "Jan 2019", "direct"),
+            ("2022", None, None),
+            ("Aug 2024", "Present", "direct"),
+        ])
+        self.assertEqual(roles[1]["display_mode"], "timeline_only")
+        self.assertIn("2022", timeline_text({"timeline": timeline}))
+        self.assertNotIn("1", timeline["uncertain_sections"])
+
 
 if __name__ == "__main__":
     unittest.main()
