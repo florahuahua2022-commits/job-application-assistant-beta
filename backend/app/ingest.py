@@ -214,9 +214,12 @@ def _header_identity(work_lines: list[str], date_index: int, inline: str) -> tup
     candidates = []
     for index in indexes:
         text = inline if index == date_index else work_lines[index]
-        role, organisation, location, duty = _identity_scores(text)
+        identity_text = re.sub(
+            r"(?i),\s*(?:Perth|Adelaide|Melbourne|Sydney|Brisbane|Darwin|Hobart|Canberra)\s*$", "", text,
+        )
+        role, organisation, location, duty = _identity_scores(identity_text)
         if not location and not duty:
-            candidates.append({"text": text, "indexes": {index}, "role": role, "organisation": organisation})
+            candidates.append({"text": identity_text, "indexes": {index}, "role": role, "organisation": organisation})
 
     ordered = sorted(index for index in indexes if index != date_index)
     for start_at in range(len(ordered)):

@@ -107,8 +107,8 @@ def repair_missing_timeline(content: str, plan: dict[str, Any]) -> str:
     existing = re.search(r"(?im)^##\s*Additional Experience\s*$", content)
     if existing:
         next_section = re.search(r"(?im)^##\s+", content[existing.end():])
-        insert_at = existing.end() + (next_section.start() if next_section else len(content[existing.end():]))
-        return f"{content[:insert_at].rstrip()}\n\n{expected}\n{content[insert_at:].lstrip()}".rstrip()
+        section_end = existing.end() + (next_section.start() if next_section else len(content[existing.end():]))
+        return f"{content[:existing.end()].rstrip()}\n\n{expected}\n\n{content[section_end:].lstrip()}".rstrip()
     next_section = re.search(
         r"(?im)^##\s*(?:Education|Qualifications|Certifications|Training|Technical Skills|Additional Information)\b",
         content,

@@ -294,16 +294,11 @@ def _repair_legacy_additional_experiences(source_text: str, experiences_json: st
             "source_text": "\n".join(value for value in (role, organization, period, responsibility) if value),
             "fact_verification": "explicit",
         })
-    core_period = "May 2022 - September 2022" if "May 2022 - September 2022" in source_text else "2022"
-    if "Core Color" in source_text:
-        replacements.append({
-            "id": "EVCORECOLOR2022", "evidence_id": "EVCORECOLOR2022", "evidence_type": "experience",
-            "organization": "Core Color", "role_title": "E-commerce Operations", "time_period_text": core_period,
-            "responsibility": "Processed supplier orders through a CRM system.",
-            "source_section": "Work Experience > Core Color > E-commerce Operations",
-            "source_text": f"E-commerce Operations\nCore Color\n{core_period}\nProcessed supplier orders through a CRM system.",
-            "fact_verification": "explicit",
-        })
+    if not any("core color" in str(item.get("organization") or "").casefold() for item in repaired):
+        parsed_core = next((item for item in extract_resume_experiences(source_text)
+                            if "core color" in str(item.get("organization") or "").casefold()), None)
+        if parsed_core:
+            replacements.append(parsed_core)
     repaired[insert_at:insert_at] = replacements
     return json.dumps(repaired, ensure_ascii=False)
 
@@ -1233,6 +1228,8 @@ def auto_polish_tailored_resume(content: str, include_references: bool = False) 
         polished = f"{polished.rstrip()}\n\n## References\nAvailable upon request"
     if not include_references:
         polished = re.sub(r"(?im)^## References\s*\n\s*(?:References?\s+)?Available (?:upon|on) request\.?\s*(?=^## |\Z)", "", polished)
+    work = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", polished)
+    work_tokens = set(re.findall(r"[a-z0-9]+", work.group(1).casefold())) if work else set()
     seen_skills = set()
     section = ""
     lines = []
@@ -1244,6 +1241,8 @@ def auto_polish_tailored_resume(content: str, include_references: bool = False) 
             if key in seen_skills:
                 continue
             seen_skills.add(key)
+            if section == "technical skills" and set(key.split()) <= work_tokens:
+                continue
         lines.append(line)
     polished = "\n".join(lines)
     return re.sub(r"\n{3,}", "\n\n", polished).strip()

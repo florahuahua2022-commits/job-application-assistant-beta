@@ -108,6 +108,23 @@ Processed supplier orders through a CRM system.
 
         self.assertIn("thin_evidence_repeated", [issue["type"] for issue in issues])
 
+    def test_technical_skills_do_not_repeat_tools_already_used_in_work_experience(self):
+        content = """## Work Experience
+### Finance Administration Officer
+- Used Dayforce and supported improvements in records management systems.
+## Technical Skills
+- Dayforce
+- Records management systems
+- Microsoft Excel
+"""
+
+        polished = auto_polish_tailored_resume(content)
+
+        technical = polished.split("## Technical Skills", 1)[1]
+        self.assertNotIn("Dayforce", technical)
+        self.assertNotIn("Records management systems", technical)
+        self.assertIn("Microsoft Excel", technical)
+
     def test_generic_source_blocks_even_if_output_is_long(self):
         plan = {"source_groups": [{"source_section": "Officer at Agency", "source_detail": "Responsible for daily administrative work."}]}
         for content in ["Short CV.", "word " * 650]:

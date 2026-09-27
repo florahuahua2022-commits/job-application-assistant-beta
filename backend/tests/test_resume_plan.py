@@ -34,6 +34,31 @@ class ResumeCurationPlanTests(unittest.TestCase):
         self.assertIn("\nCore Color, E-commerce Operations | 2022", repaired)
         self.assertNotIn("\n- Core Color, E-commerce Operations | 2022", repaired)
 
+    def test_existing_additional_experience_is_replaced_by_canonical_timeline(self):
+        plan = {"timeline": {"groups": [{"entries": [
+            "Support Worker — My Support | Aug 2024 - Aug 2025",
+            "Core Color, E-commerce Operations | 2022",
+        ]}]}}
+        content = """## Work Experience
+Current role
+
+## Additional Experience
+My Support, Support Worker | Aug 2024 - Aug 2025
+E-commerce Operations - Core Color | 2022
+
+## Technical Skills
+- Dayforce"""
+
+        repaired = repair_missing_timeline(content, plan)
+
+        additional = repaired.split("## Additional Experience\n", 1)[1].split("## Technical Skills", 1)[0]
+        self.assertEqual(
+            additional.strip(),
+            "Support Worker — My Support | Aug 2024 - Aug 2025; Core Color, E-commerce Operations | 2022",
+        )
+        self.assertNotIn("My Support, Support Worker", repaired)
+        self.assertNotIn("E-commerce Operations - Core Color", repaired)
+
     def test_default_plan_sets_a_firm_resume_word_ceiling(self):
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [])
 

@@ -14,7 +14,7 @@ from app.ai import AIServiceError
 from app.application_requirements import empty_application_requirements
 from app.ckb import build_career_knowledge_base
 from app.database import get_session
-from app.main import app, get_or_refresh_current_ckb, master_resume_integrity_issue, repair_legacy_resume_evidence
+from app.main import _repair_legacy_additional_experiences, app, get_or_refresh_current_ckb, master_resume_integrity_issue, repair_legacy_resume_evidence
 from app.models import ApplicantProfile, GeneratedDocument, JobApplication, JobSource, Resume
 from app.outcome_learning import build_submission_snapshot
 from app.release_state import details_fingerprint, fingerprint, generation_inputs_fingerprint, pack_fingerprint
@@ -185,6 +185,45 @@ EDUCATION"""
             self.assertNotIn("excluded-sodex", plan["selected_evidence"])
             self.assertEqual(stored.source_text, source)
             self.assertIsNone(master_resume_integrity_issue(stored))
+
+    def test_legacy_repair_preserves_user_edited_core_color_record(self):
+        edited_detail = "Managed product listings and processed supplier orders through the CRM system."
+        experiences = json.dumps([{
+            "id": "EVD886D211EFA3", "role_title": "Additional Australian experience",
+            "organization": "Mixed", "time_period_text": "December 2023 - April 2024",
+        }, {
+            "id": "EV1CBFDD076607", "role_title": "Mixed", "organization": "Mixed",
+            "time_period_text": "March 2023 - May 2023",
+        }, {
+            "id": "user-core", "role_title": "E-commerce Operations", "organization": "Core Color",
+            "time_period_text": "2022", "responsibility": edited_detail,
+        }])
+
+        repaired = json.loads(_repair_legacy_additional_experiences(
+            PRODUCTION_MISSING_EXPERIENCES_SOURCE, experiences, "[]",
+        ))
+
+        core = [item for item in repaired if item.get("organization") == "Core Color"]
+        self.assertEqual(len(core), 1)
+        self.assertEqual(core[0]["responsibility"], edited_detail)
+
+    def test_legacy_repair_recovers_core_color_detail_from_source_text(self):
+        source = """WORK EXPERIENCE
+Additional Australian experience
+Sodex / Woolworths / Puma March 2023 - April 2024
+Core Color 2022
+E-commerce Operations
+Packed mobile-phone cases and updated supplier orders in the CRM.
+EDUCATION"""
+        legacy = json.dumps([
+            {"id": "EVD886D211EFA3", "role_title": "Mixed", "organization": "Mixed", "time_period_text": "2023 - 2024"},
+            {"id": "EV1CBFDD076607", "role_title": "Mixed", "organization": "Mixed", "time_period_text": "2023 - 2024"},
+        ])
+
+        repaired = json.loads(_repair_legacy_additional_experiences(source, legacy, "[]"))
+
+        core = next(item for item in repaired if item.get("organization") == "Core Color")
+        self.assertEqual(core["responsibility"], "Packed mobile-phone cases and updated supplier orders in the CRM.")
 
     def test_legacy_evidence_repair_refreshes_existing_snapshots_and_caches_idempotently(self):
         legacy = json.dumps([{
