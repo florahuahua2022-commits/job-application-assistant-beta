@@ -10,7 +10,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding, reconcile_review_grounding
-from .resume_plan import repair_missing_timeline, repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
+from .resume_plan import _contains_identity, _normalise_identity_text, repair_missing_timeline, repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, confirmed_availability_wording, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
@@ -754,7 +754,7 @@ Use pass with an empty issues array when there is no material issue."""
             result = reconcile_resume_structure_findings(
                 result, plan, validate_resume_content(
                     content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []],
-                )["issues"],
+                )["issues"], content,
             )
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
@@ -848,11 +848,41 @@ def _role_structure_finding(issue: dict, roles: list[dict]) -> bool:
     )
 
 
-def reconcile_resume_structure_findings(review: dict, plan: dict, validation_issues: list[dict]) -> dict:
+def _timeline_only_false_positive(issue: dict, plan: dict, content: str) -> bool:
+    if issue.get("type") not in ROLE_STRUCTURE_TYPES | {
+        "evidence_mismatch", "requirement_omission", "generation_under_utilized",
+    }:
+        return False
+    roles = [role for role in plan.get("roles") or [] if role.get("display_mode") == "timeline_only"]
+    issue_text = _normalise_identity_text(" ".join(
+        str(issue.get(key) or "") for key in ("description", "evidence", "location", "recommended_action")
+    ))
+    if not any(any(
+        _contains_identity(issue_text, _normalise_identity_text(role.get(key)))
+        for key in ("role_marker", "employer_marker", "source_section") if role.get(key)
+    ) for role in roles):
+        return False
+    section = re.search(r"(?ims)^##\s*Additional Experience\s*$\n(.*?)(?=^##\s|\Z)", content)
+    authorised = {
+        _normalise_identity_text(entry)
+        for group in (plan.get("timeline") or {}).get("groups") or []
+        for entry in group.get("entries") or []
+    }
+    actual = {_normalise_identity_text(line) for line in (section.group(1).splitlines() if section else []) if line.strip()}
+    return bool(actual and actual <= authorised)
+
+
+def reconcile_resume_structure_findings(
+    review: dict, plan: dict, validation_issues: list[dict], content: str = "",
+) -> dict:
     """Make deterministic role structure checks authoritative over AI findings."""
     roles = plan.get("roles") or []
     for result in review.get("results") or []:
-        result["issues"] = [issue for issue in result.get("issues") or [] if not _role_structure_finding(issue, roles)]
+        result["issues"] = [
+            issue for issue in result.get("issues") or []
+            if not _role_structure_finding(issue, roles)
+            and not _timeline_only_false_positive(issue, plan, content)
+        ]
         result["status"] = "fail" if any(issue.get("blocks_release") for issue in result["issues"]) else "pass"
     if validation_issues:
         review.setdefault("results", []).append({

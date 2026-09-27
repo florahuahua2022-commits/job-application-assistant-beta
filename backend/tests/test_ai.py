@@ -267,6 +267,51 @@ Jan 2020 - Present
         self.assertEqual(review["status"], "pass")
         self.assertEqual(review["results"][0]["issues"], [])
 
+    def test_timeline_only_identity_line_discards_ai_expanded_role_false_positive(self):
+        content = """## Professional Summary
+Managed scheduling and client communication.
+
+## Work Experience
+### Independent Support Worker
+Self-employed via Mable | August 2025 - January 2026
+- Managed scheduling and direct client communication.
+
+## Additional Experience
+Core Color, E-commerce Operations | 2022
+
+## Education
+Bachelor of Arts
+"""
+        plan = {
+            "selected_evidence": [{"evidence_id": "MABLE"}],
+            "roles": [{
+                "source_section": "Work > Core Color",
+                "role_marker": "E-commerce Operations",
+                "employer_marker": "Core Color",
+                "display_period": "2022",
+                "display_mode": "timeline_only",
+                "timeline_only_due_to_thin_evidence": True,
+                "curation_action": "omit",
+                "include_role_header": False,
+                "selected_evidence_ids": [],
+                "max_bullets": 0,
+            }],
+            "timeline": {"groups": [{"entries": ["Core Color, E-commerce Operations | 2022"]}]},
+        }
+        reviewer_output = json.dumps({"status": "fail", "issues": [{
+            "type": "requirement_omission",
+            "description": "Core Color is presented under Additional Experience with no duties, so the heading suggests an expanded role.",
+            "evidence": "display_mode timeline_only; curation_action omit",
+            "location": "Core Color, E-commerce Operations | 2022",
+            "recommended_action": "Remove the timeline-only role.",
+        }]})
+
+        with patch.object(ai, "_selection_provider_response", return_value=reviewer_output):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        self.assertEqual(review["status"], "pass")
+        self.assertEqual(review["results"][0]["issues"], [])
+
     def test_deterministic_role_pass_discards_legacy_omission_format(self):
         content, plan = self._correct_two_role_resume()
         reviewer_output = json.dumps({"status": "fail", "issues": [{
