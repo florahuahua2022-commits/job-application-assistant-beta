@@ -153,6 +153,43 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertNotIn("## Technical Skills", content)
         self.assertNotIn("## Technical Skills", reviewer.call_args_list[1].args[3])
 
+    def test_resume_repair_deduplicates_items_inside_composite_technical_skill_line(self):
+        content = """## Professional Summary
+Used Dayforce and records management systems.
+## Work Experience
+Experience
+## Technical Skills
+- Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems"""
+
+        polished = ai.deduplicate_resume_skills(content)
+
+        self.assertIn("Microsoft Excel (Advanced), Word, Outlook, Teams", polished)
+        self.assertNotIn("; Dayforce", polished)
+        self.assertNotIn("; records management systems", polished)
+
+    def test_composite_technical_skill_line_removes_empty_section(self):
+        content = """## Professional Summary
+Used Dayforce and records management systems.
+## Work Experience
+Experience
+## Technical Skills
+- Dayforce; records management systems"""
+
+        self.assertNotIn("## Technical Skills", ai.deduplicate_resume_skills(content))
+
+    def test_composite_technical_skills_preserve_parenthesized_comma_group(self):
+        content = """## Professional Summary
+Used Dayforce.
+## Work Experience
+Experience
+## Technical Skills
+- Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce"""
+
+        polished = ai.deduplicate_resume_skills(content)
+
+        self.assertIn("- Microsoft Excel (Advanced), Word, Outlook, Teams", polished)
+        self.assertNotIn("; Dayforce", polished)
+
     def test_resume_reviewer_checks_factual_curation_and_relevance(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'

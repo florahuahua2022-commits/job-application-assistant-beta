@@ -107,10 +107,20 @@ def deduplicate_resume_skills(content: str) -> str:
         if line.startswith("## "):
             section = line[3:].strip().casefold()
         if section in {"key skills", "technical skills"} and line.strip().startswith("- "):
-            key = re.sub(r"[^\w]+", " ", line.strip()[2:].casefold()).strip()
-            if key in seen or (section == "technical skills" and set(key.split()) <= covered_tokens):
+            items = (
+                [item.strip() for item in re.split(r";(?=(?:[^()]|\([^()]*\))*$)", line.strip()[2:])]
+                if section == "technical skills" else [line.strip()[2:]]
+            )
+            kept = []
+            for item in items:
+                key = re.sub(r"[^\w]+", " ", item.casefold()).strip()
+                if key in seen or (section == "technical skills" and set(key.split()) <= covered_tokens):
+                    continue
+                seen.add(key)
+                kept.append(item)
+            if not kept:
                 continue
-            seen.add(key)
+            line = "- " + "; ".join(kept)
         lines.append(line)
     polished = "\n".join(lines)
     return re.sub(r"(?ims)^##\s*Technical Skills\s*$(?:\n\s*)?(?=^##\s|\Z)", "", polished).strip()
