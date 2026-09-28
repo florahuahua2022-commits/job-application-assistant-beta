@@ -65,11 +65,26 @@ E-commerce Operations - Core Color | 2022
         self.assertEqual(plan["target_words"], 650)
         self.assertEqual(plan["maximum_words"], 750)
 
-    def test_summary_contract_rejects_generic_role_opening_and_cross_employer_attribution(self):
-        plan = {"roles": [
-            {"employer_marker": "Avaintec"},
-            {"employer_marker": "China Communications Construction Company - Kenya Branch"},
-        ]}
+    @staticmethod
+    def _multi_employer_plan():
+        return {"roles": [
+            {"employer_marker": "Avaintec", "source_section": "Work > Avaintec"},
+            {"employer_marker": "China Communications Construction Company - Kenya Branch", "source_section": "Work > CCCC"},
+            {"employer_marker": "Self-employed via Mable", "source_section": "Work > Mable"},
+            {"employer_marker": "My Support", "source_section": "Work > My Support"},
+            {"employer_marker": "Pratt & Whitney", "source_section": "Work > Pratt & Whitney"},
+            {"employer_marker": "Chevron CDB Project", "source_section": "Work > Chevron"},
+        ], "source_groups": [
+            {"source_section": "Work > Avaintec", "evidence_ids": ["A"], "source_detail": "Coordinated internal and external meetings."},
+            {"source_section": "Work > CCCC", "evidence_ids": ["C"], "source_detail": "Maintained project records and databases."},
+            {"source_section": "Work > Mable", "evidence_ids": ["M"], "source_detail": "Managed scheduling and direct client communication independently."},
+            {"source_section": "Work > My Support", "evidence_ids": ["S"], "source_detail": "Delivered individualised support with daily living and appointments."},
+            {"source_section": "Work > Pratt & Whitney", "evidence_ids": ["P"], "source_detail": "Managed competing priorities and coordinated three to five suppliers against project schedules."},
+            {"source_section": "Work > Chevron", "evidence_ids": ["H"], "source_detail": "Maintained project records and tracking databases."},
+        ], "selected_evidence": [{"evidence_id": value} for value in "ACMSPH"]}
+
+    def test_summary_contract_rejects_generic_role_opening_and_shared_cross_employer_attribution(self):
+        plan = self._multi_employer_plan()
         generic = """## Professional Summary
 Finance Administration Officer with the Department of Communities, providing administrative support across reporting and records management.
 ## Key Skills
@@ -78,7 +93,7 @@ Records
 Experience
 """
         mixed = """## Professional Summary
-Coordinated meetings at Avaintec and maintained project records and databases at China Communications Construction Company - Kenya Branch.
+Earlier roles at Avaintec and China Communications Construction Company - Kenya Branch involved coordinating meetings, supplier liaison and maintaining project records and databases.
 ## Key Skills
 Records
 ## Work Experience
@@ -88,21 +103,64 @@ Experience
         self.assertIn("ai_tone", {item["type"] for item in evaluate_resume_quality(generic, plan)["issues"]})
         self.assertIn("unsupported_inference", {item["type"] for item in evaluate_resume_quality(mixed, plan)["issues"]})
 
-    def test_summary_contract_accepts_separate_action_led_employer_anchors(self):
-        plan = {"roles": [
-            {"employer_marker": "Avaintec"},
-            {"employer_marker": "China Communications Construction Company - Kenya Branch"},
-        ]}
-        content = """## Professional Summary
-Coordinated internal and external meetings at Avaintec. Maintained project records and databases at China Communications Construction Company - Kenya Branch.
+    def test_summary_contract_accepts_clause_scoped_multiple_employers(self):
+        plan = self._multi_employer_plan()
+        summaries = [
+            "Managed scheduling and direct client communication independently at Self-employed via Mable, and delivered individualised support with daily living and appointments at My Support.",
+            "Coordinated three to five suppliers against project schedules at Pratt & Whitney, alongside project records and tracking databases at Chevron CDB Project.",
+        ]
+        for summary in summaries:
+            content = f"""## Professional Summary
+{summary}
 ## Key Skills
 Records
 ## Work Experience
 Experience
 """
+            with self.subTest(summary=summary):
+                issue_types = {item["type"] for item in evaluate_resume_quality(content, plan)["issues"]}
+                self.assertFalse({"ai_tone", "unsupported_inference"} & issue_types)
 
-        issue_types = {item["type"] for item in evaluate_resume_quality(content, plan)["issues"]}
-        self.assertFalse({"ai_tone", "unsupported_inference"} & issue_types)
+    def test_summary_contract_rejects_inherited_action_unsupported_by_employer(self):
+        content = """## Professional Summary
+Coordinated meetings at Avaintec, and maintained project records.
+## Key Skills
+Meeting coordination
+## Work Experience
+Experience
+"""
+
+        issues = evaluate_resume_quality(content, self._multi_employer_plan())["issues"]
+
+        self.assertTrue(any(item["type"] == "unsupported_inference" and "project records" in item["location"] for item in issues))
+
+    def test_key_skills_require_one_selected_source_to_support_every_material_term(self):
+        plan = self._multi_employer_plan()
+        content = """## Professional Summary
+Managed scheduling at Self-employed via Mable.
+## Key Skills
+- Competing priority management
+- Competing task prioritisation
+- Internal stakeholder liaison and query resolution
+- Independent scheduling and client communication
+- Accurate data entry and records maintenance
+- Attention to detail
+- Written and verbal communication
+## Work Experience
+Experience
+"""
+        plan["source_groups"].append({
+            "source_section": "Work > Department", "evidence_ids": ["D"],
+            "source_detail": "Liaised with internal stakeholders to resolve queries. Assisted in prioritising competing tasks and maintained records.",
+        })
+        plan["selected_evidence"].append({"evidence_id": "D"})
+
+        issues = [item for item in evaluate_resume_quality(content, plan)["issues"] if item["type"] == "unsupported_claim"]
+
+        self.assertEqual(
+            {item["location"] for item in issues},
+            {"Accurate data entry and records maintenance", "Attention to detail", "Written and verbal communication"},
+        )
 
     def test_explicit_dates_control_presentation_while_relevance_controls_budget(self):
         ckb = [

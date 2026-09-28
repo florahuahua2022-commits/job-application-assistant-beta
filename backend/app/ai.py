@@ -736,7 +736,7 @@ FINAL TAILORED CV:
 {content}
 
 Return JSON only:
-{{"status":"pass|fail","issues":[{{"type":"unsupported_claim|missing_role_header|role_order_mismatch|omitted_role_expanded|...","description":"...","evidence":"source detail","location":"exact CV phrase or section","location_kind":"exact_quote|section|document_wide","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
+{{"status":"pass|fail","issues":[{{"type":"unsupported_claim|missing_role_header|role_order_mismatch|omitted_role_expanded|...","requirement_id":"required for requirement_omission; use the Resume Plan criterion ID","description":"...","evidence":"source detail","location":"exact CV phrase or section","location_kind":"exact_quote|section|document_wide","recommended_action":"specific guidance"}}],"recommendation":"optional guidance"}}
 
 Use location_kind exact_quote only when location is copied verbatim from the CV. Use section for a heading or structural location and document_wide for a finding without one quoted location. Never present a paraphrase as an exact quote.
 
@@ -756,11 +756,53 @@ Use pass with an empty issues array when there is no material issue."""
                     content, plan, [str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []],
                 )["issues"], content,
             )
+            result = reconcile_resume_requirement_gaps(result, plan)
+            result = deduplicate_review_findings(result)
             result["telemetry"] = {"reviewer_retries": attempt}
             return result
         except (OpenAIError, ValueError) as error:
             last_error = str(error)
     raise AIServiceError(f"Resume Reviewer failed validation: {last_error or 'unknown error'}")
+
+
+def reconcile_resume_requirement_gaps(review: dict, plan: dict) -> dict:
+    """A known evidence gap may be reported, but cannot demand invented CV content."""
+    tags = {str(item.get("criteria_id")): item for item in plan.get("advertised_skill_tags") or []}
+    supported = {
+        str(requirement)
+        for item in plan.get("selected_evidence") or []
+        for requirement in item.get("supports_requirements") or []
+    }
+    for result in review.get("results") or []:
+        for issue in result.get("issues") or []:
+            if issue.get("type") != "requirement_omission":
+                continue
+            issue_text = " ".join(str(issue.get(key) or "") for key in ("description", "evidence", "location"))
+            requirement_id = str(issue.get("requirement_id") or "")
+            if not requirement_id:
+                requirement_id = next((value for value in tags if re.search(rf"(?<!\w){re.escape(value)}(?!\w)", issue_text)), "")
+            tag = tags.get(requirement_id)
+            if tag and requirement_id not in supported and not tag.get("evidence_ids") and tag.get("match_type") == "gap":
+                issue.update(requirement_id=requirement_id, severity="advisory", blocks_release=False)
+        result["status"] = "fail" if any(issue.get("blocks_release") for issue in result.get("issues") or []) else "pass"
+    review["status"] = "fail" if any(result.get("status") == "fail" for result in review.get("results") or []) else "pass"
+    return review
+
+
+def deduplicate_review_findings(review: dict) -> dict:
+    severity = {"advisory": 0, "major": 1, "critical": 2}
+    for result in review.get("results") or []:
+        unique: dict[tuple[str, str], dict] = {}
+        for index, issue in enumerate(result.get("issues") or []):
+            location = _normalise_identity_text(issue.get("location"))
+            key = (str(issue.get("type") or ""), location or f"__unlocated_{index}")
+            current = unique.get(key)
+            if current is None or issue.get("owner") == "system_rewrite" or severity.get(str(issue.get("severity")), 0) > severity.get(str(current.get("severity")), 0):
+                unique[key] = issue
+        result["issues"] = list(unique.values())
+        result["status"] = "fail" if any(issue.get("blocks_release") for issue in result["issues"]) else "pass"
+    review["status"] = "fail" if any(result.get("status") == "fail" for result in review.get("results") or []) else "pass"
+    return review
 
 
 ROLE_STRUCTURE_TYPES = {"missing_role_header", "role_order_mismatch", "omitted_role_expanded"}
@@ -999,9 +1041,10 @@ Rules:
 - For fix_type "remove", delete the unsupported claim entirely. Do not replace it with another unverified claim.
 - For fix_type "remove_or_soften", rewrite using only what CKB source_text actually supports.
 - Do not introduce any new claim not present in source_text.
-- Every action in a sentence naming multiple employers must be supported for every named employer; otherwise attribute each action separately.
+- Attach each action phrase to its own employer. Multiple employers may share a sentence only when every action phrase has a clear employer and that employer's selected evidence supports it.
 - Do not replace supported wording with a broader workflow descriptor such as busy, fast-paced or multi-tasking.
 - Remove a Key Skills label when the same fact already appears in the Summary or Work Experience.
+- Keep a Key Skills label only when every material term in a Key Skills label is present, allowing ordinary grammatical variants, in one selected CKB source.
 - Do not re-curate the Resume. Preserve the current plan.roles order, promote/keep/compress/omit actions and max_bullets; do not fill unused bullet capacity or introduce omitted/unselected evidence.
 - Preserve a visible role header even when max_bullets is zero wherever include_role_header is true. An omit role may remain omitted.
 - Do not convert adjacent evidence into direct ownership wording.
@@ -1230,7 +1273,7 @@ def generate_draft(
     if not task:
         raise ValueError("Unsupported document_type")
     if document_type == "tailored_resume":
-        task += " Render plan.timeline.groups as grouped plain lines under Additional Experience, preserving each constituent role, employer and exact period. plan.timeline_evidence_ids are authorised solely for those identity/date lines and are not omitted evidence. Never expand timeline_only or hidden roles for word count. A null max_bullets means no mechanical ceiling. Preserve distinct actions, tools, scope and responsibility boundaries; do not fill unused bullet capacity. Preserve every role whose include_role_header is true, including a visible role header when max_bullets is zero; an omit role with include_role_header false may be absent. Honour plan.target_words and plan.maximum_words for the complete CV; compress repeated or lower-priority detail before exceeding the ceiling. Write the Professional Summary as a concise positioning paragraph: develop no more than two concrete evidence anchors, then connect only supported shared themes in one short synthesis; do not give each selected role its own summary sentence. Open with a concrete role, setting, action, tool or scope from selected CKB. Do not open the summary with generic noun phrases such as 'administration professional' or 'experienced professional'. Do not name a setting in the Summary unless selected evidence explicitly supports it. Every action in a sentence naming multiple employers must be supported for every named employer; otherwise attribute each action separately. Do not replace supported wording with a broader workflow descriptor such as busy, fast-paced or multi-tasking. Express capabilities at their specific supported scope: bounded supplier coordination or supported contractor/supplier/stakeholder coordination must not become an unqualified background capability. Do not call an experience recent when a later-dated role appears in Work Experience; either name the dated role neutrally or omit the recency qualifier. Write Key Skills as short capability labels, normally 2-7 words each. Do not copy complete source actions, quantities or sentences into Key Skills, and do not repeat Work Experience bullets there. Remove a Key Skills label when the same fact already appears in the Summary or Work Experience. Keep every source skill group together in one section only: systems and tools belong in Technical Skills, while Key Skills contains non-tool capabilities and must not repeat or split the same CKB skill record. When selected evidence has evidence_thin true, use its supported fact in at most one CV section rather than repeating it to create apparent breadth. When evidence_framing is adjacent, explicitly label the relationship as transferable and never present it as direct experience of the advertised duty."
+        task += " Render plan.timeline.groups as grouped plain lines under Additional Experience, preserving each constituent role, employer and exact period. plan.timeline_evidence_ids are authorised solely for those identity/date lines and are not omitted evidence. Never expand timeline_only or hidden roles for word count. A null max_bullets means no mechanical ceiling. Preserve distinct actions, tools, scope and responsibility boundaries; do not fill unused bullet capacity. Preserve every role whose include_role_header is true, including a visible role header when max_bullets is zero; an omit role with include_role_header false may be absent. Honour plan.target_words and plan.maximum_words for the complete CV; compress repeated or lower-priority detail before exceeding the ceiling. Write the Professional Summary as a concise positioning paragraph: develop no more than two concrete evidence anchors, then connect only supported shared themes in one short synthesis; do not give each selected role its own summary sentence. Open with a concrete role, setting, action, tool or scope from selected CKB. Do not open the summary with generic noun phrases such as 'administration professional' or 'experienced professional'. Do not name a setting in the Summary unless selected evidence explicitly supports it. Attach each action phrase to its own employer; multiple employers may share a sentence only when every phrase has a clear, evidence-supported employer. Do not replace supported wording with a broader workflow descriptor such as busy, fast-paced or multi-tasking. Express capabilities at their specific supported scope: bounded supplier coordination or supported contractor/supplier/stakeholder coordination must not become an unqualified background capability. Do not call an experience recent when a later-dated role appears in Work Experience; either name the dated role neutrally or omit the recency qualifier. Write Key Skills as short capability labels, normally 2-7 words each. Every material term in a Key Skills label must occur in one selected CKB source, allowing only ordinary grammatical variants; do not combine partial support from different evidence records or import JD wording. Do not copy complete source actions, quantities or sentences into Key Skills, and do not repeat Work Experience bullets there. Remove a Key Skills label when the same fact already appears in the Summary or Work Experience. Keep every source skill group together in one section only: systems and tools belong in Technical Skills, while Key Skills contains non-tool capabilities and must not repeat or split the same CKB skill record. When selected evidence has evidence_thin true, use its supported fact in at most one CV section rather than repeating it to create apparent breadth. When evidence_framing is adjacent, explicitly label the relationship as transferable and never present it as direct experience of the advertised duty."
     if document_type == "cover_letter":
         task += " Evidence allocation is guidance, not evidence. Prefer a distinct comparable differentiator when available; reuse allowed_if_needed evidence when it is materially strongest, but summarize or reframe it for the letter rather than retelling Resume or Selection Criteria wording. Evidence with bridge purpose remains transferable, never direct. Do not convert analogous evidence into direct experience with JD duties, access-rights administration or named JD systems. A relevance sentence may state only the supported transferable action and must not borrow JD nouns as applicant capability. Never attach a JD-only duty such as data entry to the applicant's work unless selected CKB source_text independently supports that duty. Do not end evidence paragraphs with stock relevance-signposting sentences; let the concrete supported facts carry the connection. The closing invitation must not name or recap any role, employer, project or capability; invite further discussion without repeating the body. Do not add a causal explanation, motivation or role requirement absent from source_text; maintaining records does not prove that accuracy or timeliness was a stated requirement. Do not infer that listed activities happened concurrently, were competing priorities or required a particular work method unless source_text says so. Develop the strongest selected stakeholder case and the selected independent-work case with their concrete supported details, and avoid generic recap paragraphs that merely repeat earlier claims."
         identity = json.loads(structured_job_model or "{}").get("job_identity")

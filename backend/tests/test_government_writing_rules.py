@@ -20,7 +20,7 @@ class GovernmentWritingRulesTests(unittest.TestCase):
         self.assertIn("JD may select or prioritise evidence", rules)
         self.assertIn("explain relevance using only the selected CKB's own action", rules)
         self.assertIn("cover-letter close must add no new applicant fact or generic recap", rules)
-        self.assertIn("one employer per sentence", rules)
+        self.assertIn("attach each action phrase to its own employer", rules)
         self.assertIn("action-led", rules)
         self.assertIn("Repeating a JD requirement alone does not cover", rules)
 

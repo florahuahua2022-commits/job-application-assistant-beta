@@ -164,6 +164,7 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("may name selected earlier examples without enumerating every intervening role", prompt)
         self.assertIn("Concise Key Skills labels may reuse supported action nouns", prompt)
         self.assertIn("Never flag an exact plan.timeline entry", prompt)
+        self.assertIn("requirement_id", prompt)
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["results"][0]["issues"][0]["severity"], "critical")
 
@@ -180,11 +181,11 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("Do not convert adjacent evidence into direct ownership", prompt)
         self.assertIn("continuity_only", prompt)
         self.assertIn("visible role header even when max_bullets is zero", prompt)
-        self.assertIn("Every action in a sentence naming multiple employers", prompt)
-        self.assertIn("one employer per sentence", prompt)
+        self.assertIn("each action phrase to its own employer", prompt)
         self.assertIn("action-led", prompt)
         self.assertIn("Do not replace supported wording with a broader workflow descriptor", prompt)
         self.assertIn("Remove a Key Skills label when the same fact already appears", prompt)
+        self.assertIn("every material term in a Key Skills label", prompt)
 
     def test_resume_role_order_fix_moves_complete_kenya_block_only(self):
         content = """## Work Experience
@@ -311,6 +312,58 @@ Bachelor of Arts
 
         self.assertEqual(review["status"], "pass")
         self.assertEqual(review["results"][0]["issues"], [])
+
+    def test_gap_requirement_omission_is_advisory_but_supported_omission_blocks(self):
+        content = "## Professional Summary\nManaged scheduling.\n## Key Skills\n- Scheduling\n## Work Experience\nExperience"
+        gap_plan = {
+            "selected_evidence": [{"evidence_id": "EV1", "supports_requirements": []}],
+            "advertised_skill_tags": [{"criteria_id": "SAP1", "text": "SAP", "match_type": "gap", "evidence_ids": []}],
+            "source_groups": [{"evidence_ids": ["EV1"], "source_detail": "Managed scheduling."}],
+        }
+        supported_plan = {
+            "selected_evidence": [{"evidence_id": "EV1", "supports_requirements": ["COMP1"]}],
+            "advertised_skill_tags": [{"criteria_id": "COMP1", "text": "Computer literacy", "match_type": "direct", "evidence_ids": ["EV1"]}],
+            "source_groups": [{"evidence_ids": ["EV1"], "source_detail": "Managed scheduling."}],
+        }
+        gap = {"type": "requirement_omission", "requirement_id": "SAP1", "description": "SAP is not covered.", "location": "Key Skills"}
+        supported = {"type": "requirement_omission", "requirement_id": "COMP1", "description": "Computer literacy is not covered.", "location": "Key Skills"}
+
+        with patch.object(ai, "_selection_provider_response", side_effect=[json.dumps({"status": "fail", "issues": [gap]}), json.dumps({"status": "fail", "issues": [supported]})]):
+            gap_review = ai.review_tailored_resume("[]", "{}", json.dumps(gap_plan), content)
+            supported_review = ai.review_tailored_resume("[]", "{}", json.dumps(supported_plan), content)
+
+        gap_issue = gap_review["results"][0]["issues"][0]
+        self.assertEqual((gap_review["status"], gap_issue["blocks_release"]), ("pass", False))
+        self.assertEqual((supported_review["status"], supported_review["results"][0]["issues"][0]["blocks_release"]), ("fail", True))
+
+    def test_ai_and_deterministic_summary_attribution_findings_are_deduplicated(self):
+        sentence = "Earlier roles at Avaintec and CCCC involved coordinating meetings and maintaining project records."
+        content = f"## Professional Summary\n{sentence}\n## Key Skills\n- Records\n## Work Experience\nExperience"
+        plan = {
+            "selected_evidence": [{"evidence_id": "A"}, {"evidence_id": "C"}],
+            "roles": [{"employer_marker": "Avaintec", "source_section": "Avaintec"}, {"employer_marker": "CCCC", "source_section": "CCCC"}],
+            "source_groups": [
+                {"source_section": "Avaintec", "evidence_ids": ["A"], "source_detail": "Coordinated meetings."},
+                {"source_section": "CCCC", "evidence_ids": ["C"], "source_detail": "Maintained project records."},
+            ],
+        }
+        ai_finding = {"type": "unsupported_inference", "description": "Actions are ambiguously attributed.", "location": sentence}
+
+        with patch.object(ai, "_selection_provider_response", return_value=json.dumps({"status": "fail", "issues": [ai_finding]})):
+            review = ai.review_tailored_resume("[]", "{}", json.dumps(plan), content)
+
+        findings = [issue for result in review["results"] for issue in result["issues"] if issue["type"] == "unsupported_inference" and issue["location"] == sentence]
+        self.assertEqual(len(findings), 1)
+
+    def test_findings_without_a_specific_location_are_not_deduplicated(self):
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [
+            {"type": "unsupported_inference", "description": "First issue", "location": "", "blocks_release": True},
+            {"type": "unsupported_inference", "description": "Second issue", "location": "", "blocks_release": True},
+        ]}]}
+
+        ai.deduplicate_review_findings(review)
+
+        self.assertEqual(len(review["results"][0]["issues"]), 2)
 
     def test_deterministic_role_pass_discards_legacy_omission_format(self):
         content, plan = self._correct_two_role_resume()
@@ -913,7 +966,7 @@ November 2017 - January 2019
         self.assertIn("max_bullets ceilings are authoritative", prompt)
         self.assertIn("never reorder roles by relevance", prompt)
         self.assertIn("continuity_only", prompt)
-        self.assertIn("Every action in a sentence naming multiple employers", prompt)
+        self.assertIn("Attach each action phrase to its own employer", prompt)
         self.assertIn("Do not replace supported wording with a broader workflow descriptor", prompt)
         self.assertIn("Remove a Key Skills label when the same fact already appears", prompt)
 

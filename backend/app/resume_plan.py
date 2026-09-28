@@ -166,6 +166,27 @@ def repair_thin_evidence_repetition(content: str, plan: dict[str, Any]) -> str:
     return re.sub(r"(?ims)^##\s*([^\n]+)\s*$\n(.*?)(?=^##\s|\Z)", clean, content).rstrip()
 
 
+_TERM_STOPWORDS = {"a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "the", "to", "via", "with"}
+
+
+def _term_roots(value: str) -> set[str]:
+    roots = set()
+    for word in re.findall(r"[a-z0-9]+", value.casefold()):
+        if word in _TERM_STOPWORDS:
+            continue
+        if word.endswith("ies") and len(word) > 4:
+            word = word[:-3] + "y"
+        elif word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+            word = word[:-1]
+        roots.add(word if len(word) < 6 else word[:5])
+    return roots
+
+
+def _terms_supported_by_one_source(value: str, groups: list[dict[str, Any]]) -> bool:
+    terms = _term_roots(value)
+    return bool(terms) and any(terms <= _term_roots(str(group.get("source_detail") or "")) for group in groups)
+
+
 def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any]:
     """Apply cheap, objective quality checks after factual review."""
     issues = []
@@ -202,16 +223,50 @@ def evaluate_resume_quality(content: str, plan: dict[str, Any]) -> dict[str, Any
                 "recommended_action": "Start with a selected evidence action and retain its employer or setting in the same sentence.",
             })
         employers = [_normalise_identity_text(role.get("employer_marker")) for role in plan.get("roles") or []]
+        groups_by_employer = {
+            _normalise_identity_text(role.get("employer_marker")): [
+                group for group in plan.get("source_groups") or []
+                if group.get("source_section") == role.get("source_section")
+            ]
+            for role in plan.get("roles") or [] if role.get("employer_marker")
+        }
         for sentence in summary_sentences:
-            normalised = _normalise_identity_text(sentence)
-            mentioned = [name for name in employers if name and _contains_identity(normalised, name)]
-            if len(set(mentioned)) > 1:
+            clauses = re.split(r"(?i),\s*(?:and|alongside|while|whereas)\s+|;\s*", sentence)
+            inherited_employer = ""
+            attribution_error = False
+            bad_clause = sentence
+            for clause in clauses:
+                normalised = _normalise_identity_text(clause)
+                mentioned = list(dict.fromkeys(name for name in employers if name and _contains_identity(normalised, name)))
+                if len(mentioned) > 1:
+                    attribution_error, bad_clause = True, clause
+                    break
+                if mentioned:
+                    inherited_employer = mentioned[0]
+                elif inherited_employer and not _terms_supported_by_one_source(clause, groups_by_employer.get(inherited_employer, [])):
+                    attribution_error, bad_clause = True, clause
+                    break
+            if attribution_error:
                 issues.append({
                     "type": "unsupported_inference", "severity": "critical", "blocks_release": True,
                     "description": "One Professional Summary sentence attributes actions across multiple employers, making source ownership ambiguous.",
-                    "location": sentence, "evidence": ", ".join(sorted(set(mentioned))), "owner": "system_rewrite",
-                    "recommended_action": "Use one employer per sentence and keep only actions supported by that employer's selected evidence.",
+                    "location": sentence, "evidence": bad_clause, "owner": "system_rewrite",
+                    "recommended_action": "Attach each action phrase to one named employer and keep inherited actions within that employer's selected evidence.",
                 })
+
+    key_skills = next((text for name, text in sections.items() if name.casefold() == "key skills"), "")
+    selected_ids = {str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []}
+    selected_groups = [group for group in plan.get("source_groups") or []
+                       if selected_ids.intersection(map(str, group.get("evidence_ids") or []))]
+    for line in key_skills.splitlines():
+        label = re.sub(r"^\s*[-*•]\s*", "", line).strip()
+        if label and not _terms_supported_by_one_source(label, selected_groups):
+            issues.append({
+                "type": "unsupported_claim", "severity": "critical", "blocks_release": True,
+                "description": "Every material term in a Key Skills label must be traceable to one selected evidence record.",
+                "location": label, "evidence": "No single selected source supports all label terms.", "owner": "system_rewrite",
+                "recommended_action": "Remove the unsupported terms or use a shorter label whose wording is present in one selected source.",
+            })
     for group in plan.get("source_groups") or []:
         if not thin_ids.intersection(map(str, group.get("evidence_ids") or [])):
             continue

@@ -61,6 +61,9 @@ def normalise_finding(issue: dict[str, Any]) -> dict[str, Any] | None:
         "recommended_action": recommended_action,
         "blocks_release": severity in {"critical", "major"},
     }
+    for key in ("requirement_id", "owner"):
+        if issue.get(key):
+            finding[key] = str(issue[key])
     if issue.get("location_kind") in {"exact_quote", "section", "document_wide"}:
         finding["location_kind"] = issue["location_kind"]
     return finding
