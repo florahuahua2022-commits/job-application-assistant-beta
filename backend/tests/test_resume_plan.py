@@ -59,6 +59,39 @@ E-commerce Operations - Core Color | 2022
         self.assertNotIn("My Support, Support Worker", repaired)
         self.assertNotIn("E-commerce Operations - Core Color", repaired)
 
+    def test_existing_additional_experience_is_moved_after_work_experience(self):
+        plan = {"timeline": {"groups": [{"entries": ["Core Color, E-commerce Operations | 2022"]}]}}
+        content = """## Work Experience
+Current role
+
+## Education & Qualifications
+Bachelor of Arts
+
+## Technical Skills
+- Microsoft Excel
+
+## Additional Experience
+Core Color, E-commerce Operations | 2022"""
+
+        repaired = repair_missing_timeline(content, plan)
+
+        self.assertLess(repaired.index("## Work Experience"), repaired.index("## Additional Experience"))
+        self.assertLess(repaired.index("## Additional Experience"), repaired.index("## Education & Qualifications"))
+
+    def test_empty_additional_experience_is_removed_when_plan_has_no_timeline(self):
+        content = """## Work Experience
+Current role
+
+## Additional Experience
+
+## Education & Qualifications
+Bachelor of Arts"""
+
+        repaired = repair_missing_timeline(content, {"timeline": {"groups": []}})
+
+        self.assertNotIn("## Additional Experience", repaired)
+        self.assertIn("## Education & Qualifications", repaired)
+
     def test_default_plan_sets_a_firm_resume_word_ceiling(self):
         plan = build_resume_curation_plan({"criteria": []}, {"matches": []}, [])
 

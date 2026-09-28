@@ -15,7 +15,7 @@ from app.cover_letter_plan import build_cover_letter_plan
 from app.exporter import create_docx, create_pdf
 from app.job_model import build_job_model, match_advertised_tags
 from app.ingest import extract_resume_experiences
-from app.main import auto_polish_tailored_resume
+from app.main import auto_polish_cover_letter, auto_polish_tailored_resume
 from app.models import ApplicantProfilePayload
 from app.resume_plan import build_resume_curation_plan, evaluate_resume_quality
 
@@ -125,6 +125,22 @@ Processed supplier orders through a CRM system.
         self.assertNotIn("Records management systems", technical)
         self.assertIn("Microsoft Excel", technical)
 
+    def test_empty_technical_skills_section_is_removed_after_deduplication(self):
+        content = """## Work Experience
+### Finance Administration Officer
+- Used Dayforce and supported improvements in records management systems.
+## Technical Skills
+- Dayforce
+- Records management systems
+## Education & Qualifications
+Bachelor of Arts
+"""
+
+        polished = auto_polish_tailored_resume(content)
+
+        self.assertNotIn("## Technical Skills", polished)
+        self.assertIn("## Education & Qualifications", polished)
+
     def test_generic_source_blocks_even_if_output_is_long(self):
         plan = {"source_groups": [{"source_section": "Officer at Agency", "source_detail": "Responsible for daily administrative work."}]}
         for content in ["Short CV.", "word " * 650]:
@@ -149,6 +165,35 @@ Processed supplier orders through a CRM system.
         self.assertEqual(identity["hiring_organisation"], "")
         self.assertEqual(len(identity["name_candidates"]), 2)
         self.assertIn("several government departments", identity["recruitment_relationship"])
+
+    def test_private_placeholder_is_not_rendered_in_cover_letter_heading_or_body(self):
+        content = """Alex Morgan
+Private | 28 September 2026
+
+Dear Sir/Madam
+
+Please accept my application for the position with Private in High Wycombe.
+
+Yours faithfully
+Alex Morgan"""
+
+        polished = auto_polish_cover_letter(content, None, "Company:   PRIVATE  ")
+
+        self.assertNotRegex(polished.casefold(), r"\bprivate\b")
+        self.assertIn("28 September 2026", polished)
+        self.assertIn("position in High Wycombe", polished)
+        self.assertEqual(
+            build_job_model("Company:   PRIVATE  ", company=" private ")["job_identity"]["organisation_display_name"],
+            "",
+        )
+
+    def test_real_company_containing_private_is_preserved(self):
+        content = "Private Health Company | 28 September 2026"
+
+        self.assertEqual(
+            auto_polish_cover_letter(content, None, "Company: Private Health Company"),
+            content,
+        )
 
     def test_skill_tags_do_not_upgrade_vendor_coordination(self):
         model = build_job_model("Skill tags: Project Delivery, Project Management, Contract Management, Data Analysis")

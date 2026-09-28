@@ -5,6 +5,7 @@ from typing import Any
 
 JOB_MODEL_SCHEMA_VERSION = "1.0"
 CRITERION_CATEGORIES = {"behaviour", "technical", "knowledge", "qualification", "experience"}
+ANONYMOUS_ORGANISATION_VALUES = {"private", "confidential", "undisclosed", "not disclosed"}
 
 
 def _clean(value: str) -> str:
@@ -27,7 +28,9 @@ def job_identity(text: str, company: str) -> dict[str, Any]:
                            "source_start": occurrence.start() if occurrence else None, "source_end": occurrence.end() if occurrence else None,
                            "confidence": "high" if occurrence else "unconfirmed", "selection_reason": "Saved organisation field; confirm against the advertisement."})
     relationship = re.search(r"(?im)^.*\b(?:on behalf of|our clients?|representing)\b[^\n]*", text)
-    reliable = [c for c in candidates if c["confidence"] == "high" and not re.fullmatch(r"(?i)wa\s+gov", c["name"])]
+    reliable = [c for c in candidates if c["confidence"] == "high"
+                and not re.fullmatch(r"(?i)wa\s+gov", c["name"])
+                and c["name"].strip().casefold() not in ANONYMOUS_ORGANISATION_VALUES]
     advertiser = next((c["name"] for c in reliable if c["kind"] in {"advertiser", "recruiter", "agency"}), "")
     hiring = next((c["name"] for c in reliable if c["kind"] in {"employer", "hiring organisation", "hiring organization"}), "")
     # ponytail: unlabelled prose does not establish an employer/client identity;

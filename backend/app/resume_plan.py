@@ -92,28 +92,50 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
     return {"valid": not issues, "word_count": word_count, "issues": issues}
 
 
+def deduplicate_resume_skills(content: str) -> str:
+    covered = " ".join(
+        match.group(1)
+        for heading in ("Professional Summary", "Work Experience")
+        for match in [re.search(rf"(?ims)^##\s*{heading}\s*$\n(.*?)(?=^##\s|\Z)", content)]
+        if match
+    )
+    covered_tokens = set(re.findall(r"[a-z0-9]+", covered.casefold()))
+    seen: set[str] = set()
+    section = ""
+    lines = []
+    for line in content.splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip().casefold()
+        if section in {"key skills", "technical skills"} and line.strip().startswith("- "):
+            key = re.sub(r"[^\w]+", " ", line.strip()[2:].casefold()).strip()
+            if key in seen or (section == "technical skills" and set(key.split()) <= covered_tokens):
+                continue
+            seen.add(key)
+        lines.append(line)
+    polished = "\n".join(lines)
+    return re.sub(r"(?ims)^##\s*Technical Skills\s*$(?:\n\s*)?(?=^##\s|\Z)", "", polished).strip()
+
+
 def repair_missing_timeline(content: str, plan: dict[str, Any]) -> str:
     expected = timeline_text(plan)
     if not expected:
-        return content
+        return re.sub(r"(?ims)^##\s*Additional Experience\s*$(?:\n\s*)?(?=^##\s|\Z)", "", content).strip()
     for entry in expected.splitlines():
         content = re.sub(
             rf"(?m)^[ \t]*[-*+][ \t]+{re.escape(entry)}[ \t]*$",
             entry,
             content,
         )
-    if _normalise_identity_text(expected) in _normalise_identity_text(content):
-        return content
-    existing = re.search(r"(?im)^##\s*Additional Experience\s*$", content)
-    if existing:
-        next_section = re.search(r"(?im)^##\s+", content[existing.end():])
-        section_end = existing.end() + (next_section.start() if next_section else len(content[existing.end():]))
-        return f"{content[:existing.end()].rstrip()}\n\n{expected}\n\n{content[section_end:].lstrip()}".rstrip()
-    next_section = re.search(
-        r"(?im)^##\s*(?:Education|Qualifications|Certifications|Training|Technical Skills|Additional Information)\b",
-        content,
-    )
-    insert_at = next_section.start() if next_section else len(content)
+    content = re.sub(r"(?ims)^##\s*Additional Experience\s*$\n.*?(?=^##\s|\Z)", "", content).strip()
+    work = re.search(r"(?im)^##\s*Work Experience\s*$", content)
+    next_section = re.search(r"(?im)^##\s+", content[work.end():]) if work else None
+    if work and next_section:
+        insert_at = work.end() + next_section.start()
+    elif work:
+        insert_at = len(content)
+    else:
+        fallback = re.search(r"(?im)^##\s*(?:Education|Qualifications|Certifications|Training|Technical Skills|Additional Information)\b", content)
+        insert_at = fallback.start() if fallback else len(content)
     return f"{content[:insert_at].rstrip()}\n\n## Additional Experience\n\n{expected}\n\n{content[insert_at:].lstrip()}".rstrip()
 
 

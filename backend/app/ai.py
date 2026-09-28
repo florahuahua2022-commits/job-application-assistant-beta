@@ -10,7 +10,7 @@ from .government_writing_rules import government_writing_rules
 from .selection_logic import hard_validate_response
 from .reviewer import normalise_review_result, validate_review_result
 from .reviewer_core import normalise_document_review, normalise_finding, reconcile_review_grounding
-from .resume_plan import _contains_identity, _normalise_identity_text, repair_missing_timeline, repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
+from .resume_plan import _contains_identity, _normalise_identity_text, deduplicate_resume_skills, repair_missing_timeline, repair_resume_role_blocks, repair_thin_evidence_repetition, resume_evidence_pack, evaluate_resume_quality, validate_resume_content
 from .applicant_profile import availability_issues, confirmed_availability_wording, profile_availability_from_prompt
 from .cover_letter_plan import COVER_LETTER_FACT_RULES, cover_letter_contract_issues, cover_letter_evidence_pack
 
@@ -1081,7 +1081,7 @@ def repair_tailored_resume(
             plan = json.loads(resume_plan_json or "{}")
         except json.JSONDecodeError:
             plan = {}
-        return repair_missing_timeline(fixed, plan)
+        return repair_missing_timeline(deduplicate_resume_skills(fixed), plan)
 
     return _repair_document(
         content,

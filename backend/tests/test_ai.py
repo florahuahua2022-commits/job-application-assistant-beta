@@ -132,6 +132,27 @@ class GenerateDraftTests(unittest.TestCase):
         self.assertIn("Core Color, E-commerce Operations | 2022", content)
         self.assertIn("Core Color, E-commerce Operations | 2022", reviewer.call_args_list[1].args[3])
 
+    def test_resume_repair_deduplicates_technical_skills_before_next_review(self):
+        failed = {"status": "fail", "results": [{"issues": [{"type": "unsupported_claim", "severity": "major"}]}]}
+        passed = {"status": "pass", "results": [{"issues": []}]}
+        plan = '{"timeline":{"groups":[]},"selected_evidence":[]}'
+        repaired = """## Work Experience
+### Finance Administration Officer
+- Used Dayforce and supported improvements in records management systems.
+## Technical Skills
+- Dayforce
+- Records management systems"""
+        with patch.object(ai, "review_tailored_resume", side_effect=[failed, passed]) as reviewer, patch.object(
+            ai, "auto_fix_tailored_resume", return_value=repaired
+        ):
+            content, review = ai.repair_tailored_resume(
+                "## Work Experience\nCurrent role", "[]", "{}", plan,
+            )
+
+        self.assertEqual(review["status"], "pass")
+        self.assertNotIn("## Technical Skills", content)
+        self.assertNotIn("## Technical Skills", reviewer.call_args_list[1].args[3])
+
     def test_resume_reviewer_checks_factual_curation_and_relevance(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared monthly reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'

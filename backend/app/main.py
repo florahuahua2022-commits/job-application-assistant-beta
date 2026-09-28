@@ -37,7 +37,7 @@ from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePa
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
-from .resume_plan import build_resume_curation_plan, evaluate_resume_quality, repair_missing_timeline, selected_resume_evidence_ids, validate_resume_content
+from .resume_plan import build_resume_curation_plan, deduplicate_resume_skills, evaluate_resume_quality, repair_missing_timeline, selected_resume_evidence_ids, validate_resume_content
 from .release_state import ats_is_current, details_fingerprint, document_is_current, fingerprint, generation_inputs_fingerprint, load_release_state, pack_fingerprint, pack_review_is_current
 from .selection_logic import actual_word_count, build_selection_plan, criteria_requiring_confirmation
 from .source_acquisition import acquire_sources, process_uploaded_document
@@ -1166,6 +1166,7 @@ def auto_polish_cover_letter(
     content: str,
     profile: ApplicantProfile | None,
     job_description: str = "",
+    company: str = "",
 ) -> str:
     polished = re.sub(
         r"(?i)\bI am writing to apply\b",
@@ -1202,6 +1203,14 @@ def auto_polish_cover_letter(
 
     polished = polish_availability(polished, profile.availability_notice if profile else "not_specified")
 
+    labelled = re.search(r"(?im)^\s*(?:company|employer|advertiser|hiring organi[sz]ation)\s*:\s*([^\n]+?)\s*$", job_description)
+    organisation = (company or (labelled.group(1) if labelled else "")).strip()
+    if organisation.casefold() in {"private", "confidential", "undisclosed", "not disclosed"}:
+        name = re.escape(organisation)
+        polished = re.sub(rf"(?im)^\s*{name}\s*\|\s*(.+?)\s*$", r"\1", polished)
+        polished = re.sub(rf"(?i)\bposition\s+(?:advertised\s+)?(?:with|by)\s+{name}\s+in\b", "position in", polished)
+        polished = re.sub(rf"(?i)\b(?:with|by)\s+{name}\b", "", polished)
+
     return re.sub(r"\n{3,}", "\n\n", polished).strip()
 
 
@@ -1228,23 +1237,7 @@ def auto_polish_tailored_resume(content: str, include_references: bool = False) 
         polished = f"{polished.rstrip()}\n\n## References\nAvailable upon request"
     if not include_references:
         polished = re.sub(r"(?im)^## References\s*\n\s*(?:References?\s+)?Available (?:upon|on) request\.?\s*(?=^## |\Z)", "", polished)
-    work = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", polished)
-    work_tokens = set(re.findall(r"[a-z0-9]+", work.group(1).casefold())) if work else set()
-    seen_skills = set()
-    section = ""
-    lines = []
-    for line in polished.splitlines():
-        if line.startswith("## "):
-            section = line[3:].strip().casefold()
-        if section in {"key skills", "technical skills"} and line.strip().startswith("- "):
-            key = re.sub(r"[^\w]+", " ", line.strip()[2:].casefold()).strip()
-            if key in seen_skills:
-                continue
-            seen_skills.add(key)
-            if section == "technical skills" and set(key.split()) <= work_tokens:
-                continue
-        lines.append(line)
-    polished = "\n".join(lines)
+    polished = deduplicate_resume_skills(polished)
     return re.sub(r"\n{3,}", "\n\n", polished).strip()
 
 
@@ -3354,7 +3347,7 @@ def generate_document(
         if payload.document_type == "tailored_resume":
             content = polish_availability(auto_polish_tailored_resume(content, include_references=bool(re.search(r"(?i)\b(?:references|referees)\b", application.job_description + " " + (profile.preferences_notes or "" if profile else "")))), "not_specified")
         if payload.document_type == "cover_letter":
-            content = auto_polish_cover_letter(content, profile, application.job_description)
+            content = auto_polish_cover_letter(content, profile, application.job_description, application.company)
     except (RuntimeError, ValueError) as error:
         raise HTTPException(400, str(error))
     except AIServiceError as error:
@@ -3478,6 +3471,7 @@ def generate_document(
                 content, ckb_source_json, job_model_json,
                 json.dumps(cover_letter_plan or {}, ensure_ascii=False), profile_text,
             )
+            content = auto_polish_cover_letter(content, profile, application.job_description, application.company)
         except ValueError as error:
             raise HTTPException(400, str(error))
         except AIServiceError as error:
