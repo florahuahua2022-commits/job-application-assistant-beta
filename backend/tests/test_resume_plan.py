@@ -98,6 +98,22 @@ Bachelor of Arts"""
         self.assertEqual(plan["target_words"], 650)
         self.assertEqual(plan["maximum_words"], 750)
 
+    def test_plan_preserves_shared_job_model_requirement_match_coverage(self):
+        matches = {"matches": [{
+            "criteria_id": "C1F4EAD92BF", "match_type": "inferred", "coverage": "partial",
+            "matched_evidence": ["EV_ADMIN"],
+        }]}
+
+        plan = build_resume_curation_plan(
+            {"criteria": [{"criteria_id": "C1F4EAD92BF", "criteria_type": "desirable"}]},
+            matches, [evidence("EV_ADMIN", "Work > Administration")],
+        )
+
+        self.assertEqual(plan["requirement_matches"], [{
+            "criteria_id": "C1F4EAD92BF", "match_type": "inferred", "coverage": "partial",
+            "evidence_ids": ["EV_ADMIN"],
+        }])
+
     @staticmethod
     def _multi_employer_plan():
         return {"roles": [

@@ -635,6 +635,19 @@ def build_resume_curation_plan(
         "roles": roles,
         "selected_evidence": selected,
         "source_groups": list(source_groups.values()),
+        "requirement_matches": [
+            {
+                "criteria_id": str(match.get("criteria_id")),
+                "match_type": str(match.get("match_type") or ""),
+                "coverage": str(match.get("coverage") or ""),
+                "evidence_ids": [
+                    str(evidence_id) for evidence_id in match.get("matched_evidence") or []
+                    if str(evidence_id) in evidence_by_id
+                ],
+            }
+            for match in matches.get("matches") or []
+            if str(match.get("criteria_id")) in criteria
+        ],
         "advertised_skill_tags": match_advertised_tags(job_model, matches, ckb),
         "omitted_evidence_ids": sorted(set(evidence_by_id) - selected_set - timeline_evidence_ids),
         "omission_reasons": {evidence_id: (

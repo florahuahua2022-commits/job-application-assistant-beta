@@ -560,11 +560,12 @@ Use pass with an empty issues array when there is no material issue."""
 def reconcile_cover_letter_plan_findings(review: dict, plan: dict) -> dict:
     """Keep required letter dates and partial plan coverage from becoming blockers."""
     current_dates = {date.today().isoformat(), date.today().strftime("%d %B %Y").lstrip("0")}
+    priorities = {str(item.get("criteria_id")): item for item in plan.get("priorities") or []}
     partial_ids = {
-        str(item.get("criteria_id")) for item in plan.get("priorities") or []
-        if str(item.get("coverage") or "").lower() != "strong"
+        criteria_id for criteria_id, item in priorities.items()
+        if str(item.get("coverage") or "").lower() != "strong" or not item.get("selected_evidence_ids")
     }
-    all_ids = {str(item.get("criteria_id")) for item in plan.get("priorities") or []}
+    all_ids = set(priorities)
     for result in review.get("results") or []:
         kept = []
         for issue in result.get("issues") or []:
@@ -572,9 +573,16 @@ def reconcile_cover_letter_plan_findings(review: dict, plan: dict) -> dict:
             if (issue.get("type") == "contradiction" and str(issue.get("location") or "").strip() in current_dates
                     and "date" in description.lower()):
                 continue
-            mentioned_ids = {criteria_id for criteria_id in all_ids if criteria_id in description}
+            issue_text = " ".join(str(issue.get(key) or "") for key in (
+                "requirement_id", "description", "evidence", "location",
+            ))
+            mentioned_ids = {criteria_id for criteria_id in all_ids if criteria_id in issue_text}
             if issue.get("type") == "requirement_omission" and mentioned_ids & partial_ids:
-                issue.update(severity="advisory", blocks_release=False)
+                requirement_id = next(iter(mentioned_ids & partial_ids))
+                issue.update(
+                    requirement_id=requirement_id, severity="advisory", blocks_release=False,
+                    recommended_action="Known evidence gap. Do not add unsupported content.",
+                )
             kept.append(issue)
         result["issues"] = kept
         result["status"] = "fail" if any(item.get("blocks_release") for item in kept) else "pass"
@@ -770,6 +778,9 @@ Use pass with an empty issues array when there is no material issue."""
 def reconcile_resume_requirement_gaps(review: dict, plan: dict) -> dict:
     """A known evidence gap may be reported, but cannot demand invented CV content."""
     tags = {str(item.get("criteria_id")): item for item in plan.get("advertised_skill_tags") or []}
+    requirements = {
+        str(item.get("criteria_id")): item for item in plan.get("requirement_matches") or []
+    }
     supported = {
         str(requirement)
         for item in plan.get("selected_evidence") or []
@@ -783,9 +794,21 @@ def reconcile_resume_requirement_gaps(review: dict, plan: dict) -> dict:
             requirement_id = str(issue.get("requirement_id") or "")
             if not requirement_id:
                 requirement_id = next((value for value in tags if re.search(rf"(?<!\w){re.escape(value)}(?!\w)", issue_text)), "")
-            tag = tags.get(requirement_id)
-            if tag and requirement_id not in supported and not tag.get("evidence_ids") and tag.get("match_type") == "gap":
-                issue.update(requirement_id=requirement_id, severity="advisory", blocks_release=False)
+            requirement = requirements.get(requirement_id) or tags.get(requirement_id)
+            selected_ids = {str(item.get("evidence_id")) for item in plan.get("selected_evidence") or []}
+            evidence_ids = set(map(str, requirement.get("evidence_ids") or [])) if requirement else set()
+            coverage = str((requirement or {}).get("coverage") or "").lower()
+            match_type = str((requirement or {}).get("match_type") or "").lower()
+            if requirement and (
+                (coverage and coverage not in {"strong", "full"})
+                or match_type in {"gap", "insufficient"}
+                or not evidence_ids & selected_ids
+                or requirement_id not in supported
+            ):
+                issue.update(
+                    requirement_id=requirement_id, severity="advisory", blocks_release=False,
+                    recommended_action="Known evidence gap. Do not add unsupported content.",
+                )
         result["status"] = "fail" if any(issue.get("blocks_release") for issue in result.get("issues") or []) else "pass"
     review["status"] = "fail" if any(result.get("status") == "fail" for result in review.get("results") or []) else "pass"
     return review

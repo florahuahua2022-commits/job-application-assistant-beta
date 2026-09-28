@@ -357,6 +357,124 @@ Bachelor of Arts
         self.assertEqual((gap_review["status"], gap_issue["blocks_release"]), ("pass", False))
         self.assertEqual((supported_review["status"], supported_review["results"][0]["issues"][0]["blocks_release"]), ("fail", True))
 
+    def test_shared_job_model_requirement_gaps_are_advisory_but_strong_supported_omissions_block(self):
+        sap = {
+            "type": "requirement_omission", "severity": "major", "blocks_release": True,
+            "requirement_id": "CDB2979FE64", "location": "document_wide",
+            "description": "The CV does not mention SAP at all, and the CKB contains no SAP evidence (only the unrelated Dayforce and Microsoft tools). Because the employer lists SAP as a preferred criterion and no applicant evidence can address it, this can only be raised as a disclosure consideration; it cannot be covered by the CV without fabricating evidence.",
+            "evidence": "JD: 'SAP experience would be preferred'; CKB EV6C37A04EB21C: 'Systems: Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems'",
+            "recommended_action": "Do not add SAP to the CV. If the employer's process explicitly requires commenting on preferred experience, disclose only that Dayforce and Microsoft tools are the systems evidenced in the CKB; otherwise leave the CV as is.",
+            "location_kind": "document_wide",
+        }
+        warehouse = {
+            "type": "requirement_omission", "severity": "major", "blocks_release": True,
+            "requirement_id": "C1F4EAD92BF", "location": "## Work Experience",
+            "description": "The Job Description requirement 'A strong background in admin and warehouse knowledge would be beneficial' is only partially reflected. Admin background is evidenced across multiple roles; warehouse knowledge or experience is absent from the CKB and is not addressed in the CV at all. The plan selected no warehouse evidence (none exists). The CV does not need to state a deficit, but the relevance framing for this criterion is limited to administration only.",
+            "evidence": "A strong background in admin and warehouse knowledge would be beneficial.",
+            "recommended_action": "No fabricated warehouse content should be added. Ensure the CV does not imply warehouse experience; retain only supported administrative and coordination evidence.",
+            "location_kind": "section",
+        }
+        computer_literacy = {
+            "type": "requirement_omission", "severity": "major", "blocks_release": True,
+            "requirement_id": "C1C07BF6246", "location": "## Technical Skills",
+            "description": "The advertised requirement for computer literacy (Excel, Outlook, Word) has selected supporting evidence in the SKILLS record (EV6C37A04EB21C: 'Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems'). The CV lists Excel, Word, Outlook and Teams under Technical Skills but omits 'Dayforce' and 'records management systems' from that listed set, even though Dayforce is separately used in the Work Experience bullet for the Department role. This is a minor coverage gap in the Technical Skills list rather than a fabricated claim.",
+            "evidence": "EV6C37A04EB21C detail: 'Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems'.",
+            "recommended_action": "If the plan intends full use of EV6C37A04EB21C, include Dayforce and records management systems in the Technical Skills list as per the selected evidence. If deliberately withheld to avoid duplication with Key Skills/Work Experience, this is acceptable and no change is required.",
+            "location_kind": "section", "grounding_status": "verified",
+        }
+        plan = {
+            "requirement_matches": [
+                {"criteria_id": "CDB2979FE64", "match_type": "insufficient", "coverage": "weak", "evidence_ids": []},
+                {"criteria_id": "C1F4EAD92BF", "match_type": "inferred", "coverage": "partial", "evidence_ids": ["EV_ADMIN"]},
+                {"criteria_id": "C1C07BF6246", "match_type": "direct", "coverage": "strong", "evidence_ids": ["EV_TOOLS"]},
+            ],
+            "selected_evidence": [
+                {"evidence_id": "EV_ADMIN", "supports_requirements": ["C1F4EAD92BF"]},
+                {"evidence_id": "EV_TOOLS", "supports_requirements": ["C1C07BF6246"]},
+            ],
+        }
+        review = {"status": "fail", "results": [{"status": "fail", "issues": [sap, warehouse, computer_literacy]}]}
+
+        reconciled = ai.reconcile_resume_requirement_gaps(review, plan)
+
+        issues = {item["requirement_id"]: item for item in reconciled["results"][0]["issues"]}
+        for requirement_id in ("CDB2979FE64", "C1F4EAD92BF"):
+            self.assertFalse(issues[requirement_id]["blocks_release"])
+            self.assertEqual(issues[requirement_id]["recommended_action"], "Known evidence gap. Do not add unsupported content.")
+        self.assertTrue(issues["C1C07BF6246"]["blocks_release"])
+        self.assertEqual(reconciled["status"], "fail")
+
+    def test_partial_cover_letter_requirement_gap_from_309_is_advisory_without_rewrite_request(self):
+        finding = {
+            "type": "requirement_omission", "severity": "major", "blocks_release": True,
+            "description": "The Cover Letter Plan's third priority (skills and credentials from the job description, partial coverage) has no developed case: the letter never refers to the advertised warehouse-side skills tags (Warehouse, Data Entry, Stock Take, Physically Fit) or the desirable SAP/admin-and-warehouse background. The letter is limited to the two office-administration cases and the systems list, so the plan priority is only nominally touched.",
+            "evidence": "SHARED JOB MODEL advertised_skill_tags: Warehouse, Data Entry, Stock Take, Physically Fit; role_summary: '3PL warehouse'; COVER LETTER PLAN priority C8175576FB9 'Skills and credentials from the job description' with match_type 'inferred', coverage 'partial', selected_evidence_ids EVA37A578823CE, EV1BFA570A50FD",
+            "location": "document_wide",
+            "recommended_action": "If the plan requires this priority to be covered, add a sentence using only the selected cases' own supported facts (for example data collation and record maintenance from EVA37A578823CE, project records and tracking tools from EV1BFA570A50FD) and identify the advertised warehouse/data-entry needs as employer requirements without claiming warehouse, stocktake or SAP experience. If no supported bridge exists, leave the priority uncovered rather than importing JD nouns.",
+            "location_kind": "document_wide",
+        }
+        plan = {"priorities": [{
+            "criteria_id": "C8175576FB9", "coverage": "partial", "match_type": "inferred",
+            "selected_evidence_ids": ["EVA37A578823CE", "EV1BFA570A50FD"],
+        }]}
+
+        review = ai.reconcile_cover_letter_plan_findings(
+            {"status": "fail", "results": [{"status": "fail", "issues": [finding]}]}, plan,
+        )
+
+        issue = review["results"][0]["issues"][0]
+        self.assertFalse(issue["blocks_release"])
+        self.assertEqual(issue["requirement_id"], "C8175576FB9")
+        self.assertEqual(issue["recommended_action"], "Known evidence gap. Do not add unsupported content.")
+
+    def test_selected_computer_literacy_evidence_omission_from_308_still_blocks(self):
+        finding = {
+            "type": "requirement_omission", "severity": "major", "blocks_release": True,
+            "requirement_id": "C1C07BF6246",
+            "description": "The advertised requirement for computer literacy (Excel, Outlook, Word) has selected supporting evidence in the SKILLS record (EV6C37A04EB21C: 'Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems'). The CV lists Excel, Word, Outlook and Teams under Technical Skills but omits 'Dayforce' and 'records management systems' from that listed set, even though Dayforce is separately used in the Work Experience bullet for the Department role. This is a minor coverage gap in the Technical Skills list rather than a fabricated claim.",
+            "evidence": "EV6C37A04EB21C detail: 'Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems'.",
+            "location": "Technical Skills",
+            "recommended_action": "If the plan intends full use of EV6C37A04EB21C, include Dayforce and records management systems in the Technical Skills list as per the selected evidence. If deliberately withheld to avoid duplication with Key Skills/Work Experience, this is acceptable and no change is required.",
+            "location_kind": "section", "grounding_status": "verified",
+        }
+        plan = {
+            "requirement_matches": [{
+                "criteria_id": "C1C07BF6246", "match_type": "direct", "coverage": "strong",
+                "evidence_ids": ["EV6C37A04EB21C"],
+            }],
+            "selected_evidence": [{
+                "evidence_id": "EV6C37A04EB21C", "supports_requirements": ["C1C07BF6246"],
+            }],
+        }
+
+        review = ai.reconcile_resume_requirement_gaps(
+            {"status": "fail", "results": [{"status": "fail", "issues": [finding]}]}, plan,
+        )
+
+        self.assertTrue(review["results"][0]["issues"][0]["blocks_release"])
+        self.assertEqual(review["status"], "fail")
+
+    def test_strong_cover_letter_requirement_with_selected_evidence_still_blocks(self):
+        finding = {
+            "type": "requirement_omission", "severity": "major", "blocks_release": True,
+            "requirement_id": "C1C07BF6246",
+            "description": "The advertised requirement for computer literacy (Excel, Outlook, Word) has selected supporting evidence in the SKILLS record EV6C37A04EB21C, but the document omits it.",
+            "evidence": "EV6C37A04EB21C detail: 'Microsoft Excel (Advanced), Word, Outlook, Teams; Dayforce; records management systems'.",
+            "location": "document_wide", "recommended_action": "Use the selected evidence.",
+            "location_kind": "document_wide", "grounding_status": "verified",
+        }
+        plan = {"priorities": [{
+            "criteria_id": "C1C07BF6246", "coverage": "strong", "match_type": "direct",
+            "selected_evidence_ids": ["EV6C37A04EB21C"],
+        }]}
+
+        review = ai.reconcile_cover_letter_plan_findings(
+            {"status": "fail", "results": [{"status": "fail", "issues": [finding]}]}, plan,
+        )
+
+        self.assertTrue(review["results"][0]["issues"][0]["blocks_release"])
+        self.assertEqual(review["status"], "fail")
+
     def test_ai_and_deterministic_summary_attribution_findings_are_deduplicated(self):
         sentence = "Earlier roles at Avaintec and CCCC involved coordinating meetings and maintaining project records."
         content = f"## Professional Summary\n{sentence}\n## Key Skills\n- Records\n## Work Experience\nExperience"
