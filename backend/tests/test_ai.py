@@ -986,7 +986,7 @@ November 2017 - January 2019
     def test_batch_matcher_uses_all_criteria_and_rejects_unknown_evidence(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'
-        response = '{"matches":[{"criteria_id":"C1","matched_evidence":["EV001","FAKE"],"match_type":"direct","coverage":"strong","reasoning":"Relevant."}],"unused_evidence":[]}'
+        response = '{"matches":[{"criteria_id":"C1","matched_evidence":["EV001","FAKE"],"match_type":"direct","coverage":"strong","reasoning":"Relevant.","evidence_support":[{"evidence_id":"EV001","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]}]}],"unused_evidence":[]}'
         with patch.object(ai, "_openai_draft", return_value=response) as call:
             result = ai.match_evidence_batch(ckb, job_model)
 

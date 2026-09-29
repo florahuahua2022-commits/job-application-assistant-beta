@@ -19,6 +19,7 @@ class EvidenceMatcherTests(unittest.TestCase):
         raw = {"matches": [{
             "criteria_id": "C1", "matched_evidence": ["EV001", "INVENTED"],
             "match_type": "direct", "coverage": "strong", "reasoning": "Direct reporting evidence.",
+            "evidence_support": [{"evidence_id": "EV001", "support_quote": "Prepared monthly project reports.", "matched_requirement_terms": ["Reporting"]}],
         }]}
 
         result = normalise_match_result(raw, self.job_model, self.ckb)
@@ -119,6 +120,29 @@ class EvidenceMatcherTests(unittest.TestCase):
 
         self.assertFalse(match_cache_is_current(current, {**self.job_model, "position_title": "Changed"}, self.ckb))
         self.assertFalse(match_cache_is_current(current, self.job_model, [*self.ckb, {"evidence_id": "NEW", "source_text": "New fact"}]))
+
+    def test_named_sap_requirement_cannot_be_supported_without_exact_sap_token(self):
+        criterion = {"criteria_id": "CDB2979FE64", "criteria_text": "SAP experience would be preferred"}
+        source = "Used a records management system and Dayforce."
+        result = normalise_match_result({"matches": [{
+            "criteria_id": criterion["criteria_id"], "matched_evidence": ["EV"], "match_type": "direct", "coverage": "strong",
+            "evidence_support": [{"evidence_id": "EV", "support_quote": source, "matched_requirement_terms": ["SAP"]}],
+        }]}, {"criteria": [criterion]}, [{"evidence_id": "EV", "source_text": source}])
+
+        self.assertEqual((result["matches"][0]["match_type"], result["matches"][0]["coverage"]), ("insufficient", "weak"))
+
+    def test_admin_without_warehouse_is_partial_for_compound_role_specific_requirement(self):
+        criterion = {"criteria_id": "C1F4EAD92BF", "criteria_text": "A strong background in admin and warehouse knowledge would be beneficial."}
+        source = "Provided financial administration and records management support."
+        result = normalise_match_result({"matches": [{
+            "criteria_id": criterion["criteria_id"], "matched_evidence": ["EV"], "match_type": "direct", "coverage": "strong",
+            "evidence_support": [{"evidence_id": "EV", "support_quote": source, "matched_requirement_terms": ["admin"]}],
+        }]}, {"criteria": [criterion]}, [{"evidence_id": "EV", "source_text": source}])
+
+        match = result["matches"][0]
+        self.assertEqual((match["match_type"], match["coverage"]), ("inferred", "partial"))
+        self.assertEqual(match["evidence_support"][0]["supported_atoms"], ["term:admin"])
+        self.assertIn("term:warehouse", match["evidence_support"][0]["unsupported_atoms"])
 
 
 if __name__ == "__main__":

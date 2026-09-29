@@ -17,6 +17,12 @@ _ATOM_PATTERNS = {
     "collaboration": (r"\bcollaborat(?:e|ed|es|ing|ion)\b", r"\bstakeholders?\b", r"\bmultidisciplinary\b", r"\bcross[- ]functional\b", r"\bteams?\b"),
     "diverse_backgrounds": (r"\bdiverse backgrounds\b", r"\bmulticultural\b", r"\binternational\b", r"\bcross[- ]agency\b"),
 }
+_NAMED_TOOL_TERMS = {"excel", "outlook", "word", "teams", "sap", "sharepoint", "procore", "aconex", "autodesk"}
+_ROLE_TERM_STOP = {
+    "ability", "adequate", "background", "beneficial", "excellent", "experience", "field", "from", "has",
+    "ideally", "including", "knowledge", "preferred", "proficient", "skills", "strong", "studies", "successfully",
+    "the", "with", "would", "and", "or", "in", "of", "to", "a", "an", "be",
+}
 
 
 def _normalise_text(value: Any) -> str:
@@ -52,11 +58,40 @@ def _requirement_atoms(value: str) -> list[str]:
         atoms.append("collaboration")
     if "diverse backgrounds" in text:
         atoms.append("diverse_backgrounds")
+    atoms.extend(f"tool:{tool}" for tool in sorted(_NAMED_TOOL_TERMS) if re.search(rf"\b{re.escape(tool)}\b", text))
+    if not atoms:
+        terms = []
+        for token in re.findall(r"[a-z][a-z-]+", text):
+            token = "admin" if token in {"admin", "administration", "administrative"} else token
+            if len(token) > 3 and token not in _ROLE_TERM_STOP and token not in terms:
+                terms.append(token)
+        atoms.extend(f"term:{term}" for term in terms)
     return atoms
 
 
-def _ground_support(criterion_text: str, raw_support: list[dict[str, Any]], evidence_by_id: dict[str, dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-    atoms = _requirement_atoms(criterion_text)
+def _criterion_atoms(criterion: dict[str, Any]) -> list[str]:
+    if "qualification" in (criterion.get("criterion_categories") or []):
+        return []
+    return _requirement_atoms(str(criterion.get("criteria_text") or ""))
+
+
+def _patterns_for_atom(atom: str) -> tuple[str, ...]:
+    if atom in _ATOM_PATTERNS:
+        return _ATOM_PATTERNS[atom]
+    if atom.startswith("tool:"):
+        return (rf"\b{re.escape(atom[5:])}\b",)
+    term = atom[5:]
+    if term == "admin":
+        return (r"\badmin(?:istration|istrative)?\b",)
+    if term == "warehouse":
+        return (r"\bwarehous(?:e|ing)\b",)
+    if term == "reporting":
+        return (r"\breport(?:s|ed|ing)?\b",)
+    return (rf"\b{re.escape(term)}(?:s)?\b",)
+
+
+def _ground_support(criterion: dict[str, Any], raw_support: list[dict[str, Any]], evidence_by_id: dict[str, dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    atoms = _criterion_atoms(criterion)
     if not atoms:
         return [], []
     grounded = []
@@ -69,7 +104,7 @@ def _ground_support(criterion_text: str, raw_support: list[dict[str, Any]], evid
         if not quote_text or quote_text not in _normalise_text(source):
             supported = []
         else:
-            supported = [atom for atom in atoms if any(re.search(pattern, quote_text) for pattern in _ATOM_PATTERNS[atom])]
+            supported = [atom for atom in atoms if any(re.search(pattern, quote_text) for pattern in _patterns_for_atom(atom))]
         supported_union.update(supported)
         grounded.append({
             "evidence_id": evidence_id,
@@ -108,9 +143,9 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
             match_type, coverage = "insufficient", "weak"
         raw_support = [item for item in item.get("evidence_support") or [] if str(item.get("evidence_id") or "") in evidence_ids]
         grounded_support, supported_atoms = _ground_support(
-            str(criteria[criteria_id].get("criteria_text") or ""), raw_support, evidence_by_id,
+            criteria[criteria_id], raw_support, evidence_by_id,
         )
-        required_atoms = _requirement_atoms(str(criteria[criteria_id].get("criteria_text") or ""))
+        required_atoms = _criterion_atoms(criteria[criteria_id])
         if required_atoms:
             evidence_ids = [support["evidence_id"] for support in grounded_support if support["supported_atoms"]]
             if not supported_atoms:
