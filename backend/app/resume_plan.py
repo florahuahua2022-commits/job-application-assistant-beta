@@ -53,6 +53,29 @@ def _evidence_scope_tokens(item: dict[str, Any]) -> set[str]:
     return {_scope_token(token) for token in re.findall(r"[a-z][a-z-]+", text.casefold())}
 
 
+def compare_resume_plans(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
+    fields = ("curation_action", "relevance_tier", "display_mode", "max_bullets")
+    before = {str(role.get("source_section")): role for role in previous.get("roles") or []}
+    after = {str(role.get("source_section")): role for role in current.get("roles") or []}
+    differences = []
+    for section in sorted(before.keys() | after.keys()):
+        old, new = before.get(section, {}), after.get(section, {})
+        old_values = {field: old.get(field) for field in fields}
+        new_values = {field: new.get(field) for field in fields}
+        if old_values == new_values:
+            continue
+        expected = bool(new.get("timeline_only_due_to_generic_only"))
+        presentation_unchanged = all(old_values[field] == new_values[field] for field in ("relevance_tier", "display_mode", "max_bullets"))
+        differences.append({
+            "source_section": section,
+            "before": old_values,
+            "after": new_values,
+            "classification": "expected_change" if expected else "non_material_change" if presentation_unchanged else "review_required",
+            "reason": "generic-only downgrade" if expected else "priority action changed; presentation unchanged" if presentation_unchanged else "resume plan changed",
+        })
+    return differences
+
+
 def _normalise_identity_text(value: Any) -> str:
     value = str(value or "").casefold().replace("–", "-").replace("—", "-")
     value = re.sub(r"[#*_`~|•▪■]+", " ", value)
@@ -634,9 +657,7 @@ def build_resume_curation_plan(
             and all(not evidence_density(item)["evidence_thin"] and evidence_density(item)["source_detail_words"] >= 20 for item in items)
         )
         generic_timeline_only = scoped_curation and bool(links) and not role_specific and not generic_condensed
-        if scoped_curation and role_specific and links:
-            action, cap = "promote", 4
-        elif generic_condensed:
+        if generic_condensed:
             action, cap = "keep", 1
         elif generic_timeline_only:
             action, cap = "omit", 0

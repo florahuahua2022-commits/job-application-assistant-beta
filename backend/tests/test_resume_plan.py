@@ -2,7 +2,7 @@ import json
 import unittest
 
 from app.ckb import build_career_knowledge_base
-from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, evaluate_resume_quality, repair_missing_timeline, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
+from app.resume_plan import RESUME_PLAN_SCHEMA_VERSION, build_resume_curation_plan, compare_resume_plans, evaluate_resume_quality, repair_missing_timeline, resume_evidence_pack, selected_resume_evidence_ids, validate_resume_content
 from app.resume_timeline import timeline_text
 
 
@@ -666,6 +666,39 @@ Jan 2010 - Dec 2010"""
         issues = validate_resume_content(content, plan, [])["issues"]
 
         self.assertIn("role_bullet_limit_exceeded", {item["code"] for item in issues})
+
+    def test_plan_diff_labels_mable_generic_only_downgrade_as_expected(self):
+        section = "Work Experience > Self-employed via Mable > Independent Support Worker"
+        previous = {"roles": [{"source_section": section, "curation_action": "keep", "relevance_tier": "core", "display_mode": "full", "max_bullets": None}]}
+        current = {"roles": [{"source_section": section, "curation_action": "omit", "relevance_tier": "low", "display_mode": "timeline_only", "max_bullets": 0, "timeline_only_due_to_generic_only": True}]}
+
+        self.assertEqual(compare_resume_plans(previous, current), [{
+            "source_section": section,
+            "before": {"curation_action": "keep", "relevance_tier": "core", "display_mode": "full", "max_bullets": None},
+            "after": {"curation_action": "omit", "relevance_tier": "low", "display_mode": "timeline_only", "max_bullets": 0},
+            "classification": "expected_change",
+            "reason": "generic-only downgrade",
+        }])
+
+    def test_role_specific_atom_does_not_upgrade_keep_action_to_promote(self):
+        model = {"position_title": "Administration & Warehouse Assistant", "criteria": [{
+            "criteria_id": "ADMIN", "criteria_text": "A strong background in admin and warehouse knowledge would be beneficial.", "criteria_type": "inferred",
+        }]}
+        item = evidence("ADMIN_EV", "Work Experience > Department > Finance Administration Officer", "Provided financial administration support.")
+        matches = {"matches": [{"criteria_id": "ADMIN", "matched_evidence": ["ADMIN_EV"], "match_type": "inferred", "coverage": "partial"}]}
+
+        role = build_resume_curation_plan(model, matches, [item])["roles"][0]
+
+        self.assertEqual((role["curation_action"], role["relevance_tier"], role["display_mode"]), ("keep", "core", "full"))
+
+    def test_plan_diff_marks_action_only_change_as_non_material(self):
+        section = "Work Experience > Department > Finance Administration Officer"
+        previous = {"roles": [{"source_section": section, "curation_action": "keep", "relevance_tier": "core", "display_mode": "full", "max_bullets": None}]}
+        current = {"roles": [{"source_section": section, "curation_action": "promote", "relevance_tier": "core", "display_mode": "full", "max_bullets": None}]}
+
+        difference = compare_resume_plans(previous, current)[0]
+
+        self.assertEqual((difference["classification"], difference["reason"]), ("non_material_change", "priority action changed; presentation unchanged"))
 
     def test_decision_gaps_and_unsupported_requirements_add_no_evidence(self):
         model = {"criteria": [{"criteria_id": value, "criteria_type": kind} for value, kind in (("G", "essential"), ("U", "essential"), ("D", "desirable"))]}
