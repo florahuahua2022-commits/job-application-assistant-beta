@@ -177,7 +177,7 @@ def match_evidence_batch(ckb_json: str, job_model_json: str) -> dict:
     if not isinstance(ckb, list) or not isinstance(job_model, dict):
         raise ValueError("CKB or Job Model has the wrong structure.")
     if not job_model.get("criteria"):
-        return {"schema_version": "1.0", "matches": [], "unused_evidence": [str(item.get("evidence_id")) for item in ckb if item.get("evidence_id")]}
+        return normalise_match_result({"matches": []}, job_model, ckb)
     prompt = f"""You are a Selection Criteria evidence-matching assistant. Match all criteria in one batch so evidence choices are consistent across the application.
 
 Rules:

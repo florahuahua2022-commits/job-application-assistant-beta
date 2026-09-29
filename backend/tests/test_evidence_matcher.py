@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from app.evidence_matcher import matched_evidence_pack, normalise_match_result, validate_match_result
+from app.evidence_matcher import match_cache_is_current, matched_evidence_pack, normalise_match_result, validate_match_result
 
 
 class EvidenceMatcherTests(unittest.TestCase):
@@ -99,6 +99,26 @@ class EvidenceMatcherTests(unittest.TestCase):
             with self.subTest(evidence_id=evidence_id, criterion_id=criterion_id):
                 result = normalise_match_result(raw, {"criteria": [{"criteria_id": criterion_id, "criteria_text": criterion_text}]}, [{"evidence_id": evidence_id, "source_text": source}])
                 self.assertEqual((result["matches"][0]["match_type"], result["matches"][0]["coverage"]), expected)
+
+    def test_match_cache_requires_current_schema_rules_and_input_fingerprints(self):
+        current = normalise_match_result({"matches": []}, {"criteria": []}, self.ckb)
+
+        self.assertTrue(match_cache_is_current(current, {"criteria": []}, self.ckb))
+        for key, value in (
+            ("schema_version", "1.0"),
+            ("matcher_rules_version", "old-rules"),
+            ("job_model_fingerprint", "stale"),
+            ("ckb_fingerprint", "stale"),
+        ):
+            stale = {**current, key: value}
+            with self.subTest(key=key):
+                self.assertFalse(match_cache_is_current(stale, {"criteria": []}, self.ckb))
+
+    def test_match_cache_detects_changed_ckb_or_job_model(self):
+        current = normalise_match_result({"matches": []}, self.job_model, self.ckb)
+
+        self.assertFalse(match_cache_is_current(current, {**self.job_model, "position_title": "Changed"}, self.ckb))
+        self.assertFalse(match_cache_is_current(current, self.job_model, [*self.ckb, {"evidence_id": "NEW", "source_text": "New fact"}]))
 
 
 if __name__ == "__main__":

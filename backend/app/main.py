@@ -27,6 +27,7 @@ from .ckb import build_career_knowledge_base, career_knowledge_base_is_current, 
 from .config import settings
 from .cover_letter_plan import build_cover_letter_plan, selected_cover_letter_evidence_ids
 from .evidence_allocation import apply_selection_allocation, build_evidence_allocation
+from .evidence_matcher import match_cache_is_current, normalise_match_result
 from .database import create_db_and_tables, get_session
 from .exporter import create_docx, create_pdf, safe_filename, export_theme
 from .feature_flags import GENERATION_FEATURES, generation_feature_status
@@ -531,9 +532,14 @@ def prepare_application_decision(
             session.commit()
     ckb, _ = application_ckb(session, application, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
-    if not matches:
-        matches = match_evidence_batch(json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False))
+    if not match_cache_is_current(matches, job_model, ckb):
+        matches = normalise_match_result(
+            match_evidence_batch(json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False)), job_model, ckb,
+        )
         application.evidence_matches_json = json.dumps(matches, ensure_ascii=False)
+        application.application_decision_json = "{}"
+        application.selection_plan_json = "{}"
+        application.selection_confirmations_json = "[]"
     previous = json.loads(application.application_decision_json or "{}")
     decision = build_application_decision(job_model, requirements, matches, ckb, profile, previous)
     errors = validate_application_decision(decision)
@@ -3262,11 +3268,23 @@ def generate_document(
     )
     evidence_matches_json = application.evidence_matches_json or "{}"
     try:
-        if evidence_matches_json.strip() in {"", "{}"}:
-            evidence_matches_json = json.dumps(match_evidence_batch(ckb_source_json, job_model_json), ensure_ascii=False)
+        parsed_ckb = json.loads(ckb_source_json)
+        parsed_job_model = json.loads(job_model_json)
+        parsed_matches = json.loads(evidence_matches_json or "{}")
+        if not match_cache_is_current(parsed_matches, parsed_job_model, parsed_ckb):
+            evidence_matches_json = json.dumps(normalise_match_result(
+                match_evidence_batch(ckb_source_json, job_model_json), parsed_job_model, parsed_ckb,
+            ), ensure_ascii=False)
             application.evidence_matches_json = evidence_matches_json
+            application.selection_plan_json = "{}"
+            application.selection_confirmations_json = "[]"
+            decision = build_application_decision(
+                parsed_job_model, stored_requirements, json.loads(evidence_matches_json), parsed_ckb, profile, decision,
+            )
+            application.application_decision_json = json.dumps(decision, ensure_ascii=False)
             session.add(application)
             session.commit()
+            started_fingerprint = generation_inputs_fingerprint(application, master_resume, profile)
         outcome_learning = (
             build_outcome_signals(
                 session.exec(select_for_user(JobApplication, user_id)).all(), application.id,

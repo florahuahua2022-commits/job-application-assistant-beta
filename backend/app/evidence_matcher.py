@@ -1,4 +1,5 @@
 import json
+import hashlib
 import re
 import unicodedata
 from typing import Any
@@ -6,6 +7,7 @@ from .job_model import match_advertised_tags
 
 
 MATCH_SCHEMA_VERSION = "2.0"
+MATCHER_RULES_VERSION = "lexical-grounding-v1"
 
 _ATOM_PATTERNS = {
     "organisation": (r"\borganis(?:e|ed|es|ing|ation|ational)\b", r"\borganiz(?:e|ed|es|ing|ation|ational)\b", r"\bcoordinat(?:e|ed|es|ing|ion)\b", r"\bschedul(?:e|ed|es|ing)\b", r"\bplann(?:ed|ing)\b", r"\bprioriti[sz](?:e|ed|es|ing)\b", r"\btrack(?:ed|ing)?\b", r"\bmonitor(?:ed|ing)?\b"),
@@ -20,6 +22,19 @@ _ATOM_PATTERNS = {
 def _normalise_text(value: Any) -> str:
     value = unicodedata.normalize("NFKC", str(value or "")).casefold().replace("–", "-").replace("—", "-")
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _fingerprint(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def match_cache_is_current(result: dict[str, Any], job_model: dict[str, Any], ckb: list[dict[str, Any]]) -> bool:
+    return bool(
+        result.get("schema_version") == MATCH_SCHEMA_VERSION
+        and result.get("matcher_rules_version") == MATCHER_RULES_VERSION
+        and result.get("job_model_fingerprint") == _fingerprint(job_model)
+        and result.get("ckb_fingerprint") == _fingerprint(ckb)
+    )
 
 
 def _requirement_atoms(value: str) -> list[str]:
@@ -125,6 +140,9 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
     used = {evidence_id for item in normalised for evidence_id in item["matched_evidence"]}
     return {
         "schema_version": MATCH_SCHEMA_VERSION,
+        "matcher_rules_version": MATCHER_RULES_VERSION,
+        "job_model_fingerprint": _fingerprint(job_model),
+        "ckb_fingerprint": _fingerprint(ckb),
         "matches": normalised,
         "advertised_skill_tags": match_advertised_tags(job_model, {"matches": normalised}, ckb),
         "unused_evidence": sorted(valid_evidence - used),
