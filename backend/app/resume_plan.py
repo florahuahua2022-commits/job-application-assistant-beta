@@ -10,6 +10,48 @@ from .job_model import match_advertised_tags
 
 RESUME_PLAN_SCHEMA_VERSION = "2.0"
 
+_ROLE_GENERIC_WORDS = {
+    "ability", "background", "beneficial", "excellent", "experience", "preferred", "skills", "strong",
+    "communication", "collaboration", "organisational", "organizational", "organisation", "organization",
+    "time", "management", "multitask", "multitasking", "knowledge", "computer", "literacy",
+}
+_ROLE_STOP_WORDS = {"a", "an", "and", "be", "from", "has", "in", "of", "or", "the", "to", "with", "would"}
+_NAMED_TOOLS = {"excel", "outlook", "word", "teams", "sap", "sharepoint", "procore", "aconex", "autodesk"}
+
+
+def _scope_token(value: str) -> str:
+    token = value.casefold()
+    return "admin" if token in {"admin", "administration", "administrative"} else token
+
+
+def _role_specific_atoms(job_model: dict[str, Any]) -> set[str]:
+    text = " ".join([
+        str(job_model.get("position_title") or ""),
+        *(str(item.get("criteria_text") or "") for item in job_model.get("criteria") or []
+          if not re.fullmatch(r"(?i)skills and credentials from the job description", str(item.get("criteria_text") or "").strip())),
+    ])
+    return {
+        _scope_token(token) for token in re.findall(r"[a-z][a-z-]+", text.casefold())
+        if len(token) > 3 and token not in _ROLE_GENERIC_WORDS | _ROLE_STOP_WORDS | _NAMED_TOOLS
+    }
+
+
+def _criterion_scope(criterion: dict[str, Any], role_atoms: set[str]) -> str:
+    text = str(criterion.get("criteria_text") or "").casefold()
+    if re.fullmatch(r"\s*skills and credentials from the job description\s*", text):
+        return "placeholder"
+    tokens = {_scope_token(token) for token in re.findall(r"[a-z][a-z-]+", text)}
+    if tokens & role_atoms:
+        return "role_specific"
+    if tokens & _NAMED_TOOLS:
+        return "named_tool"
+    return "generic_transferable"
+
+
+def _evidence_scope_tokens(item: dict[str, Any]) -> set[str]:
+    text = " ".join(str(item.get(field) or "") for field in ("source_section", "source_text", "action", "task", "result", "detail"))
+    return {_scope_token(token) for token in re.findall(r"[a-z][a-z-]+", text.casefold())}
+
 
 def _normalise_identity_text(value: Any) -> str:
     value = str(value or "").casefold().replace("–", "-").replace("—", "-")
@@ -62,8 +104,8 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         issues.append({"code": "unselected_evidence_used", "message": "The CV uses evidence outside the Resume Curation Plan."})
     work_section = re.search(r"(?ims)^##\s*Work Experience\s*$\n(.*?)(?=^##\s|\Z)", content)
     role_content = work_section.group(1) if work_section else content
-    normalised_lines = [_normalise_identity_text(line) for line in role_content.splitlines()]
-    normalised_lines = [line for line in normalised_lines if line]
+    raw_nonempty_lines = [line for line in role_content.splitlines() if _normalise_identity_text(line)]
+    normalised_lines = [_normalise_identity_text(line) for line in raw_nonempty_lines]
     all_roles = plan.get("roles") or []
     visible_roles = [role for role in all_roles if role.get("include_role_header")]
     candidates = {id(role): _role_identity_positions(normalised_lines, role) for role in all_roles}
@@ -80,6 +122,12 @@ def validate_resume_content(content: str, plan: dict[str, Any], evidence_used: l
         role_block = " ".join(normalised_lines[position:min(later_positions, default=len(normalised_lines))]) if position >= 0 else ""
         if period and not _contains_identity(role_block, period):
             issues.append({"code": "missing_role_period", "message": f"The CV is missing the authoritative employment period for {role.get('role_marker') or role.get('source_section')}."})
+        cap = role.get("max_bullets")
+        if position >= 0 and isinstance(cap, int):
+            end = min(later_positions, default=len(raw_nonempty_lines))
+            bullet_count = sum(bool(re.match(r"^\s*[-*+]\s+", line)) for line in raw_nonempty_lines[position:end])
+            if bullet_count > cap:
+                issues.append({"code": "role_bullet_limit_exceeded", "message": f"The CV exceeds the bullet limit for {marker}."})
     for role in all_roles:
         if not role.get("include_role_header") and candidates[id(role)]:
             issues.append({"code": "omitted_role_expanded", "message": f"The CV includes a role omitted by the Resume Plan: {role.get('role_marker') or role.get('source_section')}."})
@@ -441,6 +489,10 @@ def build_resume_curation_plan(
     max_evidence = len(evidence_by_id) if max_evidence is None else max_evidence
     source_order = {evidence_id: index for index, evidence_id in enumerate(evidence_by_id)}
     criteria = {str(item.get("criteria_id")): item for item in job_model.get("criteria") or []}
+    scoped_curation = bool(str(job_model.get("position_title") or "").strip() and criteria)
+    role_atoms = _role_specific_atoms(job_model) if scoped_curation else set()
+    criterion_scopes = {criterion_id: _criterion_scope(item, role_atoms) for criterion_id, item in criteria.items()}
+    match_by_criterion = {str(item.get("criteria_id")): item for item in matches.get("matches") or []}
     decisions = {str(item.get("criteria_id")): item for item in (application_decision or {}).get("requirements") or []}
     historical_preference = {
         str(item.get("evidence_id")): 1
@@ -560,7 +612,35 @@ def build_resume_curation_plan(
         links = [link for item in items for link in support[str(item.get("evidence_id"))] if str(item.get("evidence_id")) in selected_set]
         is_current = any(_is_current(item) for item in items)
         direct_essential = any(importance == "essential" and framing == "direct" for _, importance, framing in links)
-        if direct_essential or section in strength_promoted_sections:
+        role_specific = scoped_curation and bool(role_atoms & set().union(*(_evidence_scope_tokens(item) for item in items)))
+        generic_quotes = {
+            str((match_by_criterion.get(criterion_id, {}).get("support_quotes") or {}).get(evidence_id) or "").strip()
+            for evidence_id in role_selected
+            for criterion_id, _importance, link_framing in support[evidence_id]
+            if criterion_scopes.get(criterion_id) == "generic_transferable"
+            and link_framing == "direct"
+            and match_by_criterion.get(criterion_id, {}).get("coverage") == "strong"
+        } - {""}
+        generic_criteria = {
+            criterion_id
+            for evidence_id in role_selected
+            for criterion_id, _importance, link_framing in support[evidence_id]
+            if criterion_scopes.get(criterion_id) == "generic_transferable"
+            and link_framing == "direct"
+            and match_by_criterion.get(criterion_id, {}).get("coverage") == "strong"
+        }
+        generic_condensed = (
+            scoped_curation and not role_specific and len(generic_criteria) >= 2 and len(generic_quotes) >= 2
+            and all(not evidence_density(item)["evidence_thin"] and evidence_density(item)["source_detail_words"] >= 20 for item in items)
+        )
+        generic_timeline_only = scoped_curation and bool(links) and not role_specific and not generic_condensed
+        if scoped_curation and role_specific and links:
+            action, cap = "promote", 4
+        elif generic_condensed:
+            action, cap = "keep", 1
+        elif generic_timeline_only:
+            action, cap = "omit", 0
+        elif direct_essential or section in strength_promoted_sections:
             action, cap = "promote", 4
         elif links:
             action, cap = "keep", 2
@@ -568,7 +648,12 @@ def build_resume_curation_plan(
             action, cap = "compress", 1
         else:
             action, cap = "omit", 0
-        framing = "direct" if any(link[2] == "direct" for link in links) else "adjacent" if links else "continuity_only" if is_current else None
+        framing = (
+            "direct" if scoped_curation and role_specific and links else
+            "adjacent" if generic_condensed else
+            None if generic_timeline_only else
+            "direct" if any(link[2] == "direct" for link in links) else "adjacent" if links else "continuity_only" if is_current else None
+        )
         roles.append({
             "source_section": section,
             "chronology_order": source_order,
@@ -581,7 +666,7 @@ def build_resume_curation_plan(
             "curation_action": action,
             "include_role_header": action != "omit",
             "selected_evidence_ids": role_selected,
-            "max_bullets": None if role_selected else 0,
+            "max_bullets": 1 if generic_condensed else None if role_selected else 0,
             "supports_requirements": sorted({link[0] for link in links}),
             "evidence_framing": framing,
             "timeline_only_due_to_thin_evidence": (
@@ -589,6 +674,7 @@ def build_resume_curation_plan(
                 and evidence_density(evidence_by_id[role_selected[0]])["source_detail_words"]
                     < EVIDENCE_TIMELINE_ONLY_WORD_THRESHOLD
             ),
+            "timeline_only_due_to_generic_only": generic_timeline_only,
             "rationale": {
                 "promote": (
                     "Verified direct support for an essential requirement."

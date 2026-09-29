@@ -595,6 +595,78 @@ Jan 2010 - Dec 2010"""
         constrained = build_resume_curation_plan(model, matches, ckb, max_evidence=1)
         self.assertEqual([item["evidence_id"] for item in constrained["selected_evidence"]], ["DIR"])
 
+    def test_24_generic_only_mable_and_core_color_stay_timeline_only(self):
+        model = {
+            "position_title": "Administration & Warehouse Assistant",
+            "criteria": [
+                {"criteria_id": "C493EC45DAE", "criteria_text": "Has excellent organisational and time-management skills", "criteria_type": "inferred"},
+                {"criteria_id": "C1F4EAD92BF", "criteria_text": "A strong background in admin and warehouse knowledge would be beneficial.", "criteria_type": "inferred"},
+            ],
+        }
+        mable = evidence(
+            "EV2572ECCB036E", "Work Experience > Self-employed via Mable > Independent Support Worker",
+            "Managed scheduling and direct client communication independently while maintaining professional service records. Provided individual support to independently sourced clients through Mable, including community participation, appointments and assistance with daily living.",
+            period={"start": "August 2025", "end": "January 2026"},
+        )
+        core_actions = [
+            "Lead the planning and implementation marketing strategy across a range of digital channels and mediums, including social media and SEO.",
+            "Provides strategy of digital marketing both for online and offline events promotion.",
+            "Developing and executing brand, content and advertising through social media posts and scheduling post, coordination of content schedules for event plans, product launches and membership programmes.",
+            "Building and managing an influencer network and managing an influencer budget.",
+        ]
+        core = [evidence(
+            evidence_id, "Work Experience > Core Color > E-commerce Operations", action,
+            period={"start": "2022", "end": None},
+        ) for evidence_id, action in zip(
+            ("EVA8C08DFAD1DD", "EV55515206D28C", "EV99B6E0838BD4", "EVCA6E198E80A7"), core_actions,
+        )]
+        department = evidence(
+            "EVA37A578823CE", "Work Experience > Department of Communities > Finance Administration Officer",
+            "Provided administrative and operational support, financial administration and records management.",
+            period={"start": "February 2026", "end": "August 2026"},
+        )
+        matches = {"matches": [
+            {"criteria_id": "C493EC45DAE", "matched_evidence": [mable["evidence_id"], *[item["evidence_id"] for item in core]], "match_type": "direct", "coverage": "strong"},
+            {"criteria_id": "C1F4EAD92BF", "matched_evidence": [department["evidence_id"]], "match_type": "inferred", "coverage": "partial"},
+        ]}
+
+        plan = build_resume_curation_plan(model, matches, [department, mable, *core])
+        roles = {role["employer_marker"]: role for role in plan["roles"]}
+
+        self.assertEqual((roles["Self-employed via Mable"]["curation_action"], roles["Self-employed via Mable"]["relevance_tier"], roles["Self-employed via Mable"]["display_mode"], roles["Self-employed via Mable"]["max_bullets"]), ("omit", "low", "timeline_only", 0))
+        self.assertEqual((roles["Core Color"]["curation_action"], roles["Core Color"]["relevance_tier"], roles["Core Color"]["display_mode"], roles["Core Color"]["max_bullets"]), ("omit", "low", "timeline_only", 0))
+        self.assertEqual((roles["Department of Communities"]["relevance_tier"], roles["Department of Communities"]["display_mode"]), ("core", "full"))
+
+    def test_generic_only_requires_two_independent_criteria_for_one_condensed_bullet(self):
+        model = {"position_title": "Warehouse Assistant", "criteria": [
+            {"criteria_id": "ORG", "criteria_text": "Organisational skills", "criteria_type": "inferred"},
+            {"criteria_id": "COMM", "criteria_text": "Communication skills", "criteria_type": "inferred"},
+        ]}
+        item = evidence(
+            "GENERIC", "Work Experience > Example > Support Worker",
+            "Managed appointment scheduling for clients. Communicated directly with clients about service arrangements.",
+            period={"start": "2024", "end": "2025"},
+        )
+        matches = {"matches": [
+            {"criteria_id": "ORG", "matched_evidence": ["GENERIC"], "match_type": "direct", "coverage": "strong", "support_quotes": {"GENERIC": "Managed appointment scheduling for clients."}},
+            {"criteria_id": "COMM", "matched_evidence": ["GENERIC"], "match_type": "direct", "coverage": "strong", "support_quotes": {"GENERIC": "Communicated directly with clients about service arrangements."}},
+        ]}
+
+        role = build_resume_curation_plan(model, matches, [item])["roles"][0]
+
+        self.assertEqual((role["curation_action"], role["relevance_tier"], role["display_mode"], role["max_bullets"]), ("keep", "adjacent", "condensed", 1))
+
+    def test_condensed_role_rejects_more_than_its_one_grounded_bullet(self):
+        plan = {"required_sections": [], "selected_evidence": [], "roles": [{
+            "role_marker": "Support Worker", "employer_marker": "Example", "include_role_header": True,
+            "display_period": "2024 - 2025", "display_mode": "condensed", "max_bullets": 1,
+        }]}
+        content = "Support Worker | Example | 2024 - 2025\n- Managed appointment scheduling.\n- Communicated with clients."
+
+        issues = validate_resume_content(content, plan, [])["issues"]
+
+        self.assertIn("role_bullet_limit_exceeded", {item["code"] for item in issues})
+
     def test_decision_gaps_and_unsupported_requirements_add_no_evidence(self):
         model = {"criteria": [{"criteria_id": value, "criteria_type": kind} for value, kind in (("G", "essential"), ("U", "essential"), ("D", "desirable"))]}
         matches = {"matches": [{"criteria_id": value, "matched_evidence": [], "match_type": "insufficient", "coverage": "weak"} for value in ("G", "U", "D")]}

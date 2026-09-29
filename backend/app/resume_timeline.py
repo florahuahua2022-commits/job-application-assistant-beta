@@ -28,7 +28,7 @@ def apply_timeline(roles, role_groups, today=None):
     for role in roles:
         role["relevance_tier"] = "core" if role["evidence_framing"] == "direct" else "adjacent" if role["evidence_framing"] == "adjacent" else "low"
         role["display_mode"] = "full" if role["relevance_tier"] == "core" else "condensed" if role["relevance_tier"] == "adjacent" else "hidden"
-        if role.get("timeline_only_due_to_thin_evidence"):
+        if role.get("timeline_only_due_to_thin_evidence") or role.get("timeline_only_due_to_generic_only"):
             role["display_mode"] = "timeline_only"
             forced_timeline.append(role)
         if role["display_mode"] in {"timeline_only", "hidden"}:
