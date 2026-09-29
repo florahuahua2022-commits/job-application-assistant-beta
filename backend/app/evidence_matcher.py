@@ -1,13 +1,74 @@
 import json
+import re
+import unicodedata
 from typing import Any
 from .job_model import match_advertised_tags
 
 
-MATCH_SCHEMA_VERSION = "1.0"
+MATCH_SCHEMA_VERSION = "2.0"
+
+_ATOM_PATTERNS = {
+    "organisation": (r"\borganis(?:e|ed|es|ing|ation|ational)\b", r"\borganiz(?:e|ed|es|ing|ation|ational)\b", r"\bcoordinat(?:e|ed|es|ing|ion)\b", r"\bschedul(?:e|ed|es|ing)\b", r"\bplann(?:ed|ing)\b", r"\bprioriti[sz](?:e|ed|es|ing)\b", r"\btrack(?:ed|ing)?\b", r"\bmonitor(?:ed|ing)?\b"),
+    "time_management": (r"\btime management\b", r"\bschedul(?:e|ed|es|ing)\b", r"\bpriorit(?:y|ies)\b", r"\bprioriti[sz](?:e|ed|es|ing)\b", r"\bdeadline(?:s)?\b", r"\btimeline(?:s)?\b", r"\bconcurrently\b", r"\bcompeting (?:priorities|tasks)\b"),
+    "multitask": (r"\bmulti[- ]?task(?:ing)?\b", r"\bcompeting (?:priorities|tasks)\b", r"\bconcurrently\b", r"\bsimultaneously\b", r"\bmultiple (?:projects|tasks)\b"),
+    "communication": (r"\bcommunicat(?:e|ed|es|ing|ion)\b", r"\bliais(?:e|ed|es|ing|on)\b", r"\bcorrespondence\b", r"\bstakeholder engagement\b"),
+    "collaboration": (r"\bcollaborat(?:e|ed|es|ing|ion)\b", r"\bstakeholders?\b", r"\bmultidisciplinary\b", r"\bcross[- ]functional\b", r"\bteams?\b"),
+    "diverse_backgrounds": (r"\bdiverse backgrounds\b", r"\bmulticultural\b", r"\binternational\b", r"\bcross[- ]agency\b"),
+}
+
+
+def _normalise_text(value: Any) -> str:
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold().replace("–", "-").replace("—", "-")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _requirement_atoms(value: str) -> list[str]:
+    text = _normalise_text(value)
+    atoms = []
+    if re.search(r"\borganis|\borganiz", text):
+        atoms.append("organisation")
+    if "time-management" in text or "time management" in text:
+        atoms.append("time_management")
+    if re.search(r"\bmulti[- ]?task", text):
+        atoms.append("multitask")
+    if "communication" in text:
+        atoms.append("communication")
+    if "collaboration" in text:
+        atoms.append("collaboration")
+    if "diverse backgrounds" in text:
+        atoms.append("diverse_backgrounds")
+    return atoms
+
+
+def _ground_support(criterion_text: str, raw_support: list[dict[str, Any]], evidence_by_id: dict[str, dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    atoms = _requirement_atoms(criterion_text)
+    if not atoms:
+        return [], []
+    grounded = []
+    supported_union: set[str] = set()
+    for item in raw_support:
+        evidence_id = str(item.get("evidence_id") or "")
+        quote = str(item.get("support_quote") or "").strip()
+        source = str((evidence_by_id.get(evidence_id) or {}).get("source_text") or "")
+        quote_text = _normalise_text(quote)
+        if not quote_text or quote_text not in _normalise_text(source):
+            supported = []
+        else:
+            supported = [atom for atom in atoms if any(re.search(pattern, quote_text) for pattern in _ATOM_PATTERNS[atom])]
+        supported_union.update(supported)
+        grounded.append({
+            "evidence_id": evidence_id,
+            "support_quote": quote,
+            "matched_requirement_terms": [str(value) for value in item.get("matched_requirement_terms") or []],
+            "supported_atoms": supported,
+            "unsupported_atoms": [atom for atom in atoms if atom not in supported],
+        })
+    return grounded, [atom for atom in atoms if atom in supported_union]
 
 
 def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: list[dict[str, Any]]) -> dict[str, Any]:
     valid_evidence = {str(item.get("evidence_id")) for item in ckb if item.get("evidence_id")}
+    evidence_by_id = {str(item.get("evidence_id")): item for item in ckb if item.get("evidence_id")}
     criteria = {str(item.get("criteria_id")): item for item in job_model.get("criteria") or []}
     normalised: list[dict[str, Any]] = []
     seen_criteria: set[str] = set()
@@ -30,12 +91,26 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
             coverage = "weak"
         if not evidence_ids:
             match_type, coverage = "insufficient", "weak"
+        raw_support = [item for item in item.get("evidence_support") or [] if str(item.get("evidence_id") or "") in evidence_ids]
+        grounded_support, supported_atoms = _ground_support(
+            str(criteria[criteria_id].get("criteria_text") or ""), raw_support, evidence_by_id,
+        )
+        required_atoms = _requirement_atoms(str(criteria[criteria_id].get("criteria_text") or ""))
+        if required_atoms:
+            evidence_ids = [support["evidence_id"] for support in grounded_support if support["supported_atoms"]]
+            if not supported_atoms:
+                match_type, coverage = "insufficient", "weak"
+            elif set(supported_atoms) == set(required_atoms):
+                match_type, coverage = "direct", "strong"
+            else:
+                match_type, coverage = "inferred", "partial"
         normalised.append({
             "criteria_id": criteria_id,
             "matched_evidence": evidence_ids,
             "match_type": match_type,
             "coverage": coverage,
             "reasoning": str(item.get("reasoning") or "No matching explanation was returned.").strip(),
+            **({"evidence_support": grounded_support} if required_atoms else {}),
         })
         seen_criteria.add(criteria_id)
     for criteria_id in criteria:

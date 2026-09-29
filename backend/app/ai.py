@@ -189,6 +189,7 @@ Rules:
 - Relevance and factual strength outrank diversity. Prefer recency only between similarly strong evidence.
 - Do not invent evidence IDs. Do not downgrade a materially stronger match to create variety.
 - Return every criterion exactly once and list evidence not used anywhere in unused_evidence.
+- For every matched evidence ID, return one exact contiguous support_quote copied from that evidence and the criterion terms it supports. Never paraphrase support_quote.
 
 SHARED JOB MODEL:
 {json.dumps(job_model, ensure_ascii=False)}
@@ -197,7 +198,7 @@ CAREER KNOWLEDGE BASE:
 {json.dumps(ckb, ensure_ascii=False)}
 
 Return JSON only in this shape:
-{{"matches":[{{"criteria_id":"...","matched_evidence":["EV..."],"match_type":"direct|inferred|insufficient","coverage":"strong|partial|weak","reasoning":"one sentence"}}],"unused_evidence":["EV..."]}}"""
+{{"matches":[{{"criteria_id":"...","matched_evidence":["EV..."],"match_type":"direct|inferred|insufficient","coverage":"strong|partial|weak","reasoning":"one sentence","evidence_support":[{{"evidence_id":"EV...","support_quote":"exact source substring","matched_requirement_terms":["exact criterion term"]}}]}}],"unused_evidence":["EV..."]}}"""
     provider = settings.ai_provider.strip().lower()
     try:
         if provider == "deepseek":
