@@ -101,6 +101,17 @@ class AIServiceError(Exception):
     """A safe, user-facing failure when the AI provider cannot generate a draft."""
 
 
+class EvidenceMatchCompletenessError(AIServiceError):
+    def __init__(self, criteria_id: str, attempts: int):
+        self.criteria_id = criteria_id
+        self.status = "needs_manual_review"
+        self.attempts = attempts
+        super().__init__(
+            f"Evidence matching for criterion {criteria_id} is incomplete after {attempts} attempts; "
+            "status=needs_manual_review. Generation is blocked."
+        )
+
+
 _provider_response_telemetry: ContextVar[dict] = ContextVar("provider_response_telemetry", default={})
 
 
@@ -178,43 +189,75 @@ def match_evidence_batch(ckb_json: str, job_model_json: str) -> dict:
         raise ValueError("CKB or Job Model has the wrong structure.")
     if not job_model.get("criteria"):
         return normalise_match_result({"matches": []}, job_model, ckb)
-    prompt = f"""You are a Selection Criteria evidence-matching assistant. Match all criteria in one batch so evidence choices are consistent across the application.
+    evidence_ids = [str(item.get("evidence_id")) for item in ckb if item.get("evidence_id")]
+    raw_matches = []
+    statuses = []
+    provider = settings.ai_provider.strip().lower()
+    for criterion in job_model.get("criteria") or []:
+        criteria_id = str(criterion.get("criteria_id") or "")
+        if re.fullmatch(r"\s*skills and credentials from the job description\s*", str(criterion.get("criteria_text") or ""), re.IGNORECASE):
+            raw_matches.append({"criteria_id": criteria_id, "matched_evidence": [], "match_type": "insufficient", "coverage": "weak"})
+            statuses.append({"criteria_id": criteria_id, "status": "skipped_placeholder", "attempts": 0})
+            continue
+        prompt = f"""Judge every Career Knowledge Base item against this one job criterion. Do not select only the strongest candidates.
 
-Rules:
-- Return all distinct relevant evidence IDs per criterion, ranked by relevance; do not truncate valuable facts to a fixed record count.
-- Use match_type direct only for a clear evidence-to-requirement match.
-- Use inferred for genuinely adjacent or transferable evidence.
-- Use insufficient when no supportable evidence exists.
-- coverage must be strong, partial, or weak.
-- Relevance and factual strength outrank diversity. Prefer recency only between similarly strong evidence.
-- Do not invent evidence IDs. Do not downgrade a materially stronger match to create variety.
-- Return every criterion exactly once and list evidence not used anywhere in unused_evidence.
-- For every matched evidence ID, return one exact contiguous support_quote copied from that evidence and the criterion terms it supports. Never paraphrase support_quote.
-
-SHARED JOB MODEL:
-{json.dumps(job_model, ensure_ascii=False)}
+CRITERION:
+{json.dumps(criterion, ensure_ascii=False)}
 
 CAREER KNOWLEDGE BASE:
 {json.dumps(ckb, ensure_ascii=False)}
 
-Return JSON only in this shape:
-{{"matches":[{{"criteria_id":"...","matched_evidence":["EV..."],"match_type":"direct|inferred|insufficient","coverage":"strong|partial|weak","reasoning":"one sentence","evidence_support":[{{"evidence_id":"EV...","support_quote":"exact source substring","matched_requirement_terms":["exact criterion term"]}}]}}],"unused_evidence":["EV..."]}}"""
-    provider = settings.ai_provider.strip().lower()
-    try:
-        if provider == "deepseek":
-            raw = _deepseek_draft(prompt)
-        elif provider == "openai":
+Return exactly one evidence_verdict for every evidence_id above, in the same order. Never omit, duplicate or invent an ID.
+- verdict direct: the evidence clearly supports the criterion.
+- verdict partial: the evidence supports only part of the criterion or is genuinely adjacent.
+- verdict insufficient: it does not support the criterion.
+- direct and partial require one exact contiguous support_quote copied from that evidence. Never paraphrase it.
+
+Return JSON only:
+{{"criteria_id":"{criteria_id}","evidence_verdicts":[{{"evidence_id":"EV...","verdict":"direct|partial|insufficient","support_quote":"exact source substring or empty","matched_requirement_terms":["exact criterion term"]}}]}}"""
+        parsed = None
+        for attempt in range(1, 4):
             try:
-                raw = _openai_draft(prompt)
-            except OpenAIError:
-                if not settings.ai_fallback_to_deepseek:
-                    raise
-                raw = _deepseek_draft(prompt)
-        else:
-            raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
-        normalised = normalise_match_result(_json_object(raw), job_model, ckb)
-    except (OpenAIError, json.JSONDecodeError) as error:
-        raise AIServiceError("Evidence matching failed. Please try again.") from error
+                if provider == "deepseek":
+                    raw = _deepseek_draft(prompt)
+                elif provider == "openai":
+                    try:
+                        raw = _openai_draft(prompt)
+                    except OpenAIError:
+                        if not settings.ai_fallback_to_deepseek:
+                            raise
+                        raw = _deepseek_draft(prompt)
+                else:
+                    raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
+                candidate = _json_object(raw)
+            except (OpenAIError, json.JSONDecodeError) as error:
+                if attempt == 3:
+                    raise AIServiceError("Evidence matching failed. Please try again.") from error
+                continue
+            verdicts = candidate.get("evidence_verdicts") or []
+            returned_ids = [str(item.get("evidence_id") or "") for item in verdicts if isinstance(item, dict)]
+            valid_verdicts = all(item.get("verdict") in {"direct", "partial", "insufficient"} for item in verdicts if isinstance(item, dict))
+            if candidate.get("criteria_id") == criteria_id and returned_ids == evidence_ids and len(verdicts) == len(evidence_ids) and valid_verdicts:
+                parsed = candidate
+                statuses.append({"criteria_id": criteria_id, "status": "complete", "attempts": attempt})
+                break
+        if parsed is None:
+            raise EvidenceMatchCompletenessError(criteria_id, 3)
+        matched = [item for item in parsed["evidence_verdicts"] if item["verdict"] != "insufficient"]
+        raw_matches.append({
+            "criteria_id": criteria_id,
+            "matched_evidence": [item["evidence_id"] for item in matched],
+            "match_type": "direct" if any(item["verdict"] == "direct" for item in matched) else "inferred" if matched else "insufficient",
+            "coverage": "strong" if any(item["verdict"] == "direct" for item in matched) else "partial" if matched else "weak",
+            "reasoning": "Complete evidence-by-evidence assessment.",
+            "evidence_support": [{
+                "evidence_id": item["evidence_id"],
+                "support_quote": item.get("support_quote") or "",
+                "matched_requirement_terms": item.get("matched_requirement_terms") or [],
+            } for item in matched],
+        })
+    normalised = normalise_match_result({"matches": raw_matches}, job_model, ckb)
+    normalised["criterion_statuses"] = statuses
     errors = validate_match_result(normalised, job_model, ckb)
     if errors:
         raise AIServiceError(errors[0])

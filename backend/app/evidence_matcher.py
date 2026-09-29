@@ -7,7 +7,7 @@ from .job_model import match_advertised_tags
 
 
 MATCH_SCHEMA_VERSION = "2.0"
-MATCHER_RULES_VERSION = "lexical-grounding-v1"
+MATCHER_RULES_VERSION = "exhaustive-matrix-v1"
 
 _ATOM_PATTERNS = {
     "organisation": (r"\borganis(?:e|ed|es|ing|ation|ational)\b", r"\borganiz(?:e|ed|es|ing|ation|ational)\b", r"\bcoordinat(?:e|ed|es|ing|ion)\b", r"\bschedul(?:e|ed|es|ing)\b", r"\bplann(?:ed|ing)\b", r"\bprioriti[sz](?:e|ed|es|ing)\b", r"\btrack(?:ed|ing)?\b", r"\bmonitor(?:ed|ing)?\b"),

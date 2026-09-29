@@ -983,18 +983,59 @@ November 2017 - January 2019
         self.assertEqual(result["responses"][0]["evidence_used"], ["EV001"])
         self.assertEqual(result["telemetry"]["generator_retries"], 1)
 
-    def test_batch_matcher_uses_all_criteria_and_rejects_unknown_evidence(self):
-        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+    def test_matcher_judges_every_evidence_for_each_criterion(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."},{"evidence_id":"EV002","source_text":"Completed a business degree."}]'
         job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Procurement"}]}'
-        response = '{"matches":[{"criteria_id":"C1","matched_evidence":["EV001","FAKE"],"match_type":"direct","coverage":"strong","reasoning":"Relevant.","evidence_support":[{"evidence_id":"EV001","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]}]}],"unused_evidence":[]}'
-        with patch.object(ai, "_openai_draft", return_value=response) as call:
+        responses = [
+            '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]},{"evidence_id":"EV002","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]}]}',
+            '{"criteria_id":"C2","evidence_verdicts":[{"evidence_id":"EV001","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]},{"evidence_id":"EV002","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]}]}',
+        ]
+        with patch.object(ai, "_openai_draft", side_effect=responses) as call:
             result = ai.match_evidence_batch(ckb, job_model)
 
-        self.assertEqual(call.call_count, 1)
-        self.assertIn("C1", call.call_args.args[0])
-        self.assertIn("C2", call.call_args.args[0])
+        self.assertEqual(call.call_count, 2)
+        self.assertTrue(all(evidence_id in call.call_args_list[0].args[0] for evidence_id in ("EV001", "EV002")))
         self.assertEqual(result["matches"][0]["matched_evidence"], ["EV001"])
         self.assertEqual(result["matches"][1]["match_type"], "insufficient")
+        self.assertEqual([item["attempts"] for item in result["criterion_statuses"]], [1, 1])
+
+    def test_matcher_retries_only_incomplete_criterion(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."},{"evidence_id":"EV002","source_text":"Maintained records."}]'
+        job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"},{"criteria_id":"C2","criteria_text":"Records"}]}'
+        responses = [
+            '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]}]}',
+            '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]},{"evidence_id":"EV002","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]}]}',
+            '{"criteria_id":"C2","evidence_verdicts":[{"evidence_id":"EV001","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]},{"evidence_id":"EV002","verdict":"direct","support_quote":"Maintained records.","matched_requirement_terms":["Records"]}]}',
+        ]
+        with patch.object(ai, "_openai_draft", side_effect=responses) as call:
+            result = ai.match_evidence_batch(ckb, job_model)
+
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual([item["attempts"] for item in result["criterion_statuses"]], [2, 1])
+
+    def test_matcher_blocks_after_three_incomplete_attempts(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."},{"evidence_id":"EV002","source_text":"Maintained records."}]'
+        job_model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        incomplete = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]}]}'
+
+        with patch.object(ai, "_openai_draft", return_value=incomplete) as call, self.assertRaises(ai.EvidenceMatchCompletenessError) as raised:
+            ai.match_evidence_batch(ckb, job_model)
+
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(raised.exception.criteria_id, "C1")
+        self.assertEqual(raised.exception.status, "needs_manual_review")
+        self.assertEqual(raised.exception.attempts, 3)
+
+    def test_matcher_skips_placeholder_criterion_without_provider_call(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        job_model = '{"criteria":[{"criteria_id":"PLACEHOLDER","criteria_text":"Skills and credentials from the job description"}]}'
+
+        with patch.object(ai, "_openai_draft") as call:
+            result = ai.match_evidence_batch(ckb, job_model)
+
+        call.assert_not_called()
+        self.assertEqual(result["matches"][0]["matched_evidence"], [])
+        self.assertEqual(result["criterion_statuses"], [{"criteria_id": "PLACEHOLDER", "status": "skipped_placeholder", "attempts": 0}])
 
     def test_replaces_date_placeholder_with_written_current_date(self):
         expected = f"{ai.date.today().day} {ai.date.today().strftime('%B %Y')}"
