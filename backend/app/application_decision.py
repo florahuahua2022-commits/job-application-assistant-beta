@@ -103,6 +103,18 @@ def build_application_decision(
         answer_record = previous_answers.get(question_id)
         answer = answer_record.get("answer") if answer_record else None
         matched_evidence = [str(value) for value in match.get("matched_evidence") or []]
+        evidence_support = [
+            item for item in match.get("evidence_support") or []
+            if str(item.get("evidence_id") or "") in matched_evidence
+        ]
+        supported_atoms = list(dict.fromkeys(
+            str(atom) for item in evidence_support for atom in item.get("supported_atoms") or []
+        ))
+        unsupported_atoms = [
+            atom for atom in dict.fromkeys(
+                str(atom) for item in evidence_support for atom in item.get("unsupported_atoms") or []
+            ) if atom not in supported_atoms
+        ]
 
         if matched_evidence and match_type == "direct":
             classification, gate_status = "verified_match", "pass" if gate else "not_applicable"
@@ -152,6 +164,8 @@ def build_application_decision(
             "hard_gate_status": gate_status,
             "evidence_classification": classification,
             "matched_evidence": matched_evidence,
+            "supported_atoms": supported_atoms,
+            "unsupported_atoms": unsupported_atoms,
             "risk": risk,
             "recommended_action": action,
             "disclosure_strategy": disclosure,

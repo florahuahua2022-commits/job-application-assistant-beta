@@ -28,6 +28,25 @@ class ApplicationDecisionTests(unittest.TestCase):
         self.assertEqual(decision["requirements"][1]["disclosure_strategy"], "bridge")
         self.assertEqual(validate_application_decision(decision), [])
 
+    def test_adjacent_match_exposes_atoms_from_existing_evidence_support(self):
+        decision = self.decide(
+            [criterion("C1", "Administration and warehouse knowledge")],
+            [{
+                "criteria_id": "C1",
+                "matched_evidence": ["EV1", "EV2"],
+                "match_type": "inferred",
+                "coverage": "partial",
+                "evidence_support": [
+                    {"evidence_id": "EV1", "supported_atoms": ["term:admin"], "unsupported_atoms": ["term:warehouse"]},
+                    {"evidence_id": "EV2", "supported_atoms": ["term:admin"], "unsupported_atoms": ["term:warehouse"]},
+                ],
+            }],
+        )
+
+        item = decision["requirements"][0]
+        self.assertEqual(item["supported_atoms"], ["term:admin"])
+        self.assertEqual(item["unsupported_atoms"], ["term:warehouse"])
+
     def test_only_material_recoverable_hard_gate_creates_question(self):
         decision = self.decide([
             criterion("C1", "A current driver's licence is required"),
