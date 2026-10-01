@@ -1717,7 +1717,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
               {resumeUpdateAvailable && <button type="button" onClick={() => saveApplicationResume(true)}>Update to latest Master Resume</button>}
               <div className={confirmedApplication === selected.id ? "confirmCard confirmed" : "confirmCard"}>
                 <div><strong>Check application details</strong><p>Applicant name for every document: {profile ? `${profile.first_name} ${profile.last_name}` : "No saved profile"}<br />Position: {selected.position_title}<br />Organisation: {selected.company}<br />Phone: {profile?.phone || "No saved profile"}<br />Email: {profile?.email || "No saved profile"}<br />Work rights: {profile?.work_rights.replaceAll("_", " ") || "Not confirmed"}<br />Availability: {({not_specified: "Do not state in documents", immediate: "Available immediately", two_weeks: "Two weeks’ notice", one_month: "One month’s notice", negotiable: "Start date negotiable"} as Record<string, string>)[profile?.availability_notice || "not_specified"]}</p>
-                  <details className="quickProfileEdit"><summary>Edit these details</summary>
+                  <details className="quickProfileEdit"><summary>Edit applicant details, availability, position &amp; organisation</summary>
                     {profile && <form onSubmit={saveApplicationProfileDetails} className="compactForm">
                       <label className="full">Full name<input name="full_name" defaultValue={`${profile.first_name} ${profile.last_name}`} required /></label>
                       <label>Phone<input name="phone" defaultValue={profile.phone} required /></label><label>Email<input name="email" type="email" defaultValue={profile.email} required /></label>
@@ -1727,6 +1727,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                     </form>}
                     <form onSubmit={saveApplicationJobIdentity} className="compactForm"><label>Position<input name="position_title" defaultValue={selected.position_title} required /></label><label>Organisation<input name="company" defaultValue={selected.company} required /></label><button type="submit">Save job details</button></form>
                   </details>
+                  <p className="helper">This updates your Applicant Profile and applies to all applications.</p>
                 </div>
                 <button type="button" disabled={!profile || !selected.company.trim() || !selected.position_title.trim() || confirmedApplication === selected.id} onClick={confirmReleaseDetails}>{confirmedApplication === selected.id ? "Details confirmed ✓" : "Confirm these details"}</button>
               </div>

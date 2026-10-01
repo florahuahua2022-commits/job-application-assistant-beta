@@ -86,3 +86,11 @@ test("stale Resume snapshots use the same recovery UI from open, check and gener
   assert.match(page, /detail\?\.can_update !== true/);
   assert.match(page, /Update to latest Master Resume/);
 });
+
+test("Confirm details makes Profile-wide availability editing visible", () => {
+  const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  const card = page.slice(page.indexOf('<div className={confirmedApplication === selected.id'), page.indexOf('<section className={`requirementsCard'));
+  assert.match(card, /<summary>Edit applicant details, availability, position &amp; organisation<\/summary>/);
+  assert.match(card, /<\/details>\s*<p className="helper">This updates your Applicant Profile and applies to all applications\.<\/p>/);
+  assert.match(card, /<label>Availability<select name="availability_notice"/);
+});
