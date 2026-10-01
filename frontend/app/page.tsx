@@ -1,6 +1,7 @@
 "use client";
 
 import { requestGeneratedDocument } from "./generationRequest";
+import { diagnoseThenGenerate, GenerationPhase, generationWorkflowIsBusy } from "./generationFlow";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, Session } from "@supabase/supabase-js";
 import {
@@ -99,6 +100,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [notice, setNotice] = useState("Connecting to your local workspace…");
   const [packNotice, setPackNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [generationPhase, setGenerationPhase] = useState<GenerationPhase>("idle");
   const [selectedApplication, setSelectedApplication] = useState<number | null>(null);
   const [documents, setDocuments] = useState<GeneratedDocument[]>([]);
   const [documentHistory, setDocumentHistory] = useState<GeneratedDocument[]>([]);
@@ -972,7 +974,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     }
   }
 
-  async function generatePack() {
+  async function generateReadyPack() {
     if (!selectedApplication || !resumes.length) return;
     const showPackNotice = (message: string) => {
       setNotice(message);
@@ -1057,6 +1059,31 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       if (!resumeSnapshotFailure && !resumeReviewFailure) showPackNotice(`${detail} This pack is incomplete, so application checks remain unavailable. Existing drafts are kept. A connection error alone does not confirm whether generation has finished.`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function generatePack() {
+    if (!selectedApplication || !resumes.length || generationWorkflowIsBusy(generationPhase, busy, decisionBusy)) return;
+    try {
+      const outcome = await diagnoseThenGenerate(async () => {
+        const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/decision`, { method: "POST" });
+        const result = await response.json();
+        if (!response.ok) {
+          if (handleResumeSnapshotError(result)) throw new Error("");
+          throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || "Could not diagnose this application.");
+        }
+        setApplicationDecision(result);
+        setApplicationDecisionCurrent(true);
+        return result as ApplicationDecision;
+      }, generateReadyPack, setGenerationPhase);
+      if (!outcome.generated) {
+        setPackNotice(outcome.decision.status === "blocked"
+          ? "Generation stopped because the application diagnosis found a blocking issue. Review the diagnosis below."
+          : "Generation paused because the application diagnosis needs your confirmation. Review the diagnosis below.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not diagnose this application.";
+      if (message) setPackNotice(message);
     }
   }
 
@@ -1469,6 +1496,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     } catch (error) { setNotice(error instanceof Error ? error.message : "Network error: account deletion failed. Contact the beta operator."); }
   }
   const requiredPackTypes = requiredGeneratedDocumentTypes(applicationRequirements);
+  const generationWorkflowBusy = generationWorkflowIsBusy(generationPhase, busy, decisionBusy);
   const generationLabel = requiredPackTypes.length
     ? `Generate ${requiredPackTypes.map((type) => labels[type]).join(requiredPackTypes.length > 1 ? ", " : "")}`.replace(/, ([^,]+)$/, " & $1")
     : "Generate Resume & Cover Letter";
@@ -1755,7 +1783,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                   </details>
                   {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                   {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
-                  <div className="generateAction"><button type="button" disabled={busy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{busy ? "Generating documents…" : generationLabel}</button></div>
+                  <div className="generateAction"><button type="button" disabled={generationWorkflowBusy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{generationPhase === "diagnosing" ? "Diagnosing…" : generationPhase === "generating" || busy ? "Generating documents…" : generationLabel}</button></div>
                 </>}
               </section>
               {generationFailure && <section className="requirementsError generationFailure" role="alert"><strong>{labels[generationFailure.documentType]} was not created</strong><p>{generationFailure.message}</p><button type="button" onClick={retryFailedDocument} disabled={busy}>{busy ? "Retrying…" : `Retry ${labels[generationFailure.documentType]}`}</button></section>}
@@ -1774,14 +1802,14 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 {sourcesLoadState === "success" && sourcesError && <p className="requirementsError" role="alert">{sourcesError}</p>}
               </details>
               <section className={`requirementsCard ${applicationDecision?.status || "loading"}`} aria-live="polite">
-                <div className="requirementsHeading"><div><strong>Application diagnosis</strong><small>Optional guidance about evidence coverage and application risks.</small></div>{applicationDecision && <span className="requirementsStatus">{decisionLabel(applicationDecision.application_recommendation)}</span>}</div>
-                {!applicationDecision ? <><p className="helper">Generate when you are ready, or run a diagnosis first for tailored suggestions.</p><button type="button" onClick={diagnoseApplication} disabled={decisionBusy || !resumes.length}>{decisionBusy ? "Checking…" : "Check application"}</button></> : <>
+                <div className="requirementsHeading"><div><strong>Application diagnosis</strong><small>Evidence coverage and application risks checked before generation.</small></div>{applicationDecision && <span className="requirementsStatus">{decisionLabel(applicationDecision.application_recommendation)}</span>}</div>
+                {!applicationDecision ? <><p className="helper">Generation starts by checking this application. You can also run the check now.</p><button type="button" onClick={diagnoseApplication} disabled={generationWorkflowBusy || !resumes.length}>{decisionBusy ? "Checking…" : "Check application"}</button></> : <>
                   {!applicationDecisionCurrent && <div className="requirementsWarnings"><strong>Based on changed job details</strong><p>Run the check again before relying on this diagnosis.</p></div>}
                   {applicationDecision.diagnosed_at && <p className="helper">Last checked: {new Date(applicationDecision.diagnosed_at).toLocaleString()}</p>}
                   {applicationDecision.blocking_issues.length > 0 && <div className="requirementsWarnings"><strong>Things to review</strong><ul>{applicationDecision.blocking_issues.map((issue) => <li key={issue.criteria_id}>{issue.message}</li>)}</ul></div>}
                   <div className="requirementsGrid">{applicationDecision.requirements.map((item) => { const guidance = adjacentEvidenceGuidance(item); return <article key={item.criteria_id}><strong>{item.requirement_text}</strong><dl><div><dt>Importance</dt><dd>{decisionLabel(item.importance)}</dd></div><div><dt>Evidence</dt><dd>{item.evidence_classification ? decisionLabel(item.evidence_classification) : "Unsupported — no candidate conclusion"}</dd></div><div><dt>Risk</dt><dd>{decisionLabel(item.risk)}</dd></div><div><dt>Action</dt><dd>{decisionLabel(item.recommended_action)}</dd></div></dl>{guidance && <p className="helper">{guidance}</p>}</article>; })}</div>
-                  {applicationDecision.questions.filter((question) => question.material).map((question) => <div className="confirmCard" key={question.question_id}><div><strong>Material confirmation</strong><p>{question.prompt}</p>{question.answer !== null && <small>Recorded as {question.answer ? "Yes" : "No"} · user confirmed</small>}</div><div className="selectedActions"><button type="button" onClick={() => answerDecisionQuestion(question.question_id, true)} disabled={decisionBusy}>Yes</button><button type="button" className="secondary" onClick={() => answerDecisionQuestion(question.question_id, false)} disabled={decisionBusy}>No</button></div></div>)}
-                  <button type="button" className="secondary" onClick={diagnoseApplication} disabled={decisionBusy}>{decisionBusy ? "Checking…" : "Run diagnosis again"}</button>
+                  {applicationDecision.questions.filter((question) => question.material).map((question) => <div className="confirmCard" key={question.question_id}><div><strong>Material confirmation</strong><p>{question.prompt}</p>{question.answer !== null && <small>Recorded as {question.answer ? "Yes" : "No"} · user confirmed</small>}</div><div className="selectedActions"><button type="button" onClick={() => answerDecisionQuestion(question.question_id, true)} disabled={generationWorkflowBusy}>Yes</button><button type="button" className="secondary" onClick={() => answerDecisionQuestion(question.question_id, false)} disabled={generationWorkflowBusy}>No</button></div></div>)}
+                  <button type="button" className="secondary" onClick={diagnoseApplication} disabled={generationWorkflowBusy}>{decisionBusy ? "Checking…" : "Run diagnosis again"}</button>
                 </>}
               </section>
               {documents.length ? <>

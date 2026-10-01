@@ -244,6 +244,21 @@ Experience in construction or mining (preferred).
             )
         self.assertEqual(actual, expected)
 
+    def test_generate_reuses_the_evidence_match_cached_by_diagnosis(self):
+        application = self.create_application("Project reporting experience.")
+        draft = "Cover Letter: Project Officer\n\nPrepared monthly reports."
+        with patch("app.main.match_evidence_batch", side_effect=self.no_match) as matcher, patch(
+            "app.main.generate_draft", return_value=draft,
+        ), patch("app.main.repair_cover_letter", return_value=(draft, {"status": "pass", "results": []})):
+            diagnosed = self.client.post(f"/applications/{application['id']}/decision")
+            generated = self.client.post("/generate", json={
+                "application_id": application["id"], "document_type": "cover_letter",
+            })
+
+        self.assertEqual(diagnosed.status_code, 200, diagnosed.text)
+        self.assertEqual(generated.status_code, 200, generated.text)
+        self.assertEqual(matcher.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
