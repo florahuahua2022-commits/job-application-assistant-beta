@@ -84,6 +84,21 @@ def create_db_and_tables() -> None:
                 usage_columns = {column["name"] for column in inspector.get_columns("generationusage")}
                 if "completed_at" not in usage_columns:
                     connection.execute(text("ALTER TABLE generationusage ADD COLUMN completed_at TIMESTAMP"))
+                additions = {
+                    "status": "VARCHAR", "credit_cost": "INTEGER", "reserved_at": "TIMESTAMP",
+                    "expires_at": "TIMESTAMP", "released_at": "TIMESTAMP", "usage_month": "DATE",
+                }
+                for column, sql_type in additions.items():
+                    if column not in usage_columns:
+                        connection.execute(text(f"ALTER TABLE generationusage ADD COLUMN {column} {sql_type}"))
+                connection.execute(text("""
+                    UPDATE generationusage SET
+                        status = CASE WHEN completed_at IS NOT NULL THEN 'completed' ELSE 'released' END,
+                        credit_cost = COALESCE(credit_cost, 1), reserved_at = COALESCE(reserved_at, generated_at),
+                        released_at = CASE WHEN completed_at IS NULL THEN COALESCE(released_at, generated_at) ELSE released_at END,
+                        usage_month = COALESCE(usage_month, CAST(date_trunc('month', generated_at AT TIME ZONE 'UTC') AS DATE))
+                    WHERE status IS NULL
+                """))
     if engine.dialect.name == "sqlite":
         existing = {column["name"] for column in inspector.get_columns("jobapplication")}
         with engine.begin() as connection:
@@ -149,14 +164,30 @@ def create_db_and_tables() -> None:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN writing_tone VARCHAR DEFAULT 'natural_professional'"))
                 if "preferences_notes" not in profile_columns:
                     connection.execute(text("ALTER TABLE applicantprofile ADD COLUMN preferences_notes TEXT"))
-            if "generationusage" in inspector.get_table_names():
-                usage_columns = {column["name"] for column in inspector.get_columns("generationusage")}
-                if "completed_at" not in usage_columns:
-                    connection.execute(text("ALTER TABLE generationusage ADD COLUMN completed_at DATETIME"))
             if "jobsource" in inspector.get_table_names():
                 source_columns = {column["name"] for column in inspector.get_columns("jobsource")}
                 if "discovery_context" not in source_columns:
                     connection.execute(text("ALTER TABLE jobsource ADD COLUMN discovery_context TEXT DEFAULT ''"))
+            # Keep this last: SQLite inspectors may roll back the shared in-memory test connection.
+            if "generationusage" in table_names:
+                usage_columns = {column["name"] for column in inspector.get_columns("generationusage")}
+                if "completed_at" not in usage_columns:
+                    connection.execute(text("ALTER TABLE generationusage ADD COLUMN completed_at DATETIME"))
+                additions = {
+                    "status": "VARCHAR", "credit_cost": "INTEGER", "reserved_at": "DATETIME",
+                    "expires_at": "DATETIME", "released_at": "DATETIME", "usage_month": "DATE",
+                }
+                for column, sql_type in additions.items():
+                    if column not in usage_columns:
+                        connection.execute(text(f"ALTER TABLE generationusage ADD COLUMN {column} {sql_type}"))
+                connection.execute(text("""
+                    UPDATE generationusage SET
+                        status = CASE WHEN completed_at IS NOT NULL THEN 'completed' ELSE 'released' END,
+                        credit_cost = COALESCE(credit_cost, 1), reserved_at = COALESCE(reserved_at, generated_at),
+                        released_at = CASE WHEN completed_at IS NULL THEN COALESCE(released_at, generated_at) ELSE released_at END,
+                        usage_month = COALESCE(usage_month, substr(generated_at, 1, 7) || '-01')
+                    WHERE status IS NULL
+                """))
 
 
 def get_session():

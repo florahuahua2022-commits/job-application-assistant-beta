@@ -16,6 +16,11 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def utc_month_start() -> date:
+    now = utc_now()
+    return date(now.year, now.month, 1)
+
+
 class Resume(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: UUID | None = Field(default=None, index=True)
@@ -145,6 +150,41 @@ class GenerationUsage(SQLModel, table=True):
     pack_id: UUID
     generated_at: datetime = Field(default_factory=utc_now, index=True)
     completed_at: datetime | None = Field(default=None, index=True)
+    status: str = Field(default="reserved", index=True)
+    credit_cost: int = 1
+    reserved_at: datetime = Field(default_factory=utc_now)
+    expires_at: datetime | None = None
+    released_at: datetime | None = None
+    usage_month: date = Field(default_factory=utc_month_start, index=True)
+
+
+class PackCreditAccount(SQLModel, table=True):
+    user_id: UUID = Field(primary_key=True)
+    balance: int = 0
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class PackCreditLedger(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    entry_type: str = Field(index=True)
+    credits_delta: int
+    pack_id: UUID | None = Field(default=None, index=True)
+    package_code: str | None = None
+    amount_cents: int | None = None
+    currency: str = "AUD"
+    note: str | None = None
+    idempotency_key: str = Field(unique=True, index=True)
+    created_by_user_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class GlobalMonthlyUsage(SQLModel, table=True):
+    month_start: date = Field(primary_key=True)
+    reserved_count: int = 0
+    completed_count: int = 0
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class CreditLedger(SQLModel, table=True):
