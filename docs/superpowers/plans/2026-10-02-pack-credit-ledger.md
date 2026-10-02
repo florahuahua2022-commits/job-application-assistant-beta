@@ -55,9 +55,9 @@
 - Modify: `backend/app/auth.py`
 - Modify: `backend/tests/test_online_security.py`
 
-- [ ] Write failing tests for free grants, costs, idempotency, concurrent personal/global reservations, completion, release, expiry, and manual top-up validation.
-- [ ] Implement transactional reserve/complete/release operations and the protected manual top-up API.
-- [ ] Run focused and full backend tests, commit only Task 2, and stop for user review.
+- [x] Write failing tests for free grants, costs, idempotency, concurrent personal/global reservations, completion, release, expiry, and manual top-up validation.
+- [x] Implement transactional reserve/complete/release operations and the protected manual top-up API.
+- [x] Run focused and full backend tests, commit only Task 2, and stop for user review.
 
 ### Task 3: Integrate generation flow
 

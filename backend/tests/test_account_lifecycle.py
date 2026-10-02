@@ -13,7 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.auth import get_current_user
 from app.database import get_session
 from app.main import app
-from app.models import ApplicantProfile, GeneratedDocument, JobApplication, Resume
+from app.models import ApplicantProfile, GeneratedDocument, JobApplication, PackCreditAccount, PackCreditLedger, Resume
 
 
 class AccountLifecycleTests(unittest.TestCase):
@@ -36,6 +36,10 @@ class AccountLifecycleTests(unittest.TestCase):
             session.add_all([
                 GeneratedDocument(user_id=self.user, application_id=owned.id, document_type="cover_letter", content="PRIVATE LETTER"),
                 GeneratedDocument(user_id=self.other, application_id=other.id, document_type="cover_letter", content="OTHER LETTER"),
+                PackCreditAccount(user_id=self.user, balance=2),
+                PackCreditAccount(user_id=self.other, balance=2),
+                PackCreditLedger(user_id=self.user, entry_type="grant_free", credits_delta=2, idempotency_key=f"grant-free:{self.user}"),
+                PackCreditLedger(user_id=self.other, entry_type="grant_free", credits_delta=2, idempotency_key=f"grant-free:{self.other}"),
             ]); session.commit()
         self.client = TestClient(app)
 
@@ -51,6 +55,8 @@ class AccountLifecycleTests(unittest.TestCase):
         serialized = json.dumps(payload)
         self.assertIn("PRIVATE RESUME", serialized); self.assertIn("PRIVATE JD", serialized); self.assertIn("PRIVATE LETTER", serialized)
         self.assertNotIn("OTHER JD", serialized); self.assertNotIn("OTHER LETTER", serialized)
+        self.assertIn(f"grant-free:{self.user}", serialized)
+        self.assertNotIn(f"grant-free:{self.other}", serialized)
         self.assertTrue(any(name.startswith("generated-documents/") for name in names))
 
     def test_export_requires_authenticated_user(self):
@@ -63,7 +69,10 @@ class AccountLifecycleTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200); auth_delete.assert_called_once_with(self.user)
         with Session(self.engine) as session:
             self.assertIsNone(session.exec(select(JobApplication).where(JobApplication.user_id == self.user)).first())
+            self.assertIsNone(session.get(PackCreditAccount, self.user))
+            self.assertIsNone(session.exec(select(PackCreditLedger).where(PackCreditLedger.user_id == self.user)).first())
             self.assertIsNotNone(session.exec(select(JobApplication).where(JobApplication.user_id == self.other)).first())
+            self.assertIsNotNone(session.get(PackCreditAccount, self.other))
 
     def test_delete_requires_exact_destructive_confirmation(self):
         with patch("app.main.delete_supabase_auth_user") as auth_delete:

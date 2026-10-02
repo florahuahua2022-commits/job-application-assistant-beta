@@ -187,6 +187,12 @@ class OnlineSecurityTests(unittest.TestCase):
         for entry_type in ("grant_free", "grant_manual_topup", "debit_generation", "release"):
             self.assertIn(entry_type, migration)
         self.assertIn("enable row level security", migration)
+        self.assertIn("grant select on public.packcreditaccount to authenticated", migration)
+        self.assertIn("grant select on public.packcreditledger to authenticated", migration)
+        self.assertNotIn("grant update", migration)
+        self.assertNotIn("grant insert", migration)
+        self.assertNotIn("for update to authenticated", migration)
+        self.assertNotIn("for insert to authenticated", migration)
         self.assertIn("completed_at is not null then 'completed'", migration)
         self.assertIn("completed_at is null then 'released'", migration)
         self.assertIn("from auth.users", migration)

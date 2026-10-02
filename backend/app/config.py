@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     supabase_jwt_issuer: str | None = None
     supabase_jwt_audience: str = "authenticated"
     supabase_service_role_key: str | None = None
+    admin_user_ids: str = ""
     daily_pack_limit_per_user: int = 3
     monthly_pack_limit_global: int = 50
     allow_public_signup: bool = False

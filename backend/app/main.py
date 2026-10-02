@@ -21,7 +21,7 @@ from .ats_verification import verify_resume_artifact, verify_document_export
 from .applicant_profile import applicant_profile_prompt, confirmed_availability_wording, availability_issues, polish_availability
 from .delivery_checks import delivery_issues, aggregate_experience, profile_missing_fields, apply_delivery_review
 from .generation_trace import build_generation_trace, build_trace_bundle
-from .auth import get_current_user
+from .auth import get_current_user, require_admin_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, career_knowledge_base_is_current, split_time_period, validate_career_knowledge_base
 from .config import settings
@@ -34,7 +34,8 @@ from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest, utc_now
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest, utc_now
+from .pack_credits import ManualTopupRequest, ManualTopupResponse, grant_manual_topup
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -912,6 +913,26 @@ def get_selection_criteria_access(
     return selection_criteria_access(session, user_id)
 
 
+@app.post("/admin/pack-credits/topup", response_model=ManualTopupResponse)
+def create_manual_pack_topup(
+    payload: ManualTopupRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+):
+    admin_user_id = require_admin_user(user_id)
+    try:
+        balance = grant_manual_topup(
+            session, payload.user_id, payload.package_code, payload.idempotency_key,
+            admin_user_id, payload.note,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    session.commit()
+    return ManualTopupResponse(
+        user_id=payload.user_id, package_code=payload.package_code, balance=balance,
+    )
+
+
 @app.post("/selection-criteria/referral", response_model=SelectionCriteriaAccessResponse)
 def claim_selection_criteria_referral(
     payload: ReferralClaimRequest,
@@ -997,6 +1018,7 @@ def user_data_bundle(session: Session, user_id: UUID) -> dict:
         "resumes": rows(Resume), "job_applications": rows(JobApplication),
         "job_sources": rows(JobSource), "generated_documents": rows(GeneratedDocument),
         "generation_usage": rows(GenerationUsage), "credit_ledger": rows(CreditLedger),
+        "pack_credit_accounts": rows(PackCreditAccount), "pack_credit_ledger": rows(PackCreditLedger),
         "referrals": [item.model_dump() for item in session.exec(
             select(Referral).where((Referral.inviter_user_id == user_id) | (Referral.invited_user_id == user_id))
         ).all()],
@@ -1043,7 +1065,7 @@ def delete_supabase_auth_user(user_id: UUID) -> None:
 def delete_remaining_user_rows(session: Session, user_id: UUID) -> None:
     # Supabase Auth deletion should cascade these rows. Explicit cleanup also
     # makes the contract verifiable on databases where cascades were misapplied.
-    for model in (JobSource, GeneratedDocument, GenerationUsage, CreditLedger, Referral, Referee, JobApplication, Resume, ApplicantProfile):
+    for model in (PackCreditLedger, PackCreditAccount, JobSource, GeneratedDocument, GenerationUsage, CreditLedger, Referral, Referee, JobApplication, Resume, ApplicantProfile):
         if model is Referral:
             session.exec(delete(Referral).where((Referral.inviter_user_id == user_id) | (Referral.invited_user_id == user_id)))
         else:

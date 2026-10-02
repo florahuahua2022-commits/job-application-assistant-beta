@@ -47,3 +47,10 @@ def get_current_user(authorization: str | None = Header(default=None)) -> UUID |
         # PyJWT is loaded only in online mode so the current local installation
         # remains usable before cloud dependencies are installed.
         raise HTTPException(401, "Your session is invalid or has expired. Sign in again.") from error
+
+
+def require_admin_user(user_id: UUID | None) -> UUID:
+    allowed = {value.strip() for value in settings.admin_user_ids.split(",") if value.strip()}
+    if user_id is None or str(user_id) not in allowed:
+        raise HTTPException(403, "Administrator access is required.")
+    return user_id
