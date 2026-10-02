@@ -6,6 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import delete, text, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -40,18 +41,32 @@ class ManualTopupResponse(BaseModel):
     balance: int
 
 
+class PackCreditAccessResponse(BaseModel):
+    unlimited: bool = False
+    balance: int | None = None
+    standard_pack_cost: int = 1
+    selection_criteria_pack_cost: int = 2
+
+
 def _month_start(now: datetime) -> date:
     return now.astimezone(timezone.utc).date().replace(day=1)
 
 
 def _ensure_account(session: Session, user_id: UUID) -> None:
-    statement = sqlite_insert(PackCreditAccount).values(user_id=user_id, balance=2).on_conflict_do_nothing()
+    insert = postgresql_insert if session.bind.dialect.name == "postgresql" else sqlite_insert
+    statement = insert(PackCreditAccount).values(user_id=user_id, balance=2).on_conflict_do_nothing()
     created = session.execute(statement).rowcount == 1
     if created:
-        session.execute(sqlite_insert(PackCreditLedger).values(
+        session.execute(insert(PackCreditLedger).values(
             user_id=user_id, entry_type="grant_free", credits_delta=2,
             idempotency_key=f"grant-free:{user_id}", note="Initial lifetime credits",
         ).on_conflict_do_nothing())
+
+
+def pack_credit_balance(session: Session, user_id: UUID) -> int:
+    _ensure_account(session, user_id)
+    session.flush()
+    return session.get(PackCreditAccount, user_id).balance
 
 
 def reserve_pack_credits(

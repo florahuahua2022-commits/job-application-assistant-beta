@@ -1,4 +1,5 @@
 import os
+import json
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,9 @@ from app.auth import get_current_user
 from app.config import settings
 from app.database import get_session
 from app.main import app
+from app.main import finish_generation_request, pack_credit_cost, reserve_generation_pack
+from app.application_requirements import empty_application_requirements
+from app.models import GenerateRequest, GeneratedDocument, JobApplication
 from app.pack_credits import (
     complete_pack_credits,
     expire_pack_reservations,
@@ -164,6 +168,132 @@ class PackCreditEngineTests(unittest.TestCase):
             self.assertEqual(response.json()["balance"], 3)
         finally:
             app.dependency_overrides.clear()
+
+    def test_generation_pack_cost_is_one_or_two_from_authoritative_requirements(self):
+        normal = empty_application_requirements("General duties")
+        selection = empty_application_requirements("Address the criteria")
+        selection["documents"]["selection_criteria"].update(
+            requirement="required", format="standalone",
+        )
+
+        self.assertEqual(pack_credit_cost(normal), 1)
+        self.assertEqual(pack_credit_cost(selection), 2)
+
+    def test_insufficient_balance_blocks_generation_before_provider_work(self):
+        user_id, pack_id = uuid4(), uuid4()
+        with Session(self.engine) as session:
+            application = JobApplication(
+                user_id=user_id, company="Example", position_title="Officer",
+                job_description="General duties",
+                application_requirements_json=json.dumps(empty_application_requirements("General duties")),
+            )
+            session.add_all([application, PackCreditAccount(user_id=user_id, balance=0)])
+            session.commit(); session.refresh(application)
+            payload = GenerateRequest(application_id=application.id, document_type="tailored_resume", pack_id=pack_id)
+            with patch.object(settings, "deployment_mode", "online"), patch("app.main.generate_document") as generate:
+                with self.assertRaisesRegex(Exception, "credits"):
+                    finish_generation_request(payload, session, user_id, f"{pack_id}:tailored_resume")
+            generate.assert_not_called()
+
+    def test_successful_complete_pack_completes_one_credit_reservation(self):
+        user_id, pack_id = uuid4(), uuid4()
+        requirements = empty_application_requirements("General duties")
+        requirements["documents"]["resume"].update(requirement="required", format="standalone")
+        with Session(self.engine) as session:
+            application = JobApplication(
+                user_id=user_id, company="Example", position_title="Officer",
+                job_description="General duties", application_requirements_json=json.dumps(requirements),
+            )
+            session.add(application); session.commit(); session.refresh(application)
+            payload = GenerateRequest(application_id=application.id, document_type="tailored_resume", pack_id=pack_id)
+
+            def generated(payload, session, user_id):
+                document = GeneratedDocument(
+                    user_id=user_id, application_id=payload.application_id,
+                    document_type=payload.document_type, content="Draft",
+                )
+                session.add(document); session.commit(); session.refresh(document)
+                return document
+
+            with patch.object(settings, "deployment_mode", "online"), patch("app.main.generate_document", side_effect=generated):
+                finish_generation_request(payload, session, user_id, f"{pack_id}:tailored_resume")
+
+            usage = session.exec(select(GenerationUsage).where(GenerationUsage.pack_id == pack_id)).one()
+            self.assertEqual((usage.status, usage.credit_cost), ("completed", 1))
+            self.assertEqual(session.get(PackCreditAccount, user_id).balance, 1)
+
+    def test_pack_completes_only_after_every_document_in_this_pack_succeeds(self):
+        user_id, pack_id = uuid4(), uuid4()
+        requirements = empty_application_requirements("General duties")
+        requirements["documents"]["resume"].update(requirement="required", format="standalone")
+        requirements["documents"]["cover_letter"].update(requirement="required", format="standalone")
+        with Session(self.engine) as session:
+            application = JobApplication(
+                user_id=user_id, company="Example", position_title="Officer",
+                job_description="General duties", application_requirements_json=json.dumps(requirements),
+            )
+            session.add(application); session.commit(); session.refresh(application)
+            session.add(GeneratedDocument(
+                user_id=user_id, application_id=application.id,
+                document_type="cover_letter", content="Old current draft",
+            ))
+            session.commit()
+
+            def generated(payload, session, user_id):
+                document = GeneratedDocument(
+                    user_id=user_id, application_id=payload.application_id,
+                    document_type=payload.document_type, content="New draft",
+                )
+                session.add(document); session.commit(); session.refresh(document)
+                return document
+
+            with patch.object(settings, "deployment_mode", "online"), patch("app.main.generate_document", side_effect=generated):
+                resume = GenerateRequest(application_id=application.id, document_type="tailored_resume", pack_id=pack_id)
+                finish_generation_request(resume, session, user_id, f"{pack_id}:tailored_resume")
+                usage = session.exec(select(GenerationUsage).where(GenerationUsage.pack_id == pack_id)).one()
+                self.assertEqual(usage.status, "reserved")
+                cover = GenerateRequest(application_id=application.id, document_type="cover_letter", pack_id=pack_id)
+                finish_generation_request(cover, session, user_id, f"{pack_id}:cover_letter")
+
+            session.refresh(usage)
+            self.assertEqual(usage.status, "completed")
+            self.assertEqual(session.get(PackCreditAccount, user_id).balance, 1)
+
+    def test_failed_generation_releases_reserved_credits(self):
+        user_id, pack_id = uuid4(), uuid4()
+        with Session(self.engine) as session:
+            application = JobApplication(
+                user_id=user_id, company="Example", position_title="Officer",
+                job_description="General duties",
+                application_requirements_json=json.dumps(empty_application_requirements("General duties")),
+            )
+            session.add(application); session.commit(); session.refresh(application)
+            payload = GenerateRequest(application_id=application.id, document_type="tailored_resume", pack_id=pack_id)
+            with patch.object(settings, "deployment_mode", "online"), patch(
+                "app.main.generate_document", side_effect=RuntimeError("provider failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                    finish_generation_request(payload, session, user_id, f"{pack_id}:tailored_resume")
+
+            usage = session.exec(select(GenerationUsage).where(GenerationUsage.pack_id == pack_id)).one()
+            self.assertEqual(usage.status, "released")
+            self.assertEqual(session.get(PackCreditAccount, user_id).balance, 2)
+
+    def test_released_pack_id_cannot_restart_generation_without_a_new_reservation(self):
+        user_id, pack_id = uuid4(), uuid4()
+        with Session(self.engine) as session:
+            application = JobApplication(
+                user_id=user_id, company="Example", position_title="Officer",
+                job_description="General duties",
+                application_requirements_json=json.dumps(empty_application_requirements("General duties")),
+            )
+            session.add(application); session.commit(); session.refresh(application)
+            payload = GenerateRequest(application_id=application.id, document_type="tailored_resume", pack_id=pack_id)
+            with patch.object(settings, "deployment_mode", "online"):
+                self.assertTrue(reserve_generation_pack(session, payload, user_id))
+                release_pack_credits(session, user_id, pack_id); session.commit()
+                with self.assertRaisesRegex(Exception, "new generation"):
+                    reserve_generation_pack(session, payload, user_id)
 
     def test_concurrent_requests_for_last_credit_only_reserve_once(self):
         user_id = uuid4()

@@ -34,8 +34,8 @@ from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, ReferralClaimRequest, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaAccessResponse, SelectionCriteriaConfirmationRequest, utc_now
-from .pack_credits import ManualTopupRequest, ManualTopupResponse, grant_manual_topup
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
+from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -818,99 +818,18 @@ def require_local_mode() -> None:
         raise HTTPException(404, "Local backup tools are not available in the online beta.")
 
 
-def check_generation_quota(session: Session, user_id: UUID | None, pack_id: UUID | None) -> bool:
-    """Return True when a new online pack usage record must be created."""
-    if settings.deployment_mode.strip().lower() != "online":
-        return False
-    if user_id is None or pack_id is None:
-        raise HTTPException(400, "A generation pack identifier is required in online mode.")
-    existing = session.exec(
-        select(GenerationUsage).where(
-            GenerationUsage.user_id == user_id,
-            GenerationUsage.pack_id == pack_id,
-        )
-    ).first()
-    if existing:
-        return False
-
-    now = datetime.now(timezone.utc)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_of_month = start_of_day.replace(day=1)
-    daily_count = session.exec(
-        select(func.count(GenerationUsage.id)).where(
-            GenerationUsage.user_id == user_id,
-            GenerationUsage.completed_at >= start_of_day,
-        )
-    ).one()
-    global_monthly_count = session.exec(
-        select(func.count(GenerationUsage.id)).where(
-            GenerationUsage.completed_at >= start_of_month,
-        )
-    ).one()
-    if daily_count >= settings.daily_pack_limit_per_user:
-        raise HTTPException(429, "Today's beta limit has been reached. Please try again tomorrow.")
-    if global_monthly_count >= settings.monthly_pack_limit_global:
-        raise HTTPException(429, "The beta's monthly AI limit has been reached. Generation is paused.")
-    return True
-
-
-def selection_criteria_access(session: Session, user_id: UUID | None) -> SelectionCriteriaAccessResponse:
-    if settings.deployment_mode.strip().lower() != "online":
-        return SelectionCriteriaAccessResponse(unlimited=True)
-    if user_id is None:
-        raise HTTPException(401, "Sign in to use Selection Criteria.")
-    ledger_total = session.exec(
-        select(func.coalesce(func.sum(CreditLedger.delta), 0)).where(CreditLedger.user_id == user_id)
-    ).one()
-    referral_credits = session.exec(
-        select(func.count(Referral.id)).where(
-            Referral.inviter_user_id == user_id,
-            Referral.status == "earned",
-        )
-    ).one()
-    used_credits = session.exec(
-        select(func.count(CreditLedger.id)).where(
-            CreditLedger.user_id == user_id,
-            CreditLedger.reason == "generation",
-        )
-    ).one()
-    referral_claimed = session.exec(
-        select(Referral.id).where(Referral.invited_user_id == user_id)
-    ).first() is not None
-    return SelectionCriteriaAccessResponse(
-        included_credits=2,
-        referral_credits=referral_credits,
-        used_credits=used_credits,
-        remaining_credits=max(0, 2 + int(ledger_total)),
-        referral_code=str(user_id),
-        referral_claimed=referral_claimed,
-    )
-
-
-def check_selection_criteria_credit(
-    session: Session,
-    user_id: UUID | None,
-    pack_id: UUID | None,
-) -> str | None:
-    if settings.deployment_mode.strip().lower() != "online":
-        return None
-    if user_id is None or pack_id is None:
-        raise HTTPException(400, "A generation pack identifier is required in online mode.")
-    idempotency_key = f"selection-criteria:{user_id}:{pack_id}"
-    if session.exec(select(CreditLedger.id).where(CreditLedger.idempotency_key == idempotency_key)).first():
-        return None
-    access = selection_criteria_access(session, user_id)
-    if not access.remaining_credits:
-        raise HTTPException(429, "No Selection Criteria credits remain. Invite a new user to earn one more use.")
-    return idempotency_key
-
-
-@app.get("/selection-criteria/access", response_model=SelectionCriteriaAccessResponse)
-def get_selection_criteria_access(
+@app.get("/pack-credits/access", response_model=PackCreditAccessResponse)
+def get_pack_credit_access(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    return selection_criteria_access(session, user_id)
+    if settings.deployment_mode.strip().lower() != "online":
+        return PackCreditAccessResponse(unlimited=True)
+    if user_id is None:
+        raise HTTPException(401, "Sign in to view Pack credits.")
+    balance = pack_credit_balance(session, user_id)
+    session.commit()
+    return PackCreditAccessResponse(balance=balance)
 
 
 @app.post("/admin/pack-credits/topup", response_model=ManualTopupResponse)
@@ -931,40 +850,6 @@ def create_manual_pack_topup(
     return ManualTopupResponse(
         user_id=payload.user_id, package_code=payload.package_code, balance=balance,
     )
-
-
-@app.post("/selection-criteria/referral", response_model=SelectionCriteriaAccessResponse)
-def claim_selection_criteria_referral(
-    payload: ReferralClaimRequest,
-    session: Session = Depends(get_session),
-    user_id: UUID | None = Depends(get_current_user),
-):
-    if settings.deployment_mode.strip().lower() != "online" or user_id is None:
-        raise HTTPException(400, "Referral credits are available in the online service only.")
-    try:
-        inviter_id = UUID(payload.referral_code.strip())
-    except ValueError as error:
-        raise HTTPException(400, "This referral code is not valid.") from error
-    if inviter_id == user_id:
-        raise HTTPException(400, "You cannot use your own referral code.")
-    if session.exec(select(Referral.id).where(Referral.invited_user_id == user_id)).first():
-        raise HTTPException(409, "A referral has already been claimed for this account.")
-    session.add(Referral(
-        inviter_user_id=inviter_id,
-        invited_user_id=user_id,
-        status="earned",
-        reward_credits=1,
-        earned_at=datetime.utcnow(),
-    ))
-    session.add(CreditLedger(
-        user_id=inviter_id,
-        delta=1,
-        reason="referral",
-        reference_id=str(user_id),
-        idempotency_key=f"referral:{user_id}",
-    ))
-    session.commit()
-    return selection_criteria_access(session, user_id)
 
 
 @app.get("/backups")
@@ -3156,11 +3041,89 @@ def save_generation_request(session, application_id, key, value, *, reserve=Fals
     raise HTTPException(409, "Another application update is in progress. Please retry.")
 
 
+def pack_credit_cost(requirements: dict) -> int:
+    return 2 if standalone_selection_criteria_required(requirements) else 1
+
+
+def reserve_generation_pack(session: Session, payload: GenerateRequest, user_id: UUID | None) -> bool:
+    if settings.deployment_mode.strip().lower() != "online":
+        return False
+    if user_id is None or payload.pack_id is None:
+        raise HTTPException(400, "A generation pack identifier is required in online mode.")
+    application = get_for_user(session, JobApplication, payload.application_id, user_id)
+    if not application:
+        raise HTTPException(404, "Application not found.")
+    expire_pack_reservations(session)
+    requirements = load_application_requirements(
+        application.application_requirements_json, application.selection_criteria,
+    )
+    reservation = reserve_pack_credits(
+        session, user_id, payload.pack_id, pack_credit_cost(requirements),
+        settings.monthly_pack_limit_global,
+    )
+    if reservation.status == "insufficient_credits":
+        session.rollback()
+        raise HTTPException(402, detail={
+            "code": "pack_credits_insufficient",
+            "message": "Not enough Pack credits remain for this application.",
+        })
+    if reservation.status == "global_limit":
+        session.rollback()
+        operations.warning("Global monthly Pack generation limit reached: limit=%s", settings.monthly_pack_limit_global)
+        raise HTTPException(429, detail={
+            "code": "global_pack_limit_reached",
+            "message": "Generation is temporarily paused. Please contact support.",
+        })
+    usage = session.exec(select(GenerationUsage).where(
+        GenerationUsage.user_id == user_id, GenerationUsage.pack_id == payload.pack_id,
+    )).first()
+    if reservation.status == "existing" and (not usage or usage.status != "reserved"):
+        session.rollback()
+        raise HTTPException(409, detail={
+            "code": "pack_reservation_closed",
+            "message": "This Pack credit reservation is closed. Start a new generation request.",
+        })
+    if usage and usage.application_id is None:
+        usage.application_id = application.id
+        session.add(usage)
+    session.commit()
+    return bool(usage and usage.status == "reserved")
+
+
+def complete_generation_pack_if_ready(
+    session: Session, payload: GenerateRequest, user_id: UUID | None,
+) -> None:
+    if settings.deployment_mode.strip().lower() != "online" or user_id is None or payload.pack_id is None:
+        return
+    application = get_for_user(session, JobApplication, payload.application_id, user_id)
+    if not application:
+        return
+    requirements = load_application_requirements(
+        application.application_requirements_json, application.selection_criteria,
+    )
+    required = set(required_generated_documents(requirements))
+    prefix = f"{payload.pack_id}:"
+    requests = load_release_state(application.release_state_json).get("generation_requests", {})
+    completed_in_pack = {
+        key.removeprefix(prefix) for key, value in requests.items()
+        if key.startswith(prefix) and value.get("status") == "completed"
+    }
+    completed_in_pack.add(payload.document_type)
+    if required <= completed_in_pack and required <= set(current_required_documents(session, application, user_id)):
+        complete_pack_credits(session, user_id, payload.pack_id)
+        session.commit()
+
+
 def finish_generation_request(payload, session, user_id, key):
+    reservation_active = False
     try:
+        reservation_active = reserve_generation_pack(session, payload, user_id)
         document = generate_document(payload, session, user_id)
     except Exception as error:
         session.rollback()
+        if reservation_active and user_id is not None and payload.pack_id is not None:
+            release_pack_credits(session, user_id, payload.pack_id)
+            session.commit()
         detail = getattr(error, "detail", None)
         message = (detail.get("message") if isinstance(detail, dict) else detail) if isinstance(error, HTTPException) else None
         failure = {
@@ -3171,6 +3134,7 @@ def finish_generation_request(payload, session, user_id, key):
             failure["detail"] = detail
         save_generation_request(session, payload.application_id, key, failure)
         raise
+    complete_generation_pack_if_ready(session, payload, user_id)
     document_id = document.id
     save_generation_request(session, payload.application_id, key, {"status": "completed", "document_id": document_id})
     return get_for_user(session, GeneratedDocument, document_id, user_id)
@@ -3284,12 +3248,6 @@ def generate_document(
     started_fingerprint = generation_inputs_fingerprint(application, master_resume, profile)
     current_inputs = decision_inputs(
         json.loads(job_model_json), stored_requirements, json.loads(ckb_source_json), profile,
-    )
-    new_pack_usage = check_generation_quota(session, user_id, payload.pack_id)
-    selection_credit_key = (
-        check_selection_criteria_credit(session, user_id, payload.pack_id)
-        if payload.document_type == "selection_criteria"
-        else None
     )
     evidence_matches_json = application.evidence_matches_json or "{}"
     try:
@@ -3582,35 +3540,6 @@ def generate_document(
     if payload.document_type == "selection_criteria":
         application.selection_confirmations_json = "[]"
         session.add(application)
-    if selection_credit_key and user_id is not None:
-        session.add(CreditLedger(
-            user_id=user_id,
-            delta=-1,
-            reason="generation",
-            reference_id=str(application.id),
-            idempotency_key=selection_credit_key,
-        ))
-    pack_is_complete = set(required_generated_documents(stored_requirements)) <= {
-        *current_required_documents(session, application, user_id, master_resume, profile), payload.document_type,
-    }
-    usage = None
-    if user_id is not None and payload.pack_id is not None:
-        usage = session.exec(
-            select(GenerationUsage).where(
-                GenerationUsage.user_id == user_id,
-                GenerationUsage.pack_id == payload.pack_id,
-            )
-        ).first()
-    if new_pack_usage and user_id is not None and payload.pack_id is not None:
-        usage = GenerationUsage(
-            user_id=user_id,
-            application_id=application.id,
-            pack_id=payload.pack_id,
-        )
-        session.add(usage)
-    if usage is not None and pack_is_complete and usage.completed_at is None:
-        usage.completed_at = datetime.now(timezone.utc)
-        session.add(usage)
     session.commit(); session.refresh(document)
     return document
 

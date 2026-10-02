@@ -1,7 +1,7 @@
 "use client";
 
 import { requestGeneratedDocument } from "./generationRequest";
-import { diagnoseThenGenerate, GenerationPhase, generationWorkflowIsBusy } from "./generationFlow";
+import { creditStatus, diagnoseThenGenerate, GenerationPhase, generationWorkflowIsBusy, packCreditCost } from "./generationFlow";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, Session } from "@supabase/supabase-js";
 import {
@@ -38,7 +38,7 @@ type Referee = { organisation: string; name: string; position_title: string; pho
 type Profile = { id: number; title?: string; first_name: string; last_name: string; preferred_name?: string; phone: string; email: string; postal_address?: string; suburb?: string; state: string; postcode?: string; country: string; work_rights: string; availability_notice: string; target_direction?: string; motivation?: string; writing_tone: string; preferences_notes?: string; referees: Referee[]; updated_at: string };
 type JobFields = { company: string; position_title: string; job_url: string; job_description: string; selection_criteria: string; discovered_sources: Record<string, unknown>[] };
 type ContactGuess = { full_name: string; phone: string; email: string };
-type SelectionCriteriaAccess = { unlimited: boolean; included_credits: number; referral_credits: number; used_credits: number; remaining_credits: number | null; referral_code: string | null; referral_claimed: boolean };
+type PackCreditAccess = { unlimited: boolean; balance: number | null; standard_pack_cost: number; selection_criteria_pack_cost: number };
 type JobSource = { source_id: string; source_type: string; title: string; label: string; source_url?: string; acquisition_status: string; extraction_status: string; warnings_json: string };
 
 const packTypes = ["tailored_resume", "cover_letter", "selection_criteria"] as const;
@@ -129,8 +129,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   const [resumeScanIssues, setResumeScanIssues] = useState<ResumeReviewIssue[]>([]);
   const [resultPromptsShown, setResultPromptsShown] = useState<string[]>([]);
   const [contactGuess, setContactGuess] = useState<ContactGuess>({ full_name: "", phone: "", email: "" });
-  const [selectionAccess, setSelectionAccess] = useState<SelectionCriteriaAccess | null>(null);
-  const [referralCode, setReferralCode] = useState("");
+  const [packCredits, setPackCredits] = useState<PackCreditAccess | null>(null);
   const [exportTemplate, setExportTemplate] = useState<"classic" | "modern" | "traditional" | "career_modern">("classic");
   const [submissionFormat, setSubmissionFormat] = useState<"docx" | "pdf">("docx");
   const [releaseChecklist, setReleaseChecklist] = useState<ReleaseChecklist | null>(null);
@@ -168,6 +167,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
 
   function clearAuthenticatedState() {
     setProfile(null); setResumes([]); setApplications([]); setDocuments([]);
+    setPackCredits(null);
     setResumeScanIssues([]);
     setApplicationRequirements(null); setApplicationDecision(null); setReleaseChecklist(null);
     setRequirementsEditDraft(null); setSources([]); setSourcesLoadState("idle");
@@ -182,12 +182,12 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
         if (scanResponse.ok) scanned = (await scanResponse.json()).resumes || [];
       } catch { /* Resume loading still falls back to persisted review annotations. */ }
     }
-    const [profileResponse, resumeResponse, applicationResponse, backupResponse, selectionAccessResponse] = await Promise.all([
+    const [profileResponse, resumeResponse, applicationResponse, backupResponse, packCreditResponse] = await Promise.all([
       authenticatedFetch(`${api}/profile`),
       authenticatedFetch(`${api}/resumes`),
       authenticatedFetch(`${api}/applications`),
       supabase ? Promise.resolve(null) : authenticatedFetch(`${api}/backups`).catch(() => null),
-      authenticatedFetch(`${api}/selection-criteria/access`),
+      authenticatedFetch(`${api}/pack-credits/access`),
     ]);
     if (profileResponse.ok) setProfile(await profileResponse.json());
     if (resumeResponse.ok) {
@@ -199,7 +199,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     if (applicationResponse.ok) setApplications(((await applicationResponse.json()) as Application[]).map(normaliseApplicationText) as Application[]);
     const backupState = optionalBackupState<Backup>(backupResponse?.status || 0, backupResponse?.ok ? await backupResponse.json().catch(() => []) : []);
     setBackupsAvailable(backupState.available); setBackups(backupState.backups);
-    if (selectionAccessResponse.ok) setSelectionAccess(await selectionAccessResponse.json());
+    if (packCreditResponse.ok) setPackCredits(await packCreditResponse.json());
   }
 
   useEffect(() => {
@@ -982,19 +982,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     };
     const documentTypes = requiredGeneratedDocumentTypes(applicationRequirements);
     const defaultTypes: readonly (typeof packTypes[number])[] = ["tailored_resume", "cover_letter"];
-    const includesSelectionCriteria = documentTypes.includes("selection_criteria");
-    let generationTypes: readonly (typeof packTypes[number])[] = documentTypes.length ? documentTypes : defaultTypes;
-    let selectionCriteriaSkipped = false;
-    if (includesSelectionCriteria) {
-      const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
-      if (!accessResponse.ok) return showPackNotice("Could not verify Selection Criteria access. Please try again.");
-      const currentAccess = await accessResponse.json() as SelectionCriteriaAccess;
-      setSelectionAccess(currentAccess);
-      if (!currentAccess.unlimited && !currentAccess.remaining_credits) {
-        generationTypes = documentTypes.filter((type) => type !== "selection_criteria");
-        selectionCriteriaSkipped = true;
-      }
-    }
+    const generationTypes: readonly (typeof packTypes[number])[] = documentTypes.length ? documentTypes : defaultTypes;
     const packId = crypto.randomUUID();
     setBusy(true);
     setGenerationFailure(null);
@@ -1020,21 +1008,19 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
             const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
             if (documentsResponse.ok) setDocuments(await documentsResponse.json());
           }
-          throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`);
+          const creditMessage = result.detail?.code === "pack_credits_insufficient"
+            ? `Not enough credits remain for this pack. Contact ${betaSupportContact} to add more credits.`
+            : result.detail?.code === "global_pack_limit_reached"
+              ? `Generation is temporarily paused. Contact ${betaSupportContact} for help.`
+              : null;
+          throw new Error(creditMessage || (typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`));
         }
         created.push(result);
       }
       setDocuments((current) => [...created.reverse(), ...current]);
-      if (includesSelectionCriteria) {
-        const accessResponse = await authenticatedFetch(`${api}/selection-criteria/access`);
-        if (accessResponse.ok) setSelectionAccess(await accessResponse.json());
-      }
+      const accessResponse = await authenticatedFetch(`${api}/pack-credits/access`);
+      if (accessResponse.ok) setPackCredits(await accessResponse.json());
       setActiveType("tailored_resume");
-      if (selectionCriteriaSkipped) {
-        setQualityResult(null);
-        showPackNotice("CV and Cover Letter created. Selection Criteria was skipped because no credits remain. Add a credit before generating and checking the complete pack.");
-        return;
-      }
       const checkResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/quality-check`);
       if (checkResponse.ok) {
         const check = await checkResponse.json() as QualityResult;
@@ -1047,6 +1033,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       }
       await loadReleaseChecklist();
     } catch (error) {
+      const accessResponse = await authenticatedFetch(`${api}/pack-credits/access`).catch(() => null);
+      if (accessResponse?.ok) setPackCredits(await accessResponse.json());
       try {
         const documentsResponse = await authenticatedFetch(`${api}/applications/${selectedApplication}/documents`);
         if (documentsResponse.ok) setDocuments(await documentsResponse.json());
@@ -1063,7 +1051,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   }
 
   async function generatePack() {
-    if (!selectedApplication || !resumes.length || generationWorkflowIsBusy(generationPhase, busy, decisionBusy)) return;
+    if (!selectedApplication || !resumes.length || generationCreditBlocked || generationWorkflowIsBusy(generationPhase, busy, decisionBusy)) return;
     try {
       const outcome = await diagnoseThenGenerate(async () => {
         const response = await authenticatedFetch(`${api}/applications/${selectedApplication}/decision`, { method: "POST" });
@@ -1088,7 +1076,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   }
 
   async function retryFailedDocument() {
-    if (!selectedApplication || !generationFailure || busy) return;
+    if (!selectedApplication || !generationFailure || busy || generationCreditBlocked) return;
     const { documentType } = generationFailure;
     setBusy(true);
     setPackNotice(`Retrying ${labels[documentType]}…`);
@@ -1110,20 +1098,6 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     } finally {
       setBusy(false);
     }
-  }
-
-  async function claimReferral(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const response = await authenticatedFetch(`${api}/selection-criteria/referral`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ referral_code: referralCode.trim() }),
-    });
-    const result = await response.json();
-    if (!response.ok) return setNotice(result.detail || "Could not apply this referral code.");
-    setSelectionAccess(result);
-    setReferralCode("");
-    setNotice("Referral recorded. The person who invited you has received one Selection Criteria credit.");
   }
 
   async function updateApplicationResume(event: FormEvent<HTMLFormElement>) {
@@ -1500,6 +1474,11 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   }
   const requiredPackTypes = requiredGeneratedDocumentTypes(applicationRequirements);
   const generationWorkflowBusy = generationWorkflowIsBusy(generationPhase, busy, decisionBusy);
+  const estimatedCreditCost = packCreditCost(applicationRequirements);
+  const currentCreditStatus = packCredits && !packCredits.unlimited && packCredits.balance !== null
+    ? creditStatus(packCredits.balance, estimatedCreditCost, betaSupportContact)
+    : null;
+  const generationCreditBlocked = Boolean(currentCreditStatus?.blocked);
   const generationLabel = requiredPackTypes.length
     ? `Generate ${requiredPackTypes.map((type) => labels[type]).join(requiredPackTypes.length > 1 ? ", " : "")}`.replace(/, ([^,]+)$/, " & $1")
     : "Generate Resume & Cover Letter";
@@ -1559,20 +1538,6 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       <div className="overviewRecent"><strong>Recent applications</strong>{active.length ? active.slice(0, 3).map((application) => <a href={`/applications?application=${application.id}`} key={application.id}><span>{application.position_title}</span><small>{application.company} · {statusLabels[application.status] || application.status}</small></a>) : <small>No saved jobs yet.</small>}</div>
       <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><a className="secondary pageLink" href="/applications">View all applications</a></div>
     </section>
-
-    {selectionAccess && !selectionAccess.unlimited && <section className="selectionAccessCard">
-      <div>
-        <strong>Selection Criteria access</strong>
-        <p><b>{selectionAccess.remaining_credits}</b> free use{selectionAccess.remaining_credits === 1 ? "" : "s"} remaining. New users receive 2; each successful referral adds 1.</p>
-      </div>
-      <div className="referralTools">
-        {selectionAccess.referral_code && <button type="button" className="secondary" onClick={() => navigator.clipboard.writeText(selectionAccess.referral_code || "")}>Copy my referral code</button>}
-        {!selectionAccess.referral_claimed && <form onSubmit={claimReferral}>
-          <input aria-label="Referral code" value={referralCode} onChange={(event) => setReferralCode(event.target.value)} placeholder="Enter an inviter's code" required />
-          <button type="submit">Apply code</button>
-        </form>}
-      </div>
-    </section>}
 
       <details className="panel" open={!profile}>
         <summary><span>0</span><div><strong>Contact check</strong><small>{profile ? "Detected and saved — check once" : "Upload your CV and skip manual entry"}</small></div></summary>
@@ -1786,10 +1751,13 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                   </details>
                   {applicationRequirements.additional_documents.length > 0 && <div className="additionalRequirements"><strong>Supporting / Additional documents</strong><ul>{applicationRequirements.additional_documents.map((document) => <li key={document}>{document}</li>)}</ul></div>}
                   {requirementsError && <p className="requirementsError" role="alert">{requirementsError}</p>}
-                  <div className="generateAction"><button type="button" disabled={generationWorkflowBusy || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={!selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{generationPhase === "diagnosing" ? "Diagnosing…" : generationPhase === "generating" || busy ? "Generating documents…" : generationLabel}</button></div>
+                  <div className="generateAction">
+                    {currentCreditStatus && <p className={generationCreditBlocked ? "creditStatus blocked" : "creditStatus"} role={generationCreditBlocked ? "alert" : "status"}>{currentCreditStatus.message}</p>}
+                    <button type="button" disabled={generationWorkflowBusy || generationCreditBlocked || !canGenerate(Boolean(selected.job_description.trim()), resumes.length > 0)} title={generationCreditBlocked ? "Add credits before generating." : !selected.job_description.trim() ? "Add a job description before generating." : !resumes.length ? "Upload a Resume before generating." : ""} onClick={generatePack}>{generationPhase === "diagnosing" ? "Diagnosing…" : generationPhase === "generating" || busy ? "Generating documents…" : generationLabel}</button>
+                  </div>
                 </>}
               </section>
-              {generationFailure && <section className="requirementsError generationFailure" role="alert"><strong>{labels[generationFailure.documentType]} was not created</strong><p>{generationFailure.message}</p><button type="button" onClick={retryFailedDocument} disabled={busy}>{busy ? "Retrying…" : `Retry ${labels[generationFailure.documentType]}`}</button></section>}
+              {generationFailure && <section className="requirementsError generationFailure" role="alert"><strong>{labels[generationFailure.documentType]} was not created</strong><p>{generationFailure.message}</p><button type="button" onClick={retryFailedDocument} disabled={busy || generationCreditBlocked}>{busy ? "Retrying…" : `Retry ${labels[generationFailure.documentType]}`}</button></section>}
               <details className="sourcesCard" aria-live="polite" open={sourcesLoadState === "error" || applicationSourcesOpen(sources)}>
                 <summary><strong>Application Sources</strong> <small>Documents found or referenced for this application.</small></summary>
                 {sourcesLoadState === "loading" && <p className="helper">Loading application sources…</p>}

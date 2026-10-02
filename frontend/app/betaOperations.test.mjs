@@ -113,3 +113,12 @@ test("Confirm details makes Profile-wide availability editing visible", () => {
   assert.match(card, /<\/details>\s*<p className="helper">This updates your Applicant Profile and applies to all applications\.<\/p>/);
   assert.match(card, /<label>Availability<select name="availability_notice"/);
 });
+
+test("generation shows Pack credit balance, cost and an insufficient-credit gate", () => {
+  const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  assert.match(page, /\/pack-credits\/access/);
+  assert.match(page, /currentCreditStatus\.message/);
+  assert.match(page, /generationCreditBlocked/);
+  assert.match(page, /Add credits before generating/);
+  assert.doesNotMatch(page, /\/selection-criteria\/access|\/selection-criteria\/referral/);
+});

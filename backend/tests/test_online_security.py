@@ -15,7 +15,7 @@ from app.auth import get_current_user
 from app.config import settings
 from app.database import get_session
 from app.application_requirements import empty_application_requirements
-from app.main import app, check_generation_quota, check_selection_criteria_credit, selection_criteria_access, update_application_requirements
+from app.main import app, update_application_requirements
 from app.models import ApplicationRequirementsUpdate, CreditLedger, GeneratedDocument, GenerationUsage, JobApplication, Resume
 
 
@@ -45,37 +45,9 @@ class OnlineSecurityTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_existing_pack_does_not_consume_quota_twice(self):
-        user_id = uuid4()
-        pack_id = uuid4()
-        with Session(self.engine) as session:
-            session.add(GenerationUsage(
-                user_id=user_id,
-                pack_id=pack_id,
-                generated_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-            with patch.object(settings, "deployment_mode", "online"):
-                self.assertFalse(check_generation_quota(session, user_id, pack_id))
-
-    def test_generation_usage_quota_uses_timezone_aware_utc_datetimes(self):
-        class Result:
-            def first(self): return None
-            def one(self): return 0
-
-        class RecordingSession:
-            def __init__(self): self.datetimes = []
-            def exec(self, statement):
-                self.datetimes.extend(value for value in statement.compile().params.values() if isinstance(value, datetime))
-                return Result()
-
-        session = RecordingSession()
-        with patch.object(settings, "deployment_mode", "online"):
-            self.assertTrue(check_generation_quota(session, uuid4(), uuid4()))
-
-        self.assertEqual(len(session.datetimes), 2)
-        self.assertTrue(all(value.utcoffset() == timedelta(0) for value in session.datetimes))
-        self.assertEqual(GenerationUsage(user_id=uuid4(), pack_id=uuid4()).generated_at.utcoffset(), timedelta(0))
+    def test_pack_limits_use_only_the_500_monthly_global_guard(self):
+        self.assertEqual(settings.monthly_pack_limit_global, 500)
+        self.assertFalse(hasattr(settings, "daily_pack_limit_per_user"))
 
     def test_generated_document_timestamp_is_timezone_aware_utc(self):
         document = GeneratedDocument(
@@ -117,36 +89,6 @@ class OnlineSecurityTests(unittest.TestCase):
             )
 
         self.assertEqual(application.updated_at.utcoffset(), timedelta(0))
-
-    def test_daily_pack_limit_stops_a_new_pack(self):
-        user_id = uuid4()
-        with Session(self.engine) as session:
-            session.add(GenerationUsage(
-                user_id=user_id,
-                pack_id=uuid4(),
-                generated_at=datetime.now(timezone.utc),
-                completed_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-            with patch.object(settings, "deployment_mode", "online"), patch.object(
-                settings, "daily_pack_limit_per_user", 1
-            ):
-                with self.assertRaisesRegex(Exception, "Today's beta limit"):
-                    check_generation_quota(session, user_id, uuid4())
-
-    def test_incomplete_pack_does_not_consume_daily_quota(self):
-        user_id = uuid4()
-        with Session(self.engine) as session:
-            session.add(GenerationUsage(
-                user_id=user_id,
-                pack_id=uuid4(),
-                generated_at=datetime.now(timezone.utc),
-            ))
-            session.commit()
-            with patch.object(settings, "deployment_mode", "online"), patch.object(
-                settings, "daily_pack_limit_per_user", 1
-            ):
-                self.assertTrue(check_generation_quota(session, user_id, uuid4()))
 
     def test_pack_credit_models_are_separate_from_selection_criteria_credits(self):
         models = importlib.import_module("app.models")
@@ -237,25 +179,14 @@ class OnlineSecurityTests(unittest.TestCase):
         self.assertEqual(statuses, ["completed", "released"])
         engine.dispose()
 
-    def test_new_user_receives_two_selection_criteria_credits(self):
+    def test_new_user_pack_credit_access_receives_two_lifetime_credits(self):
         user_id = uuid4()
-        with Session(self.engine) as session, patch.object(settings, "deployment_mode", "online"):
-            access = selection_criteria_access(session, user_id)
+        app.dependency_overrides[get_current_user] = lambda: user_id
+        with patch.object(settings, "deployment_mode", "online"):
+            response = self.client.get("/pack-credits/access")
 
-        self.assertEqual(access.remaining_credits, 2)
-        self.assertEqual(access.referral_code, str(user_id))
-
-    def test_selection_criteria_generation_requires_remaining_credit(self):
-        user_id = uuid4()
-        with Session(self.engine) as session:
-            session.add_all([
-                CreditLedger(user_id=user_id, delta=-1, reason="generation", idempotency_key="used-1"),
-                CreditLedger(user_id=user_id, delta=-1, reason="generation", idempotency_key="used-2"),
-            ])
-            session.commit()
-            with patch.object(settings, "deployment_mode", "online"):
-                with self.assertRaisesRegex(Exception, "No Selection Criteria credits"):
-                    check_selection_criteria_credit(session, user_id, uuid4())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["balance"], 2)
 
 
 if __name__ == "__main__":
