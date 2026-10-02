@@ -69,6 +69,18 @@ class GenerationRequestTests(unittest.TestCase):
                 self.assertEqual(client.get(url).json()["message"], "Provider unavailable")
                 self.assertEqual(client.get(url).json()["status"], "failed")
             payload["pack_id"] = str(uuid4())
+            url = f"/applications/{application_id}/generation-requests/{payload['pack_id']}/tailored_resume"
+            stale_detail = {
+                "code": "application_resume_snapshot_outdated",
+                "can_update": True,
+                "message": "Your Master Resume has changed. Update this application before generating.",
+            }
+            with patch("app.main.generate_document", side_effect=HTTPException(409, stale_detail)):
+                self.assertEqual(client.post("/generate?background=true", json=payload).status_code, 202)
+                state = client.get(url).json()
+                self.assertEqual(state["status"], "failed")
+                self.assertEqual(state["detail"], stale_detail)
+            payload["pack_id"] = str(uuid4())
             with patch("app.main.generate_document", side_effect=generated):
                 self.assertEqual(client.post("/generate", json=payload).status_code, 200)
         finally:

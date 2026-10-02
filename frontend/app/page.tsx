@@ -1095,7 +1095,10 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     try {
       const response = await requestGeneratedDocument(api, authenticatedFetch, { application_id: selectedApplication, document_type: documentType, pack_id: crypto.randomUUID() }, sessionStorage);
       const result = await response.json();
-      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`);
+      if (!response.ok) {
+        handleResumeSnapshotError(result);
+        throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${labels[documentType]} could not be generated.`);
+      }
       setDocuments((current) => [result, ...current]);
       setGenerationFailure(null);
       setPackNotice(`${labels[documentType]} created. You can now continue with application checks.`);

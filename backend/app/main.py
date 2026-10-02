@@ -3141,10 +3141,13 @@ def finish_generation_request(payload, session, user_id, key):
         session.rollback()
         detail = getattr(error, "detail", None)
         message = (detail.get("message") if isinstance(detail, dict) else detail) if isinstance(error, HTTPException) else None
-        save_generation_request(session, payload.application_id, key, {
+        failure = {
             "status": "failed", "document_id": detail.get("document_id") if isinstance(detail, dict) else None,
             "message": message or "Generation failed. Existing drafts are saved; please retry.",
-        })
+        }
+        if isinstance(error, HTTPException) and isinstance(detail, dict):
+            failure["detail"] = detail
+        save_generation_request(session, payload.application_id, key, failure)
         raise
     document_id = document.id
     save_generation_request(session, payload.application_id, key, {"status": "completed", "document_id": document_id})

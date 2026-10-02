@@ -39,7 +39,7 @@ export async function requestGeneratedDocument(
       }
       if (state.status === "failed") {
         storage.removeItem(key);
-        return Response.json({ detail: { message: state.message || "Generation failed. Please retry.", document_id: state.document_id } }, { status: 502 });
+        return Response.json({ detail: state.detail || { message: state.message || "Generation failed. Please retry.", document_id: state.document_id } }, { status: 502 });
       }
     } else if (response?.status === 401 || response?.status === 403) {
       return response;

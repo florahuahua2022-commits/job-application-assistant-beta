@@ -87,6 +87,25 @@ test("stale Resume snapshots use the same recovery UI from open, check and gener
   assert.match(page, /Update to latest Master Resume/);
 });
 
+test("background generation and document Retry both route stale snapshots to the recovery UI", () => {
+  const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  const generate = page.slice(page.indexOf("async function generateReadyPack("), page.indexOf("async function generatePack("));
+  const retry = page.slice(page.indexOf("async function retryFailedDocument("), page.indexOf("async function claimReferral("));
+  assert.match(generate, /resumeSnapshotFailure = handleResumeSnapshotError\(result\)/);
+  assert.match(generate, /if \(!resumeSnapshotFailure && !resumeReviewFailure\) showPackNotice/);
+  assert.match(retry, /handleResumeSnapshotError\(result\)/);
+});
+
+test("updating the stale Resume clears failure state before reopening the application", () => {
+  const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  const update = page.slice(page.indexOf("async function saveApplicationResume("), page.indexOf("async function saveDraft("));
+  assert.match(update, /setResumeUpdateAvailable\(false\)/);
+  assert.match(update, /setGenerationFailure\(null\)/);
+  assert.ok(update.indexOf("setGenerationFailure(null)") < update.indexOf("await openApplication(updated.id)"));
+  const generate = page.slice(page.indexOf("async function generatePack("), page.indexOf("async function retryFailedDocument("));
+  assert.ok(generate.indexOf("/decision") < generate.indexOf("generateReadyPack"));
+});
+
 test("Confirm details makes Profile-wide availability editing visible", () => {
   const page = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
   const card = page.slice(page.indexOf('<div className={confirmedApplication === selected.id'), page.indexOf('<section className={`requirementsCard'));

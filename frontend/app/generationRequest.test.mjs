@@ -38,3 +38,19 @@ test("Retry resumes the saved ID and surfaces a terminal failure with the retain
   assert.deepEqual((await response.json()).detail, { message: "Review unavailable", document_id: 7 });
   assert.equal(saved.values.size, 0);
 });
+
+test("background snapshot failure preserves its recovery code and action", async () => {
+  const saved = storage();
+  const detail = {
+    code: "application_resume_snapshot_outdated",
+    can_update: true,
+    message: "Your Master Resume has changed. Update this application before generating.",
+  };
+  const response = await requestGeneratedDocument("https://api", async (_url, init) => {
+    if (init.method === "POST") return Response.json({ status: "running" }, { status: 202 });
+    return Response.json({ status: "failed", detail });
+  }, payload, saved, async () => {});
+  assert.equal(response.status, 502);
+  assert.deepEqual((await response.json()).detail, detail);
+  assert.equal(saved.values.size, 0);
+});
