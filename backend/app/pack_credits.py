@@ -30,7 +30,8 @@ class CreditReservation:
 
 class ManualTopupRequest(BaseModel):
     user_id: UUID
-    package_code: Literal["single", "starter", "job_search"]
+    package_code: Literal["single", "starter", "job_search", "custom"]
+    credits: int | None = None
     idempotency_key: str
     note: str
 
@@ -191,11 +192,18 @@ def expire_pack_reservations(session: Session, now: datetime | None = None) -> i
 
 def grant_manual_topup(
     session: Session, user_id: UUID, package_code: str, idempotency_key: str,
-    admin_user_id: UUID, note: str,
+    admin_user_id: UUID, note: str, credits: int | None = None,
 ) -> int:
-    package = PACK_CATALOG.get(package_code)
-    if not package:
-        raise ValueError("Unknown package code.")
+    if package_code == "custom":
+        if type(credits) is not int or credits <= 0:
+            raise ValueError("Custom credits must be a positive integer.")
+        package = {"credits": credits, "amount_cents": 0, "currency": "AUD"}
+    else:
+        package = PACK_CATALOG.get(package_code)
+        if not package:
+            raise ValueError("Unknown package code.")
+        if credits is not None:
+            raise ValueError("Credits are only accepted for a custom top-up.")
     if session.bind.dialect.name == "postgresql":
         return int(session.execute(text(
             "SELECT public.grant_manual_pack_topup(:user_id, :package_code, :credits, :amount, :key, :admin_id, :note)"

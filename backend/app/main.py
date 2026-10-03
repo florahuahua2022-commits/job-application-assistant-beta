@@ -842,7 +842,7 @@ def create_manual_pack_topup(
     try:
         balance = grant_manual_topup(
             session, payload.user_id, payload.package_code, payload.idempotency_key,
-            admin_user_id, payload.note,
+            admin_user_id, payload.note, credits=payload.credits,
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
