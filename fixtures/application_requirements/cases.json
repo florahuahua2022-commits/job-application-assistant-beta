@@ -17,7 +17,7 @@
   {
     "id": "ambiguous",
     "text": "Applications are invited for this role. Read the position description carefully before applying.",
-    "expected": {"resume": "unknown", "cover_letter": "unknown", "selection_requirement": "unknown", "warning": true}
+    "expected": {"resume": "required", "cover_letter": "unknown", "selection_requirement": "unknown", "warning": true}
   },
   {
     "id": "character_limit",

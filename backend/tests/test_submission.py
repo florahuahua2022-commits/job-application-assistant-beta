@@ -589,7 +589,7 @@ This role coordinates projects, prepares reports and supports public-sector stak
                     json={"action": "correct", "documents": documents},
                 ).json()["requirements"]
 
-                self.assertEqual(saved["documents"]["resume"]["requirement"], "unknown")
+                self.assertEqual(saved["documents"]["resume"]["requirement"], "required")
                 self.assertEqual(saved["documents"]["cover_letter"]["limit"]["unit"], unit)
                 loaded = self.client.get(f"/applications/{self.application_id}/application-requirements").json()["requirements"]
                 self.assertEqual(loaded["documents"]["cover_letter"]["limit"], documents["cover_letter"]["limit"])
@@ -918,7 +918,7 @@ This role coordinates projects, prepares reports and supports public-sector stak
         codes = [item["code"] for item in self.client.get(f"/applications/{self.application_id}/quality-check").json()["issues"]]
         self.assertIn("selection_criteria_unselected_evidence", codes)
 
-    def test_private_unknown_requirements_do_not_invent_government_documents(self):
+    def test_private_unknown_requirements_only_apply_the_product_resume_default(self):
         with Session(self.engine) as session:
             application = self._confirm_quality_contract(session, required=())
             requirements = json.loads(application.application_requirements_json)
@@ -936,7 +936,7 @@ This role coordinates projects, prepares reports and supports public-sector stak
         payload = self.client.get(f"/applications/{self.application_id}/quality-check").json()
         self.assertFalse(payload["ready"])
         self.assertIn("application_requirements_unknown", [item["code"] for item in payload["issues"]])
-        self.assertNotIn("missing_document", [item["code"] for item in payload["issues"]])
+        self.assertIn("missing_document", [item["code"] for item in payload["issues"]])
 
     def test_quality_check_warns_about_generic_wording_and_us_spelling(self):
         with Session(self.engine) as session:

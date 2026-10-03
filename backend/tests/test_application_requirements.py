@@ -19,6 +19,32 @@ FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "application_requi
 
 
 class ApplicationRequirementsParserTests(unittest.TestCase):
+    def test_new_requirements_always_include_a_product_default_resume(self):
+        resume = empty_application_requirements()["documents"]["resume"]
+        self.assertEqual(resume, {
+            "requirement": "required", "format": "standalone",
+            "basis": "product_default", "limit": None,
+        })
+
+    def test_loading_does_not_replace_an_explicit_resume_format(self):
+        stored = empty_application_requirements("Apply through the portal")
+        stored["documents"]["resume"].update(
+            requirement="required", format="portal_fields", basis="employer_explicit",
+        )
+        loaded = load_application_requirements(json.dumps(stored))
+        self.assertEqual(loaded["documents"]["resume"], stored["documents"]["resume"])
+
+    def test_loading_fills_only_unknown_resume_fields(self):
+        stored = empty_application_requirements("Submit a resume")
+        stored["documents"]["resume"].update(
+            requirement="required", format="unknown", basis="employer_explicit",
+        )
+        loaded = load_application_requirements(json.dumps(stored))
+        self.assertEqual(loaded["documents"]["resume"], {
+            "requirement": "required", "format": "standalone",
+            "basis": "employer_explicit", "limit": None,
+        })
+
     def test_document_basis_distinguishes_employer_text_user_choice_and_legacy_default(self):
         explicit = parse_application_requirements("Submit your CV and cover letter.")
         self.assertEqual(explicit["documents"]["resume"]["basis"], "employer_explicit")
@@ -28,7 +54,8 @@ class ApplicationRequirementsParserTests(unittest.TestCase):
         documents["cover_letter"].update(requirement="required", format="standalone")
         documents["selection_criteria"].update(requirement="not_required", format="not_applicable")
         corrected = correct_application_requirements(ambiguous, documents, [])
-        self.assertEqual(corrected["documents"]["resume"]["basis"], "user_confirmed")
+        self.assertEqual(corrected["documents"]["resume"]["basis"], "product_default")
+        self.assertEqual(corrected["documents"]["cover_letter"]["basis"], "user_confirmed")
         self.assertNotIn("Submission document requirements could not be determined from the supplied text.", corrected["warnings"])
 
     def test_legacy_confirmed_material_unknown_loads_as_unresolved(self):

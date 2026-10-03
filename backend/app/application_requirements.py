@@ -30,7 +30,7 @@ def empty_application_requirements(source_text: str = "", source: str = "determi
         "review_status": "needs_confirmation",
         "source": source,
         "documents": {
-            "resume": _document(),
+            "resume": _document(requirement="required", format="standalone", basis="product_default"),
             "cover_letter": _document(),
             "selection_criteria": _document(criteria_count=None, criteria_references=[]),
         },
@@ -176,7 +176,7 @@ def parse_application_requirements(source_text: str) -> dict[str, Any]:
     if documents["resume"]["requirement"] == "required" and documents["cover_letter"]["requirement"] == "required" and documents["selection_criteria"]["requirement"] == "unknown":
         documents["selection_criteria"].update(requirement="not_required", format="not_applicable", basis="product_default")
     result["source_excerpt"] = " | ".join(dict.fromkeys(relevant))[:2000]
-    if all(item["requirement"] == "unknown" for item in documents.values()):
+    if all(documents[name]["requirement"] == "unknown" for name in ("cover_letter", "selection_criteria")):
         result["warnings"].append("Submission document requirements could not be determined from the supplied text.")
     return result
 
@@ -357,6 +357,13 @@ def load_application_requirements(raw_json: str | None, selection_criteria: str 
         document.setdefault("basis", "unknown")
     if validate_application_requirements(parsed):
         return legacy_application_requirements(selection_criteria)
+    resume = parsed["documents"]["resume"]
+    if resume.get("requirement") == "unknown":
+        resume["requirement"] = "required"
+    if resume.get("format") == "unknown":
+        resume["format"] = "standalone"
+    if resume.get("basis") == "unknown":
+        resume["basis"] = "product_default"
     if parsed.get("review_status") == "confirmed" and material_requirements_unknown(parsed):
         parsed["review_status"] = "needs_confirmation"
     return parsed

@@ -1,7 +1,9 @@
+import json
 import unittest
 from types import SimpleNamespace
 
 from app.application_decision import build_application_decision, validate_application_decision
+from app.application_requirements import empty_application_requirements, load_application_requirements
 
 
 def criterion(criteria_id, text, criteria_type="essential"):
@@ -115,6 +117,31 @@ class ApplicationDecisionTests(unittest.TestCase):
         self.assertEqual(decision["requirements"], [])
         self.assertEqual(decision["questions"], [])
         self.assertEqual(decision["blocking_issues"][0]["code"], "employer_requirements_incomplete")
+
+    def test_historical_unknown_resume_is_normalised_and_no_longer_blocks_diagnosis(self):
+        historical = empty_application_requirements("Administration role")
+        historical["documents"]["resume"].update(
+            requirement="unknown", format="unknown", basis="unknown",
+        )
+        historical["documents"]["cover_letter"].update(
+            requirement="required", format="standalone", basis="user_confirmed",
+        )
+        historical["documents"]["selection_criteria"].update(
+            requirement="not_required", format="not_applicable", basis="user_confirmed",
+        )
+        stale = self.decide([], [], application_requirements=historical)
+        self.assertEqual(stale["status"], "needs_confirmation")
+        self.assertEqual(stale["blocking_issues"][0]["code"], "employer_requirements_incomplete")
+
+        loaded = load_application_requirements(json.dumps(historical))
+        refreshed = self.decide([], [], application_requirements=loaded)
+
+        self.assertEqual(loaded["documents"]["resume"], {
+            "requirement": "required", "format": "standalone",
+            "basis": "product_default", "limit": None,
+        })
+        self.assertEqual(refreshed["status"], "ready")
+        self.assertEqual(refreshed["blocking_issues"], [])
 
 
 if __name__ == "__main__":
