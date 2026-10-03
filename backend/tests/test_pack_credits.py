@@ -351,7 +351,7 @@ class PackCreditEngineTests(unittest.TestCase):
 
 class PostgreSQLPackCreditContractTests(unittest.TestCase):
     def test_database_functions_are_server_side_and_not_client_executable(self):
-        sql = (Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261002_pack_credit_engine.sql").read_text(encoding="utf-8").lower()
+        sql = (Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261003080058_pack_credit_engine.sql").read_text(encoding="utf-8").lower()
         self.assertIn("for update", sql)
         self.assertIn("v_reserved + v_completed", sql)
         self.assertIn("revoke all on function", sql)
@@ -386,7 +386,7 @@ class PostgreSQLPackCreditContractTests(unittest.TestCase):
             """)
             root = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
             connection.execute((root / "20261002_pack_credit_ledger.sql").read_text(encoding="utf-8"))
-            connection.execute((root / "20261002_pack_credit_engine.sql").read_text(encoding="utf-8"))
+            connection.execute((root / "20261003080058_pack_credit_engine.sql").read_text(encoding="utf-8"))
 
         def run(user_id, pack_id):
             with psycopg.connect(url) as connection:
