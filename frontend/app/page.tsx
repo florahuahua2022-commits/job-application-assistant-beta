@@ -1685,7 +1685,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 {selected.status === "draft" && <div className="jobEditDiscard"><strong>Start over with a different job description</strong><p className="helper">This permanently removes this draft and all documents generated for it.</p><button className="discardDraftButton" type="button" onClick={() => deleteDraftApplication(selected)}>Discard this draft and start again</button></div>}
               </details>
               <details className="jobEditPanel" key={`materials-${selected.id}-${selected.resume_snapshot_json}`}>
-                <summary>Change resume materials <span className="helper">optional</span></summary>
+                <summary>Change resume materials</summary>
                 <form onSubmit={updateApplicationResume} className="compactForm">
                   <p className="helper">The latest Master Resume is applied automatically. Use this only to give this application different material.</p>
                   <label>Source<select name="source" defaultValue="application"><option value="application">Edit this application's resume</option><option value="master">Use latest Master Resume</option></select></label>
