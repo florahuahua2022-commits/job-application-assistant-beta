@@ -34,8 +34,9 @@
 .requirementsStatus { flex: none; padding: 5px 9px; border-radius: 999px; background: #fff0cb; color: #713f00; font-size: .78rem; font-weight: 800; }
 .requirementsCard.confirmed .requirementsStatus, .requirementsCard.user_overridden .requirementsStatus { background: #dcefe8; color: var(--accent-dark); }
 .requirementsStatusHelp { margin: 12px 0; color: var(--muted); font-size: .88rem; }
-.documentChoices { display: grid; gap: 0; margin: 12px 0 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px 10px 0 0; }
+.documentChoices { display: grid; gap: 0; margin: 12px 0 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; }
 .documentChoice { display: flex; align-items: center; gap: 12px; padding: 12px; border: 0; border-bottom: 1px solid var(--line); background: #fff; }
+.documentChoice:last-child { border-bottom: 0; }
 .documentChoice > span { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; background: #e8f4ef; color: var(--accent-dark); font-weight: 900; }
 .documentChoice > input { width: 20px; height: 20px; margin: 0 2px; accent-color: var(--accent); }
 .documentChoice div { display: grid; gap: 2px; }
@@ -59,6 +60,7 @@
 .requirementsSource pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border-radius: 8px; background: #f7f8f6; color: var(--muted); font: .78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .requirementsActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .advancedFormatOptions { border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px; background: #fff; }
+.documentDetails .advancedFormatOptions { margin-top: 10px; border-top: 1px solid var(--line); border-radius: 10px; }
 .advancedFormatOptions > summary { padding: 11px 12px; color: #1556a0; font-size: .84rem; font-weight: 700; }
 .advancedFormatOptions > summary::after { content: "⌄"; margin-left: 4px; }
 .advancedFormatOptions[open] > summary::after { content: "⌃"; }
@@ -66,6 +68,7 @@
 .advancedFormatFields select { display: block; width: 100%; margin-top: 6px; padding: 9px 10px; border: 1px solid #abb7b1; border-radius: 8px; background: #fff; color: var(--ink); font: inherit; font-weight: 400; }
 .advancedFormatActions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
 .requirementsEvidence { margin-top: 14px; padding: 12px; border-top: 1px solid var(--line); border-radius: 8px; background: #f7f8f6; }
+.requirementsEvidence > strong { display: block; margin-bottom: 10px; color: var(--accent-dark); font-size: .88rem; }
 .requirementsEvidence > span { color: var(--muted); font-size: .8rem; font-weight: 700; }
 .requirementsEvidence .requirementsSource { margin-top: 8px; }
 .generateAction { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
