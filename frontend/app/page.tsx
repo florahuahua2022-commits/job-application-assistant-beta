@@ -1689,6 +1689,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 <form onSubmit={updateApplicationResume} className="compactForm">
                   <p className="helper">The latest Master Resume is applied automatically. Use this only to give this application different material.</p>
                   <label>Source<select name="source" defaultValue="application"><option value="application">Edit this application's resume</option><option value="master">Use latest Master Resume</option></select></label>
+                  <p className="helper">Edits here may be overwritten by your latest Master Resume the next time you diagnose or generate, so do not rely on them as a long-term custom version for this application.</p>
                   <label className="full">Resume and confirmed facts<textarea name="source_text" rows={12} defaultValue={(() => { try { return JSON.parse(selected.resume_snapshot_json || "{}").source_text || ""; } catch { return ""; } })()} /></label>
                   <p className="helper">Include only facts you can confirm. Applying these materials keeps previous drafts as older versions.</p>
                   <button type="submit">Save custom materials</button>
