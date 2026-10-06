@@ -1671,43 +1671,32 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
           <div className="reviewArea">
             {selected ? <>
               <div className="selectedJob"><div><strong>{selected.position_title}</strong><small>{selected.company}{selected.submitted_at ? ` · Applied ${new Date(selected.submitted_at).toLocaleDateString()}` : ""}{selected.submission_reference ? ` · Confirmation ${selected.submission_reference}` : ""}</small></div><div className="selectedActions">{selected.status !== "draft" && <button className="secondary" type="button" onClick={() => updateApplicationArchive(selected, selected.archived_at ? "restore" : "archive")}>{selected.archived_at ? "Restore" : "Archive"}</button>}{selected.archived_at && <button className="secondary dangerButton" type="button" onClick={() => permanentlyDeleteApplication(selected)}>Delete permanently</button>}<button className="secondary" type="button" onClick={copyApplicationLink}>Copy Application Link</button></div></div>
-              <details className="jobEditPanel" key={`edit-${selected.id}`}>
-                <summary>Edit saved job details</summary>
-                <form onSubmit={updateSavedJob} className="compactForm">
-                  <label>Organisation<input name="company" defaultValue={selected.company} /></label>
-                  <label>Position title<input name="position_title" defaultValue={selected.position_title} /></label>
-                  <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
-                  <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
-                  <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} placeholder="Full criteria or a short instruction" /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
-                  <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
-                  <button className="full">Save job changes</button>
-                </form>
-                {selected.status === "draft" && <div className="jobEditDiscard"><strong>Start over with a different job description</strong><p className="helper">This permanently removes this draft and all documents generated for it.</p><button className="discardDraftButton" type="button" onClick={() => deleteDraftApplication(selected)}>Discard this draft and start again</button></div>}
-              </details>
-              <details className="jobEditPanel" key={`materials-${selected.id}-${selected.resume_snapshot_json}`}>
-                <summary>Change resume materials</summary>
-                <form onSubmit={updateApplicationResume} className="compactForm">
-                  <p className="helper">The latest Master Resume is applied automatically. Use this only to give this application different material.</p>
-                  <label>Source<select name="source" defaultValue="application"><option value="application">Edit this application's resume</option><option value="master">Use latest Master Resume</option></select></label>
-                  <p className="helper">Edits here may be overwritten by your latest Master Resume the next time you diagnose or generate, so do not rely on them as a long-term custom version for this application.</p>
-                  <label className="full">Resume and confirmed facts<textarea name="source_text" rows={12} defaultValue={(() => { try { return JSON.parse(selected.resume_snapshot_json || "{}").source_text || ""; } catch { return ""; } })()} /></label>
-                  <p className="helper">Include only facts you can confirm. Applying these materials keeps previous drafts as older versions.</p>
-                  <button type="submit">Save custom materials</button>
-                </form>
-              </details>
-              <details className="jobEditPanel" onToggle={async (event) => {
-                if (event.currentTarget.open) {
-                  const response = await authenticatedFetch(`${api}/applications/${selected.id}/document-history`);
-                  if (response.ok) setDocumentHistory(await response.json());
-                }
-              }}>
-                <summary>Previous document versions</summary>
-                {documentHistory.map((document) => <details key={document.id}>
-                  <summary>{labels[document.document_type]} · Version {document.id} · {({outdated: "Based on older materials", pending: "Needs checking", needs_improvement: "Needs improvement", usable: "Checks passed"} as Record<string, string>)[document.quality_state || "pending"]}</summary>
-                  <pre style={{whiteSpace: "pre-wrap"}}>{document.content}</pre>
-                  <button type="button" onClick={() => downloadDocument("docx", document)}>Download draft DOCX</button>
-                  <button type="button" onClick={() => downloadDocument("pdf", document)}>Download draft PDF</button>
-                </details>)}
+              <details className="jobEditPanel applicationEditOptions" key={`options-${selected.id}`}>
+                <summary>Edit job or resume details</summary>
+                <details className="jobEditPanel" key={`edit-${selected.id}`}>
+                  <summary>Edit saved job details</summary>
+                  <form onSubmit={updateSavedJob} className="compactForm">
+                    <label>Organisation<input name="company" defaultValue={selected.company} /></label>
+                    <label>Position title<input name="position_title" defaultValue={selected.position_title} /></label>
+                    <label className="full">Application link<input name="job_url" type="url" defaultValue={selected.job_url || ""} placeholder="https://example.com/job" /></label>
+                    <label className="full">Job description<textarea name="job_description" defaultValue={selected.job_description || ""} rows={10} required /></label>
+                    <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" defaultValue={selected.selection_criteria || ""} rows={5} placeholder="Full criteria or a short instruction" /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
+                    <label className="full">Employer confirmation number <em>optional — usually only provided by government or large recruitment systems</em><input name="submission_reference" defaultValue={selected.submission_reference || ""} /></label>
+                    <button className="full">Save job changes</button>
+                  </form>
+                  {selected.status === "draft" && <div className="jobEditDiscard"><strong>Start over with a different job description</strong><p className="helper">This permanently removes this draft and all documents generated for it.</p><button className="discardDraftButton" type="button" onClick={() => deleteDraftApplication(selected)}>Discard this draft and start again</button></div>}
+                </details>
+                <details className="jobEditPanel" key={`materials-${selected.id}-${selected.resume_snapshot_json}`}>
+                  <summary>Change resume materials</summary>
+                  <form onSubmit={updateApplicationResume} className="compactForm">
+                    <p className="helper">The latest Master Resume is applied automatically. Use this only to give this application different material.</p>
+                    <label>Source<select name="source" defaultValue="application"><option value="application">Edit this application's resume</option><option value="master">Use latest Master Resume</option></select></label>
+                    <p className="helper">Edits here may be overwritten by your latest Master Resume the next time you diagnose or generate, so do not rely on them as a long-term custom version for this application.</p>
+                    <label className="full">Resume and confirmed facts<textarea name="source_text" rows={12} defaultValue={(() => { try { return JSON.parse(selected.resume_snapshot_json || "{}").source_text || ""; } catch { return ""; } })()} /></label>
+                    <p className="helper">Include only facts you can confirm. Applying these materials keeps previous drafts as older versions.</p>
+                    <button type="submit">Save custom materials</button>
+                  </form>
+                </details>
               </details>
               <p className="helper"><strong>Steps:</strong> Add Job → Choose Documents → Generate → Review &amp; Edit → Check Application → Download &amp; Apply.</p>
               {packNotice && <p className="notice applicationNotice" role="status" aria-live="polite">{packNotice}</p>}
@@ -1809,6 +1798,20 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
                 <div className="templatePicker"><div><strong>Selected Resume submission artifact</strong><small>Changing format or style requires ATS verification for the new artifact.</small></div><select aria-label="Submission format" value={submissionFormat} onChange={(event) => { const value = event.target.value as "docx" | "pdf"; setSubmissionFormat(value); setAtsResult(null); void loadReleaseChecklist(selectedApplication, value, exportTemplate); }}><option value="docx">DOCX</option><option value="pdf">PDF</option></select><select aria-label="Export style" value={exportTemplate} onChange={(event) => { const value = event.target.value as "classic" | "modern" | "traditional" | "career_modern"; setExportTemplate(value); setAtsResult(null); void loadReleaseChecklist(selectedApplication, submissionFormat, value); }}><option value="classic">Classic — Calibri</option><option value="modern">Modern — Arial</option><option value="traditional">Traditional — Georgia</option><option value="career_modern">Career Modern — Arial</option></select></div>
                 {activeDocument && <div className="editor">{activeDocument.quality_state === "outdated" && <p className="requirementsWarnings"><strong>Generated from an outdated Master Resume — regenerate before applying</strong></p>}<p className="helper"><strong>Latest generated:</strong> {new Date(activeDocument.created_at).toLocaleString()} · Document #{activeDocument.id}</p>{activeEvidence.length > 0 && <details className="evidenceTrace"><summary>View evidence and check details</summary><ul>{activeEvidence.map((item) => <li key={item.id}><code>{item.id}</code> {item.label}</li>)}</ul></details>}<textarea aria-label={labels[activeType]} value={draftText} onChange={(event) => { setDraftText(event.target.value); setDraftSaveState("dirty"); }} rows={24} /><div className="saveStatus" data-state={draftSaveState}>{draftSaveState === "dirty" ? "Unsaved changes" : draftSaveState === "saving" ? "Saving…" : draftSaveState === "error" ? "Save failed — try again" : "All changes saved ✓"}</div><div className="editorActions"><button className="secondary" onClick={() => navigator.clipboard.writeText(draftText)}>Copy</button><button className={`saveEdits ${draftSaveState}`} onClick={saveDraft} disabled={draftSaveState === "saving" || draftSaveState === "saved"}>{draftSaveState === "saving" ? "Saving…" : draftSaveState === "saved" ? "Saved ✓" : "Save edits"}</button>{(!activeReviewer || activeReviewer.status === "provider_failed" || activeReviewer.status === "pending" || activeReviewer.status === "fail") && draftSaveState === "saved" && <button type="button" onClick={reviewEditedDocument} disabled={documentReviewState === "reviewing"}>{documentReviewState === "reviewing" ? "Reviewing…" : activeReviewer?.status === "provider_failed" ? `Retry ${labels[activeType]} review` : activeReviewer?.status === "fail" ? "Re-run document review" : "Review edited document"}</button>}<button className="secondary" onClick={() => downloadDocument("docx")}>Draft DOCX</button><button className="secondary" onClick={() => downloadDocument("pdf")}>Draft PDF</button><button className="secondary" onClick={downloadTrace}>Audit trace</button>{packReady && <><button className="secondary" onClick={() => downloadPack("docx")}>Draft pack DOCX</button><button className="secondary" onClick={() => downloadPack("pdf")}>Draft pack PDF</button><button onClick={reviewAndApply} disabled={!releaseChecklist?.ready} title={!releaseChecklist?.ready ? "Check your application before applying." : ""}>Download &amp; Apply</button><button className="secondary" onClick={markApplied} disabled={selected.status !== "ready_to_apply"}>{selected.status === "applied" ? "Applied ✓" : "Mark as Applied"}</button></>}</div>{qualityResult && <div className={qualityResult.ready ? "qualityResult pass" : "qualityResult fail"}><strong>{qualityResult.ready ? "Application content checks passed" : "Fix these items before applying"}</strong>{qualityResult.issues.length ? <ul>{qualityResult.issues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{issue.severity === "error" ? "Error" : "Warning"}:</b> {issue.message}{issue.document_type ? ` (${labels[issue.document_type] || issue.document_type})` : ""}</li>)}</ul> : <p>No issues found.</p>}</div>}</div>}
               </> : <div className="emptyState"><strong>Your required application documents will appear here.</strong><p>A standalone Selection Criteria document is created only when the confirmed employer requirements request one.</p></div>}
+              <details className="jobEditPanel documentHistory" onToggle={async (event) => {
+                if (event.currentTarget.open) {
+                  const response = await authenticatedFetch(`${api}/applications/${selected.id}/document-history`);
+                  if (response.ok) setDocumentHistory(await response.json());
+                }
+              }}>
+                <summary>Previous document versions</summary>
+                {documentHistory.map((document) => <details key={document.id}>
+                  <summary>{labels[document.document_type]} · Version {document.id} · {({outdated: "Based on older materials", pending: "Needs checking", needs_improvement: "Needs improvement", usable: "Checks passed"} as Record<string, string>)[document.quality_state || "pending"]}</summary>
+                  <pre style={{whiteSpace: "pre-wrap"}}>{document.content}</pre>
+                  <button type="button" onClick={() => downloadDocument("docx", document)}>Download draft DOCX</button>
+                  <button type="button" onClick={() => downloadDocument("pdf", document)}>Download draft PDF</button>
+                </details>)}
+              </details>
             </> : <div className="emptyState"><strong>Select a saved job.</strong><p>Then generate the complete application pack in one click.</p></div>}
           </div>
         </div>
