@@ -33,6 +33,11 @@ alter table public.packcreditledger drop constraint if exists packcreditledger_e
 alter table public.packcreditledger add constraint packcreditledger_entry_type_check check (
     entry_type in ('grant_free', 'grant_manual_topup', 'grant_stripe_purchase', 'debit_generation', 'release')
 );
+alter table public.packcreditledger drop constraint if exists packcreditledger_check;
+alter table public.packcreditledger add constraint packcreditledger_check check (
+    (entry_type in ('grant_free', 'grant_manual_topup', 'grant_stripe_purchase', 'release') and credits_delta > 0)
+    or (entry_type = 'debit_generation' and credits_delta < 0)
+);
 
 create table if not exists public.stripeevent (
     stripe_event_id text primary key,
