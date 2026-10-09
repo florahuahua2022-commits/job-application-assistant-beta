@@ -1,4 +1,8 @@
 import unittest
+import hashlib
+import hmac
+import json
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -8,10 +12,10 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.auth import AuthenticatedUser, get_authenticated_user
-from app.config import Settings
+from app.config import Settings, settings
 from app.database import get_session
 from app.main import app
-from app.models import PaymentCheckoutRate, Purchase
+from app.models import PaymentCheckoutRate, Purchase, StripeEvent
 from app.payments import get_stripe_gateway
 
 
@@ -180,6 +184,85 @@ class CheckoutSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["Retry-After"], "600")
         self.assertEqual(self.gateway.create_checkout_session.call_count, 5)
+
+    def test_signed_completed_webhook_grants_once(self):
+        with Session(self.engine) as session:
+            session.add(Purchase(
+                user_id=self.user.id, stripe_checkout_session_id="cs_paid", status="pending",
+                package_code="single", currency="AUD", credits=1, amount_cents=1695,
+                subtotal_cents=1695, gst_cents=0, total_paid_cents=1695,
+                single_pack_price_cents=1695, livemode=False,
+            ))
+            session.commit()
+        event = {
+            "id": "evt_paid", "type": "checkout.session.completed", "livemode": False,
+            "data": {"object": {
+                "id": "cs_paid", "object": "checkout.session", "mode": "payment",
+                "payment_status": "paid", "payment_intent": "pi_paid",
+                "amount_total": 1695, "currency": "aud",
+                "metadata": {"user_id": str(self.user.id), "package_code": "single"},
+            }},
+        }
+        payload = json.dumps(event, separators=(",", ":")).encode()
+        timestamp, secret = int(time.time()), "whsec_test_fixture"
+        signature = hmac.new(secret.encode(), f"{timestamp}.".encode() + payload, hashlib.sha256).hexdigest()
+        with patch.object(settings, "stripe_webhook_secret", secret), patch.object(settings, "stripe_mode", "test"):
+            first = self.client.post(
+                "/payments/stripe/webhook", content=payload,
+                headers={"Stripe-Signature": f"t={timestamp},v1={signature}", "Content-Type": "application/json"},
+            )
+            second = self.client.post(
+                "/payments/stripe/webhook", content=payload,
+                headers={"Stripe-Signature": f"t={timestamp},v1={signature}", "Content-Type": "application/json"},
+            )
+        self.assertEqual((first.status_code, second.status_code), (200, 200))
+        with Session(self.engine) as session:
+            order = session.exec(select(Purchase).where(Purchase.stripe_checkout_session_id == "cs_paid")).one()
+        self.assertEqual(order.status, "paid")
+
+    def test_bad_signature_and_oversized_body_are_rejected(self):
+        with patch.object(settings, "stripe_webhook_secret", "whsec_test_fixture"):
+            bad = self.client.post(
+                "/payments/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "t=1,v1=bad"},
+            )
+            oversized = self.client.post(
+                "/payments/stripe/webhook", content=b"x" * (256 * 1024 + 1),
+                headers={"Stripe-Signature": "t=1,v1=bad"},
+            )
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(oversized.status_code, 413)
+
+    def test_livemode_conflict_is_recorded_failed_and_acknowledged(self):
+        with Session(self.engine) as session:
+            session.add(Purchase(
+                user_id=self.user.id, stripe_checkout_session_id="cs_wrong_mode", status="pending",
+                package_code="single", currency="AUD", credits=1, amount_cents=1695,
+                subtotal_cents=1695, gst_cents=0, total_paid_cents=1695,
+                single_pack_price_cents=1695, livemode=False,
+            ))
+            session.commit()
+        event = {
+            "id": "evt_wrong_mode", "type": "checkout.session.completed", "livemode": True,
+            "data": {"object": {
+                "id": "cs_wrong_mode", "mode": "payment", "payment_status": "paid",
+                "payment_intent": "pi_wrong_mode", "amount_total": 1695, "currency": "aud",
+                "metadata": {"user_id": str(self.user.id)},
+            }},
+        }
+        payload = json.dumps(event, separators=(",", ":")).encode()
+        timestamp, secret = int(time.time()), "whsec_test_fixture"
+        signature = hmac.new(secret.encode(), f"{timestamp}.".encode() + payload, hashlib.sha256).hexdigest()
+        with patch.object(settings, "stripe_webhook_secret", secret), patch.object(settings, "stripe_mode", "test"):
+            response = self.client.post(
+                "/payments/stripe/webhook", content=payload,
+                headers={"Stripe-Signature": f"t={timestamp},v1={signature}"},
+            )
+        self.assertEqual(response.status_code, 200)
+        with Session(self.engine) as session:
+            recorded = session.get(StripeEvent, "evt_wrong_mode")
+            order = session.exec(select(Purchase).where(Purchase.stripe_checkout_session_id == "cs_wrong_mode")).one()
+        self.assertEqual((recorded.status, recorded.failure_reason_code), ("failed", "livemode_mismatch"))
+        self.assertEqual(order.status, "pending")
 
     def test_stripe_settings_require_webhook_secret_when_key_is_configured(self):
         from app.payments import validate_stripe_settings

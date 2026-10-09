@@ -268,11 +268,36 @@ def _event_fingerprint(facts: dict) -> str:
     return sha256(json.dumps(facts, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def record_stripe_event_failure(
+    session: Session, *, stripe_event_id: str, stripe_event_type: str,
+    facts: dict, reason_code: str, error: str, livemode: bool,
+) -> None:
+    fingerprint = _event_fingerprint(facts)
+    event = session.get(StripeEvent, stripe_event_id)
+    if event and event.facts_fingerprint != fingerprint:
+        raise ValueError("Stripe event facts do not match the original delivery.")
+    if not event:
+        event = StripeEvent(
+            stripe_event_id=stripe_event_id, event_type=stripe_event_type,
+            facts_fingerprint=fingerprint, status="failed", attempt_count=1,
+            livemode=livemode,
+        )
+        session.add(event)
+    else:
+        event.status, event.attempt_count = "failed", event.attempt_count + 1
+    event.failure_reason_code = reason_code
+    event.last_error = error[:1000]
+    event.updated_at = datetime.now(timezone.utc)
+    session.commit()
+
+
 def process_stripe_purchase_event(
     session: Session, *, stripe_event_id: str, stripe_checkout_session_id: str,
     stripe_payment_intent_id: str, user_id: UUID, package_code: str, credits: int,
     subtotal_cents: int, gst_cents: int, total_paid_cents: int,
     single_pack_price_cents: int, currency: str,
+    stripe_event_type: str = "checkout.session.completed", livemode: bool = False,
+    failure_reason_code: str | None = None,
 ) -> int:
     facts = {
         "stripe_checkout_session_id": stripe_checkout_session_id,
@@ -304,8 +329,9 @@ def process_stripe_purchase_event(
                 return session.get(PackCreditAccount, user_id).balance
             if not event:
                 event = StripeEvent(
-                    stripe_event_id=stripe_event_id, event_type="checkout.session.completed",
+                    stripe_event_id=stripe_event_id, event_type=stripe_event_type,
                     facts_fingerprint=fingerprint, status="processing", attempt_count=1,
+                    livemode=livemode,
                 )
                 session.add(event)
             else:
@@ -344,12 +370,14 @@ def process_stripe_purchase_event(
                 raise
             if not event:
                 event = StripeEvent(
-                    stripe_event_id=stripe_event_id, event_type="checkout.session.completed",
+                    stripe_event_id=stripe_event_id, event_type=stripe_event_type,
                     facts_fingerprint=fingerprint, status="failed", attempt_count=1,
+                    livemode=livemode, failure_reason_code=failure_reason_code,
                 )
                 session.add(event)
             else:
                 event.status, event.attempt_count = "failed", event.attempt_count + 1
-            event.last_error, event.updated_at = str(error)[:1000], datetime.now(timezone.utc)
+            event.last_error, event.failure_reason_code = str(error)[:1000], failure_reason_code
+            event.updated_at = datetime.now(timezone.utc)
         session.commit()
         raise

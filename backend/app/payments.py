@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
+import json
 from typing import Literal
 
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from sqlmodel import Session, func, select
 from .auth import AuthenticatedUser
 from .config import settings
 from .models import PaymentCheckoutRate, Purchase
+from .pack_credits import process_stripe_purchase_event, record_stripe_event_failure
 
 
 STRIPE_API_VERSION = "2026-09-30.endive"
@@ -206,3 +208,58 @@ def create_checkout_session(
     ))
     session.commit()
     return CheckoutSessionResponse(checkout_session_id=remote.id, checkout_url=remote.url)
+
+
+MAX_WEBHOOK_BYTES = 256 * 1024
+
+
+class DeterministicPaymentConflict(ValueError):
+    def __init__(self, reason_code: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+def construct_webhook_event(payload: bytes, signature: str, secret: str):
+    import stripe
+    stripe.Webhook.construct_event(payload, signature, secret, tolerance=300)
+    return json.loads(payload)
+
+
+def handle_payment_webhook(session: Session, event: dict) -> None:
+    event_type = event.get("type")
+    if event_type not in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
+        return
+    obj = event["data"]["object"]
+    if obj.get("payment_status") != "paid" or obj.get("mode") != "payment":
+        return
+    order = session.exec(select(Purchase).where(Purchase.stripe_checkout_session_id == obj.get("id"))).first()
+    if not order:
+        raise DeterministicPaymentConflict("session_not_found")
+    event_livemode = bool(event.get("livemode"))
+    configured_live = settings.stripe_mode.strip().lower() == "live"
+    if event_livemode != configured_live or event_livemode != order.livemode:
+        raise DeterministicPaymentConflict("livemode_mismatch")
+    if str(obj.get("currency", "")).upper() != order.currency or obj.get("amount_total") != order.total_paid_cents:
+        raise DeterministicPaymentConflict("amount_or_currency_mismatch")
+    if obj.get("metadata", {}).get("user_id") != str(order.user_id):
+        raise DeterministicPaymentConflict("user_mismatch")
+    process_stripe_purchase_event(
+        session,
+        stripe_event_id=event["id"], stripe_event_type=event_type, livemode=event_livemode,
+        stripe_checkout_session_id=order.stripe_checkout_session_id,
+        stripe_payment_intent_id=obj["payment_intent"], user_id=order.user_id,
+        package_code=order.package_code, credits=order.credits,
+        subtotal_cents=order.subtotal_cents, gst_cents=order.gst_cents,
+        total_paid_cents=order.total_paid_cents,
+        single_pack_price_cents=order.single_pack_price_cents, currency=order.currency,
+    )
+
+
+def record_webhook_conflict(session: Session, event: dict, conflict: DeterministicPaymentConflict) -> None:
+    obj = event.get("data", {}).get("object", {})
+    record_stripe_event_failure(
+        session,
+        stripe_event_id=event["id"], stripe_event_type=event.get("type", "unknown"),
+        facts={"object_id": obj.get("id"), "event_type": event.get("type")},
+        reason_code=conflict.reason_code, error=str(conflict), livemode=bool(event.get("livemode")),
+    )

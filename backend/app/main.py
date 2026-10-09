@@ -36,7 +36,7 @@ from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
-from .payments import CheckoutSessionRequest, CheckoutSessionResponse, StripeGateway, create_checkout_session, get_stripe_gateway
+from .payments import MAX_WEBHOOK_BYTES, CheckoutSessionRequest, CheckoutSessionResponse, DeterministicPaymentConflict, StripeGateway, construct_webhook_event, create_checkout_session, get_stripe_gateway, handle_payment_webhook, record_webhook_conflict
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -116,6 +116,30 @@ def checkout_session(
     gateway: StripeGateway = Depends(get_stripe_gateway),
 ):
     return create_checkout_session(session, gateway, identity, payload.package_code, idempotency_key or "")
+
+
+@app.post("/payments/stripe/webhook")
+async def stripe_webhook(request: Request, session: Session = Depends(get_session)):
+    declared_length = request.headers.get("content-length")
+    if declared_length and int(declared_length) > MAX_WEBHOOK_BYTES:
+        raise HTTPException(413, "Webhook body is too large.")
+    payload = await request.body()
+    if len(payload) > MAX_WEBHOOK_BYTES:
+        raise HTTPException(413, "Webhook body is too large.")
+    signature = request.headers.get("stripe-signature")
+    if not signature or not settings.stripe_webhook_secret:
+        raise HTTPException(400, "Invalid webhook signature.")
+    try:
+        event = construct_webhook_event(payload, signature, settings.stripe_webhook_secret)
+    except Exception as error:
+        raise HTTPException(400, "Invalid webhook signature.") from error
+    try:
+        handle_payment_webhook(session, event)
+    except DeterministicPaymentConflict as error:
+        record_webhook_conflict(session, event, error)
+        operations.warning("stripe_webhook_conflict", extra={"reason_code": error.reason_code})
+        return {"received": True, "conflict": error.reason_code}
+    return {"received": True}
 
 
 def select_for_user(model, user_id: UUID | None):
