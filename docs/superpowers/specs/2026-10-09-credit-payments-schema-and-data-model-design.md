@@ -36,7 +36,7 @@
 
 迁移历史中能够找到这些表的建表来源，因此在“全部 migration 已按顺序成功执行”的新数据库中，它们不应实际依赖 `create_all`。风险在于：生产环境若漏跑迁移，应用会静默补建缺失表，隐藏部署错误，并可能产生与 migration 中约束、索引、RLS、权限或注释不一致的表。
 
-`purchase` 只存在于 migration，不属于当前 ORM 模型，因此不受 `create_all` 管理。
+`purchase` 只存在于 `20260807_commercial_foundation.sql`，不属于当前 ORM 模型，因此不受 `create_all` 管理。它是早期为 Stripe 购买预留的订单表，已有用户、Checkout Session、PaymentIntent、状态、币种、金额和积分字段，但当前没有应用代码读写。它与原方案中的 `stripepaymentorder` 职责重复；本设计不再创建重复表，而是通过 migration 扩展并复用 `purchase`。
 
 ### 依赖运行时 DDL 的字段
 
@@ -74,6 +74,8 @@
 8. 两个已知缺口列是否存在，以及其类型、默认值和 `NOT NULL` 是否符合模型预期。
 
 执行人将查询结果保存为脱敏文本，不包含用户数据、密钥或连接字符串。仓库侧用同一组只读查询检查由全部 migration 重建的 PostgreSQL 16 测试库，再进行结构化 diff。任何差异先通过新的 migration 修复，不直接手工改生产 schema。
+
+可直接粘贴到 Supabase SQL 编辑器的只读脚本见文末附录 A。脚本只有 `SELECT`/CTE，不读取业务行，不创建临时对象，也不修改数据库。
 
 ### 补齐缺失 migration
 
@@ -116,9 +118,9 @@ alter table public.jobapplication
 
 Stripe 实际手续费不在创建订单时估算。退款计算开始时从 Stripe 对应交易的 Balance Transaction 读取实际手续费，保存到订单和退款记录的整数分字段。若将来确认 Stripe 已退还手续费，退款计算规则再通过独立 migration/业务变更调整。
 
-### stripepaymentorder
+### purchase 订单表
 
-一行表示一次 Checkout Session 对应的订单：
+复用现有 `public.purchase`；一行表示一次 Checkout Session 对应的订单。migration 保留现有主键和唯一约束，并补充：
 
 - 内部 UUID 主键。
 - `user_id`。
@@ -126,12 +128,15 @@ Stripe 实际手续费不在创建订单时估算。退款计算开始时从 Str
 - 可空且唯一的 `stripe_payment_intent_id`、`stripe_charge_id` 和 `stripe_balance_transaction_id`。
 - `package_code`、`credits_purchased`。
 - `subtotal_cents`、`gst_cents`、`total_paid_cents`、`currency`。
+- `single_pack_price_cents`：该订单创建时 single 套餐的含税标价快照，退款不读取当前配置。
 - 可空 `actual_stripe_fee_cents`，只保存 Stripe 实际值。
 - `status`：`checkout_created`、`paid`、`expired`、`payment_failed`、`refunded`。
 - `paid_at`、`created_at`、`updated_at`。
 - `dispute_status`：默认 `none`；拒付事件置为 `pending_manual`，v1 不自动扣积分。
 
 服务端按 `package_code` 写入金额和积分，绝不接受前端金额或 `user_id`。
+
+`purchase` 现有的 authenticated 只读 policy 和 `GRANT SELECT` 将被撤销。订单只能由受信后端访问；前端若需要展示，必须通过校验当前用户身份的后端接口取得最小字段。
 
 ### stripeevent
 
@@ -151,6 +156,18 @@ Stripe 实际手续费不在创建订单时估算。退款计算开始时从 Str
 5. 事务失败时所有业务写入回滚；随后用独立的短事务记录或更新 `failed`、错误摘要和尝试次数，使事件可重处理。
 
 这样既不会把失败事件永久误判为重复，也不会出现事件已成功而积分未提交，或积分已提交而事件仍未处理的状态。
+
+### 数据库权限
+
+`purchase`、`stripeevent`、`paymentrefund`、`packcreditlot`、`packcreditallocation` 全部启用 RLS，不为 `anon` 或 `authenticated` 创建 policy，并显式 `REVOKE ALL`。表、序列和支付/充值函数只授予受信后端角色。
+
+通用充值函数及现有管理员充值函数显式执行：
+
+```sql
+revoke all on function ... from public, anon, authenticated;
+```
+
+随后只向部署使用的受信后端数据库角色授予 `EXECUTE`。不能依赖“没有前端调用代码”作为权限边界。
 
 ### packcreditledger 关联
 
@@ -180,11 +197,30 @@ Stripe 购买发放流水增加可空订单外键；管理员和免费发放必�
 - `packcreditlot`：每次正向发放生成一个批次，关联发放流水；保存来源、初始积分、剩余积分、可空支付订单和发放时间。
 - `packcreditallocation`：将每次 `debit_generation` 流水分摊到一个或多个批次，保存每个批次消耗的积分数；释放时按原分摊返还。
 
-消费事务先锁定账号余额，再按 `packcreditlot.created_at, id` 从早到晚锁定并扣减批次，直到满足本次 Pack 成本。订单已用 Pack 数等于该订单批次的初始积分减剩余积分，且可由 allocation 审计验证。
+消费事务先按全局加锁顺序取得锁，再按 `packcreditlot.created_at, id` 从早到晚锁定并扣减批次，直到满足本次 Pack 成本。订单已用 Pack 数等于该订单批次的初始积分减剩余积分，且可由 allocation 审计验证。
 
 免费积分和管理员发放也创建批次，并按实际发放时间进入同一个 FIFO 队列。它们轮到时可以被正常消费，但没有支付订单关联，因此永远不计入可退款订单，也不会因退款被扣回。这个规则避免为了提高退款额而人为把非退款积分固定在队首或队尾。
 
-历史正向流水在 migration 中各生成一个对应批次；历史负向流水缺少可靠订单归属，不反推到未来 Stripe 订单。支付功能启用后产生的所有新消耗必须写 allocation。
+### 历史批次回溯与对账
+
+migration 按 `packcreditledger.created_at, id` 的稳定顺序回放历史：
+
+1. `grant_free` 和 `grant_manual_topup` 各生成一个非退款批次。
+2. `debit_generation` 按当时已存在批次的 FIFO 顺序生成历史 allocation。
+3. `release` 通过相同 `pack_id` 找到对应 `debit_generation`，按原 allocation 逆向恢复；找不到唯一原扣减时 migration 失败，不猜测来源。
+4. 历史数据没有 Stripe 购买流水，不会被错误关联到未来支付订单。
+
+`packcreditaccount.balance` 定义为账号尚未最终消费的积分总数，包含正在生成中已预留的积分；可用余额为 `balance - active_reserved_credits`。生成预留先从批次可用量移入预留 allocation，完成后才扣减 `balance`，失败释放则回到原批次。
+
+每个账号必须满足：
+
+```text
+packcreditaccount.balance
+= sum(packcreditlot.remaining_credits)
+  + sum(generationusage.status = 'reserved' 的预留积分)
+```
+
+migration 回溯完成后逐账号核对该等式；任何不一致都终止 migration，并输出账号 ID 和三项汇总值，不自动制造平账流水。支付功能启用后的启动只读校验和 CI 也执行同一核对查询。
 
 ## 退款数据模型与并发
 
@@ -196,26 +232,28 @@ Stripe 购买发放流水增加可空订单外键；管理员和免费发放必�
 - `status`：`pending`、`processing`、`reconciling`、`succeeded`、`failed`、`rejected`。
 - `stripe_refund_id`，成功后唯一。
 - 确定性的 `stripe_idempotency_key`，按订单生成并唯一。
-- `total_paid_cents`、`actual_stripe_fee_cents`、`used_pack_count`、`single_pack_price_cents`、`refund_amount_cents`、`currency` 的计算快照。
+- `total_paid_cents`、`actual_stripe_fee_cents`、`used_pack_count`、`single_pack_price_cents`、`refund_amount_cents`、`currency` 的计算快照；`single_pack_price_cents` 从订单快照复制。
 - `credits_withheld`、`requested_at`、`succeeded_at`、`failed_at`、`rejected_at`、错误摘要。
 
-订单唯一约束保证一个订单只有一个退款记录；失败后复用该记录重试，不创建第二个订单退款。拒绝和失败记录保留审计，但只有 `succeeded_at` 非空的记录占用 30 天额度。
+订单唯一约束保证一个订单只有一个退款记录；失败后复用该记录重试，不创建第二个订单退款。`processing`、`reconciling` 和最近 30 天内的 `succeeded` 都占用账号退款额度；只有明确进入 `failed` 后才释放额度。`rejected` 不占用额度。
 
 ### 30 天一次的账号级锁
 
 滚动 30 天窗口不能由普通唯一索引完整表达。退款申请事务先获取账号级 PostgreSQL advisory transaction lock，例如以 `refund:<user_id>` 派生锁键；随后再次查询该账号最近一次 `succeeded_at`。
 
-若未满 30 天，记录为 `rejected` 并返回最早可再次申请日期。账号级锁会串行化同一账号的并发订单退款；订单行锁和订单唯一约束再防止同一订单并发重复。不同账号互不阻塞。
+检查额度时同时查询该账号所有 `processing`、`reconciling` 记录，以及最近 30 天内的 `succeeded`。若存在进行中退款，第二笔申请返回“已有退款处理中”；若未满 30 天，记录为 `rejected` 并返回最早可再次申请日期。账号级锁会串行化同一账号的并发订单退款；订单行锁和订单唯一约束再防止同一订单并发重复。不同账号互不阻塞。
 
 ### 退款状态机
 
 1. `pending`：已创建申请，尚未扣留积分。
-2. `processing`：在数据库短事务中获取账号锁、订单锁和余额锁，验证六个月期限与 30 天规则，按订单批次计算已用 Pack，扣留该订单剩余积分并写退款扣减流水。
+2. `processing`：在数据库短事务中获取账号锁、订单锁和余额锁，验证六个月期限、30 天规则、无进行中生成预留且订单无拒付，按订单批次计算已用 Pack，扣留该订单剩余积分并写退款扣减流水。设置 `processing_started_at` 和短期 `lease_expires_at`。
 3. 调用 Stripe Refund API 时使用数据库中确定性的 `stripe_idempotency_key`。网络调用不放在数据库事务内。
 4. Stripe 明确成功：短事务写入 `stripe_refund_id`、金额和 `succeeded_at`，订单置为 `refunded`。
-5. Stripe 明确失败：补偿事务写 `release_refund_failure`，把扣留积分恢复到原订单批次，退款置为 `failed`，订单保持 `paid`。
-6. Stripe 超时或结果未知：置为 `reconciling`，先按幂等键查询 Stripe 最终结果；在确认失败前不恢复积分，也不发起新的不同幂等键退款。
+5. Stripe 明确失败：补偿事务写 `release_refund_failure`，把扣留积分恢复到原订单批次，退款置为 `failed`，订单保持 `paid`，此时才释放账号 30 天额度占用。
+6. Stripe 超时或结果未知：置为 `reconciling`，先按幂等键查询 Stripe 最终结果；在确认失败前不恢复积分、不释放额度，也不发起新的不同幂等键退款。
 7. 资格不符：置为 `rejected`，不扣积分、不调用 Stripe、不占用 30 天额度。
+
+`processing` 不得无限卡住。后台恢复任务扫描过期 lease：先把记录置为 `reconciling`，再用原 Stripe 幂等键查询结果；查到成功则完成，查到明确失败则补偿并置 `failed`，仍无法确认则保持 `reconciling` 并告警人工处理。恢复任务不得创建新幂等键。
 
 退款金额为：
 
@@ -225,9 +263,28 @@ max(0, total_paid_cents - used_pack_count * single_pack_price_cents - actual_str
 
 其中 `single_pack_price_cents` 使用订单购买时适用的 single 套餐含税快照。实际手续费在进入 Stripe 退款调用前读取并固化。
 
+若实际手续费暂时读取不到，不使用估算值、不调用 Stripe 退款；记录进入 `reconciling`，使用同一订单和幂等键重试读取并告警。退款金额计算为 0 时仍扣回该订单剩余积分并把退款记录完成为 `succeeded`，但不调用 Stripe Refund API；该成功记录占用 30 天额度。
+
+有 `dispute_status = 'pending_manual'` 或其他未关闭拒付状态的订单不可申请退款，返回待人工处理。
+
 ### 拒付
 
 拒付事件仍按 Stripe Event ID 幂等处理。v1 只把订单 `dispute_status` 标记为 `pending_manual`，保存事件关联并进入人工处理队列；不自动扣积分、不创建退款记录。后续自动化拒付处理不属于本次范围。
+
+## 全局加锁顺序
+
+所有会改变积分、订单或退款状态的数据库函数遵守同一顺序：
+
+1. Stripe Event 行锁（仅 webhook；用于取得并保护事件幂等状态）。
+2. 账号 advisory transaction lock，按 `user_id` 派生。
+3. `packcreditaccount` 账号行。
+4. `generationusage` 活跃预留，按 `pack_id` 排序。
+5. `purchase` 订单行，按主键排序。
+6. `paymentrefund` 行。
+7. `packcreditlot` 行，按 `created_at, id` 排序。
+8. 追加 ledger/allocation，最后更新事件完成状态。
+
+任何路径不得逆序获取两个已有锁。多账号运维操作必须先按 `user_id` 排序。Stripe 网络调用不持有以上数据库锁。
 
 ## 流程与事务边界
 
@@ -247,6 +304,8 @@ max(0, total_paid_cents - used_pack_count * single_pack_price_cents - actual_str
 
 退款采用数据库短事务、Stripe 幂等调用、数据库完成或补偿事务三段式。禁止持有数据库行锁等待 Stripe 网络响应。任何不确定结果进入 `reconciling`，不得假定失败后直接发起另一笔退款。
 
+账号存在任一 `generationusage.status = 'reserved'` 时暂不受理退款，提示生成任务完成或释放后重试。这样退款不会和生成预留争夺同一批次。生成失败释放必须按 allocation 返回原批次；若目标批次所属订单已退款，函数拒绝恢复并进入一致性告警，绝不把积分还回已退款批次。正常流程中退款前置检查应使该防御分支不可达。
+
 ## 测试与验证
 
 ### GitHub Actions PostgreSQL 16
@@ -264,8 +323,12 @@ max(0, total_paid_cents - used_pack_count * single_pack_price_cents - actual_str
 - 免费、管理员和 Stripe 批次按发放时间消费，但只有 Stripe 订单参与退款。
 - 同一订单并发退款只进入一次处理。
 - 同一账号不同订单并发退款，在账号级锁下最多一个成功。
+- 第一笔退款已进入 `processing` 并阻塞在 Stripe 调用时，第二笔退款被“已有退款处理中”拒绝；第一笔明确失败后第二笔才可申请。
 - Stripe 明确失败时积分补偿、订单保持 `paid`，失败不占用 30 天额度。
 - 超时进入 `reconciling`，不会重复发起不同幂等键的退款。
+- 有活跃生成预留时退款被拒绝；释放严格回到原批次，已退款批次不可恢复。
+- 历史回溯后逐账号满足“账号余额 = 批次剩余之和 + 进行中预留”。
+- 有未关闭拒付的订单不可退款；退款金额为 0 时不调用 Stripe；手续费不可得时不使用估算值。
 
 外部 Stripe 调用全部使用测试替身；测试不需要密钥，不触发真实付款或退款。
 
@@ -274,6 +337,144 @@ max(0, total_paid_cents - used_pack_count * single_pack_price_cents - actual_str
 当前开发机没有 Supabase CLI、Docker、`psql` 或本地 PostgreSQL 16。实现阶段不在此机器连接生产来补足环境。Supabase CLI dry-run 应在 GitHub Actions 或经明确批准的隔离环境中执行，并保存命令、CLI 版本、目标环境证明和输出作为提交验证记录。
 
 在 dry-run 成功前，不宣称 migration 可部署；在 PostgreSQL 16 并发测试成功前，不宣称幂等或退款并发保护完成。
+
+## 附录 A 生产库只读比对脚本
+
+以下脚本可直接粘贴到 Supabase SQL 编辑器运行。它只返回 schema 元数据，不返回业务数据：
+
+```sql
+with expected_tables(table_name) as (
+    values
+        ('resume'), ('applicantprofile'), ('referee'), ('jobapplication'),
+        ('jobsource'), ('generateddocument'), ('generationusage'),
+        ('packcreditaccount'), ('packcreditledger'), ('globalmonthlyusage'),
+        ('creditledger'), ('referral'), ('purchase')
+), report as (
+    select
+        'table'::text as section,
+        e.table_name::text as object_name,
+        jsonb_build_object(
+            'exists', c.oid is not null,
+            'owner', pg_get_userbyid(c.relowner),
+            'rls_enabled', c.relrowsecurity,
+            'kind', c.relkind
+        ) as details
+    from expected_tables e
+    left join pg_class c
+        on c.relname = e.table_name
+       and c.relnamespace = 'public'::regnamespace
+
+    union all
+
+    select
+        'column',
+        cols.table_name || '.' || cols.column_name,
+        jsonb_build_object(
+            'type', cols.data_type,
+            'udt', cols.udt_name,
+            'nullable', cols.is_nullable,
+            'default', cols.column_default,
+            'identity', cols.is_identity
+        )
+    from information_schema.columns cols
+    join expected_tables e using (table_name)
+    where cols.table_schema = 'public'
+
+    union all
+
+    select
+        'constraint',
+        con.conrelid::regclass::text || '.' || con.conname,
+        jsonb_build_object('type', con.contype, 'definition', pg_get_constraintdef(con.oid))
+    from pg_constraint con
+    where con.connamespace = 'public'::regnamespace
+      and con.conrelid::regclass::text = any (
+          select 'public.' || table_name from expected_tables
+      )
+
+    union all
+
+    select
+        'index',
+        schemaname || '.' || indexname,
+        jsonb_build_object('table', tablename, 'definition', indexdef)
+    from pg_indexes
+    where schemaname = 'public'
+      and tablename in (select table_name from expected_tables)
+
+    union all
+
+    select
+        'policy',
+        schemaname || '.' || tablename || '.' || policyname,
+        jsonb_build_object(
+            'roles', roles, 'command', cmd, 'using', qual, 'check', with_check
+        )
+    from pg_policies
+    where schemaname = 'public'
+      and tablename in (select table_name from expected_tables)
+
+    union all
+
+    select
+        'grant',
+        table_schema || '.' || table_name || ':' || grantee,
+        jsonb_build_object('privilege', privilege_type)
+    from information_schema.role_table_grants
+    where table_schema = 'public'
+      and table_name in (select table_name from expected_tables)
+
+    union all
+
+    select
+        'function',
+        n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+        jsonb_build_object(
+            'owner', pg_get_userbyid(p.proowner),
+            'security_definer', p.prosecdef,
+            'config', p.proconfig,
+            'acl', p.proacl
+        )
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+
+    union all
+
+    select
+        'migration',
+        version::text,
+        jsonb_build_object('name', name)
+    from supabase_migrations.schema_migrations
+)
+select section, object_name, details
+from report
+order by section, object_name;
+```
+
+运行前确认 SQL 编辑器顶部显示的是生产项目名称；脚本中不得加入 `INSERT`、`UPDATE`、`DELETE`、`CREATE`、`ALTER`、`DROP` 或 `DO`。运行后下载 CSV，并人工检查 `resume.experience_exclusions_json`、`jobapplication.resume_snapshot_json`、所有表的 RLS、约束、索引、权限和 migration 版本。
+
+## 附录 B 两列幂等 migration SQL
+
+```sql
+alter table public.resume
+    add column if not exists experience_exclusions_json text not null default '[]';
+
+alter table public.jobapplication
+    add column if not exists resume_snapshot_json text not null default '{}';
+```
+
+## 附录 C 非工程人员执行步骤
+
+1. 登录 Supabase，确认打开的是正确项目；不要复制或发送数据库密码、API key 或连接字符串。
+2. 打开 SQL Editor，新建空白查询。
+3. 完整复制附录 A，只运行一次；它只读取结构信息，不改数据。
+4. 点击下载结果为 CSV，文件名标注执行日期；不要截图或导出业务表。
+5. 把 CSV 放到约定的私密位置，通知工程人员比对；不要在生产库手工补列。
+6. 工程人员在 GitHub Actions PostgreSQL 16 验证附录 B、全部 migration 和并发测试，并完成 Supabase CLI dry-run。
+7. 验证通过后，按发布流程部署附录 B 对应 migration；不要直接在 SQL Editor 手工运行附录 B，除非正式发布流程明确要求且已有备份和回滚安排。
+8. migration 部署后，再运行附录 A 并下载第二份 CSV，用于确认两列和 migration 版本已出现。
+9. 等工程人员确认结构一致后，下一次独立发布才移除应用启动时 DDL；若启动只读校验失败，停止发布，不让应用自动修库。
 
 ## 提交边界
 
