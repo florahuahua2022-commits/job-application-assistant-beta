@@ -104,6 +104,9 @@ class StripeGateway:
     def retrieve_checkout_session(self, session_id: str):
         return self.client.v1.checkout.sessions.retrieve(session_id)
 
+    def retrieve_event(self, event_id: str):
+        return self.client.v1.events.retrieve(event_id)
+
 
 def get_stripe_gateway() -> StripeGateway:
     validate_stripe_settings()

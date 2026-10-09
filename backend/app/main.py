@@ -36,6 +36,7 @@ from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
+from .payment_operations import ReplayRequest, failed_events, reconciliation, replay
 from .payments import MAX_WEBHOOK_BYTES, CheckoutSessionRequest, CheckoutSessionResponse, DeterministicPaymentConflict, StripeGateway, construct_webhook_event, create_checkout_session, get_stripe_gateway, handle_payment_webhook, record_webhook_conflict
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
@@ -140,6 +141,28 @@ async def stripe_webhook(request: Request, session: Session = Depends(get_sessio
         operations.warning("stripe_webhook_conflict", extra={"reason_code": error.reason_code})
         return {"received": True, "conflict": error.reason_code}
     return {"received": True}
+
+
+@app.get("/admin/payments/failed-events")
+def admin_payment_failures(session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+    require_admin_user(user_id)
+    return failed_events(session)
+
+
+@app.get("/admin/payments/reconciliation")
+def admin_payment_reconciliation(session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+    require_admin_user(user_id)
+    return reconciliation(session)
+
+
+@app.post("/admin/payments/replay")
+def admin_payment_replay(
+    payload: ReplayRequest,
+    session: Session = Depends(get_session),
+    user_id: UUID | None = Depends(get_current_user),
+    gateway: StripeGateway = Depends(get_stripe_gateway),
+):
+    return replay(session, gateway, require_admin_user(user_id), payload)
 
 
 def select_for_user(model, user_id: UUID | None):
