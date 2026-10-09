@@ -34,7 +34,9 @@
 - `single_pack_price_cents`；
 - `catalog_version`。
 
-首版目录的整数分快照为：`single = 1541 + 154 GST = 1695`、`starter = 9995 + 1000 GST = 10995`、`job_search = 18091 + 1809 GST = 19900`。所有订单的 `single_pack_price_cents` 均保存购买当时 `single` 套餐的含税标价 `1695`，而不是订单总价除以积分数。
+首版目录标价（未另加 GST）为：`single = 1695`、`starter = 10995`、`job_search = 19900`。`STRIPE_GST_ENABLED` 默认关闭；关闭时 `gst_cents=0`、`total_cents=subtotal_cents`。打开时只对整单计算一次 `gst_cents = subtotal_cents * 10%`，使用十进制 `ROUND_HALF_UP` 四舍五入到整数分，再令 `total_cents=subtotal_cents+gst_cents`，不得逐积分或逐行舍入。按当前标价，打开后总价分别为 `1865`、`12095`、`21890`。
+
+订单保存 `gst_enabled` 快照。所有订单的 `single_pack_price_cents` 均保存购买时、按同一开关状态计算的 `single` 含税总价：关闭为 `1695`，打开为 `1865`；它不是订单总价除以积分数。
 
 Checkout 使用服务端金额创建 `line_items.price_data`，不接收客户端 Stripe Price ID。订单保存上述快照，后续目录改价不影响历史订单。金额全部使用整数分；Webhook 必须核对 Stripe 的 `amount_total`、`currency` 和服务端订单快照一致。
 
@@ -67,12 +69,12 @@ Checkout 使用服务端金额创建 `line_items.price_data`，不接收客户�
 2. 用 `package_code` 查询服务端目录；未知套餐和 `custom` 返回 `400`。
 3. 对每个用户执行滑动窗口限频：10 分钟最多创建 5 个 Checkout Session。超过限制返回 `429` 和 `Retry-After`，不调用 Stripe。重复同一幂等键不重复计数。
 4. success/cancel URL 使用服务端配置的固定前端来源和固定路径，不接受任意回跳 URL。
-5. 调用 Stripe Checkout Session Create，固定 `mode=payment`，使用服务端 `price_data`，预填登录声明中的 `customer_email`，并把 `expires_at` 固定为创建后 30 分钟。Stripe metadata 写入 `user_id`、`package_code`、`credits`、`catalog_version`；`client_reference_id` 同样使用 `user_id`，但 Webhook 不仅凭 metadata 授权。
+5. 调用 Stripe Checkout Session Create，固定 `mode=payment`、`payment_method_types=['card']`，使用服务端 `price_data`，预填登录声明中的 `customer_email`，并把 `expires_at` 固定为创建后 30 分钟。Stripe metadata 写入 `user_id`、`package_code`、`credits`、`catalog_version`；`client_reference_id` 同样使用 `user_id`，但 Webhook 不仅凭 metadata 授权。
 6. Stripe 请求的幂等键为服务端命名空间、登录用户和请求 `Idempotency-Key` 的哈希；日志只记录哈希前缀，不记录原值。数据库保存该哈希及对应 `package_code`：同一用户和幂等键重复同一套餐返回原 Session，搭配不同套餐返回 `409`，不得调用 Stripe。
 7. Stripe 返回后，以 Session ID 创建或核对 `purchase` 的 `pending` 订单快照，并保存 `expires_at`、`livemode` 和幂等键哈希。相同 Session 的事实不一致时返回冲突并报警。
 8. 返回 Session ID 和 Stripe 托管的 Checkout URL。Secret、PaymentIntent client secret 和完整 Stripe 对象不得返回。
 
-Stripe 创建成功但本地订单写入失败时返回 `500`。相同幂等键重试会从 Stripe 获得同一个 Session，再次尝试本地落单，不会创建第二笔付款会话。
+Stripe 创建调用本身失败时必须释放刚占用的限频名额，但保留幂等键事实，使同一请求可安全重试。Stripe 创建成功但本地订单写入失败时不释放名额并返回 `500`；相同幂等键重试会从 Stripe 获得同一个 Session，再次尝试本地落单，不会创建第二笔付款会话或重复计数。
 
 ## 5. Webhook 接口
 
@@ -181,6 +183,8 @@ Stripe 创建成功但本地订单写入失败时返回 `500`。相同幂等键�
 
 `POST /admin/payments/replay` 只允许管理员，请求体必须且只能提供一个 `stripe_event_id` 或 `checkout_session_id`。服务端用固定 API 版本从 Stripe 重新读取当前 Event/Session，重新执行签名后等价的事实校验，再调用 2a 的 `process_stripe_purchase_event` 包装函数；禁止直接插入积分流水或修改余额。
 
+按 Event ID 补发依赖 Stripe 仍能返回该 Event，受 Stripe Event API 保留期限制；取不到时必须转为人工核对，不能伪造原事件。按 Session ID 补发使用本地确定性事件身份 `admin_replay:<checkout_session_id>`，事件类型固定为 `admin.replay`，并把管理员和目标写入独立审计记录。该身份与真实 `evt_...` 分开，重复补发仍由 Session 级积分幂等约束保证只发一次。
+
 补发依赖 2a 的 Checkout Session 级积分幂等键：已成功发放返回现有结果，未成功且事实一致才发放，事实冲突继续进入确定性失败和告警。每次补发保存管理员 ID、目标、前后状态、结果和时间的审计记录。补发只处理支付成功事件，不处理退款或拒付。
 
 ### 9.3 人工处理步骤
@@ -198,10 +202,11 @@ Stripe 创建成功但本地订单写入失败时返回 `500`。相同幂等键�
 - `STRIPE_SECRET_KEY`；
 - `STRIPE_WEBHOOK_SECRET`；
 - `STRIPE_MODE=test|live`，默认和非生产环境必须为 `test`；
+- `STRIPE_GST_ENABLED=false`，默认关闭；改变时只影响新订单快照；
 - `STRIPE_API_VERSION=2026-09-30.endive`，代码、Stripe Workbench Webhook Endpoint 和 Stripe CLI 联调必须使用同一版本；
 - 固定 Checkout 成功/取消路径可由现有 `FRONTEND_ORIGIN` 拼接。
 
-生产启动必须拒绝测试/生产模式与密钥前缀不一致的组合。前端永远不能读取 secret。数据库仍只允许已确认的生产后端角色执行 2a 支付函数。API 版本固定为 Stripe 官方在 2026-10-09 标示的当前版本 `2026-09-30.endive`；升级必须单独测试并改配置、SDK 和 Workbench Endpoint，不跟随账户默认版本漂移。
+生产启动必须拒绝测试/生产模式与密钥前缀不一致的组合。前端永远不能读取 secret。Stripe 密钥优先使用受限密钥，最小权限为 Checkout Session 创建/读取，以及 Event、PaymentIntent、Charge、Refund、Dispute 的只读访问；本阶段不需要 Refund 写权限。若 Stripe 控制台的权限名称变化，按这些 API 动作逐项映射并在测试模式验证，不授予全局写权限。数据库仍只允许已确认的生产后端角色执行 2a 支付函数。API 版本固定为 Stripe 官方在 2026-10-09 标示的当前版本 `2026-09-30.endive`；升级必须单独测试并改配置、SDK 和 Workbench Endpoint，不跟随账户默认版本漂移。
 
 ## 11. 联调与测试设计
 
@@ -210,12 +215,13 @@ Stripe 创建成功但本地订单写入失败时返回 `500`。相同幂等键�
 ### Checkout Session
 
 - 未登录、非法套餐、`custom`、额外的 `user_id`/金额/Price ID 均被拒绝；
-- 服务端向模拟 Stripe 客户端传入正确的 subtotal/GST/total 整数金额、AUD、积分 metadata、固定回跳地址、30 分钟过期时间和固定 API 版本；
+- GST 默认关闭时三个套餐分别为 `1695/10995/19900`、GST 为零且 total 等于 subtotal；打开时按整单半入法得到 `1865/12095/21890`，并验证 `single_pack_price_cents` 分别为 `1695/1865`；
+- 服务端向模拟 Stripe 客户端传入正确的 subtotal/GST/total 整数金额、AUD、积分 metadata、固定回跳地址、`payment_method_types=['card']`、30 分钟过期时间和固定 API 版本；
 - `user_id` 和 `customer_email` 来自模拟登录会话；无 email 时不预填；
 - 相同 `Idempotency-Key` 重试得到同一 Session，Stripe 成功但本地写入失败可安全重试；
 - 同一幂等键改用不同套餐返回 `409` 且不调用 Stripe；
 - 第 6 个不同 Session 创建请求在 10 分钟窗口内返回 `429`，重复幂等请求不占新额度；
-- 模拟 Stripe 超时/错误不会生成已支付订单或积分。
+- 模拟 Stripe 超时/错误不会生成已支付订单或积分，并释放本次限频名额；Stripe 已成功而本地落单失败时不释放。
 
 ### Webhook
 
@@ -235,7 +241,7 @@ Stripe 创建成功但本地订单写入失败时返回 `500`。相同幂等键�
 
 - 非管理员不能读取失败列表、对账或调用补发；
 - 对账端点零数据库写入，并能识别缺流水、缺成功事件、模式错配、过期 pending、退款及拒付标记；
-- 按 Event ID 和 Session ID 补发都重新取 Stripe 测试对象并调用 2a 包装函数；重复补发不重复发积分；
+- 按 Event ID 和 Session ID 补发都重新取 Stripe 测试对象并调用 2a 包装函数；Session 补发写 `admin_replay:<session_id>`/`admin.replay`，Event 已超出 Stripe 保留期时明确失败；重复补发不重复发积分；
 - 退款/拒付目标不能通过补发入口发积分；
 - 补发保存管理员审计，确定性冲突仍不发积分。
 
