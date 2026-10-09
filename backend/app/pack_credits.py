@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
+import json
 from typing import Literal
 from uuid import UUID
 
@@ -11,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from .models import GenerationUsage, GlobalMonthlyUsage, PackCreditAccount, PackCreditLedger
+from .models import GenerationUsage, GlobalMonthlyUsage, PackCreditAccount, PackCreditLedger, Purchase, StripeEvent
 
 PACK_CATALOG = {
     "single": {"credits": 1, "amount_cents": 1695, "currency": "AUD"},
@@ -65,6 +67,11 @@ def _ensure_account(session: Session, user_id: UUID) -> None:
 
 
 def pack_credit_balance(session: Session, user_id: UUID) -> int:
+    if session.bind.dialect.name == "postgresql":
+        balance = session.execute(text(
+            "select public.get_available_pack_credits(:user_id)"
+        ), {"user_id": user_id}).scalar_one_or_none()
+        return 0 if balance is None else int(balance)
     _ensure_account(session, user_id)
     session.flush()
     return session.get(PackCreditAccount, user_id).balance
@@ -212,27 +219,137 @@ def grant_manual_topup(
             "amount": package["amount_cents"], "key": idempotency_key,
             "admin_id": admin_user_id, "note": note,
         }).scalar_one())
+    return _grant_pack_credits(
+        session, user_id, "manual", package_code, package["credits"], package["amount_cents"],
+        idempotency_key, admin_user_id=admin_user_id, note=note,
+    )
+
+
+def _grant_pack_credits(
+    session: Session, user_id: UUID, source: str, package_code: str, credits: int,
+    amount_cents: int, idempotency_key: str, purchase_id: int | None = None,
+    admin_user_id: UUID | None = None, note: str | None = None,
+) -> int:
+    if source not in {"manual", "stripe"}:
+        raise ValueError("Unknown credit source.")
+    if source == "manual" and (admin_user_id is None or purchase_id is not None):
+        raise ValueError("Manual grants require an administrator and no purchase.")
+    if source == "stripe" and (purchase_id is None or admin_user_id is not None):
+        raise ValueError("Stripe grants require a purchase and no administrator.")
     _ensure_account(session, user_id)
     existing = session.exec(select(PackCreditLedger).where(
         PackCreditLedger.idempotency_key == idempotency_key,
     )).first()
+    entry_type = "grant_manual_topup" if source == "manual" else "grant_stripe_purchase"
     if existing:
         if (
-            existing.user_id != user_id or existing.entry_type != "grant_manual_topup"
-            or existing.package_code != package_code or existing.credits_delta != package["credits"]
-            or existing.amount_cents != package["amount_cents"]
+            existing.user_id != user_id or existing.entry_type != entry_type
+            or existing.package_code != package_code or existing.credits_delta != credits
+            or existing.amount_cents != amount_cents or existing.purchase_id != purchase_id
         ):
             raise ValueError("Idempotency key is already used for a different top-up.")
         return session.get(PackCreditAccount, user_id).balance
     inserted = session.execute(sqlite_insert(PackCreditLedger).values(
-        user_id=user_id, entry_type="grant_manual_topup", credits_delta=package["credits"],
-        package_code=package_code, amount_cents=package["amount_cents"], currency=package["currency"],
+        user_id=user_id, entry_type=entry_type, credits_delta=credits,
+        package_code=package_code, amount_cents=amount_cents, currency="AUD",
         note=note, idempotency_key=idempotency_key, created_by_user_id=admin_user_id,
+        purchase_id=purchase_id,
     ).on_conflict_do_nothing()).rowcount
     if not inserted:
         raise ValueError("Idempotency key is already used for a different top-up.")
     session.execute(update(PackCreditAccount).where(PackCreditAccount.user_id == user_id).values(
-        balance=PackCreditAccount.balance + package["credits"], updated_at=datetime.now(timezone.utc),
+        balance=PackCreditAccount.balance + credits, updated_at=datetime.now(timezone.utc),
     ))
     session.flush()
     return session.get(PackCreditAccount, user_id).balance
+
+
+def _event_fingerprint(facts: dict) -> str:
+    return sha256(json.dumps(facts, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def process_stripe_purchase_event(
+    session: Session, *, stripe_event_id: str, stripe_checkout_session_id: str,
+    stripe_payment_intent_id: str, user_id: UUID, package_code: str, credits: int,
+    subtotal_cents: int, gst_cents: int, total_paid_cents: int,
+    single_pack_price_cents: int, currency: str,
+) -> int:
+    facts = {
+        "stripe_checkout_session_id": stripe_checkout_session_id,
+        "stripe_payment_intent_id": stripe_payment_intent_id,
+        "user_id": str(user_id), "package_code": package_code, "credits": credits,
+        "subtotal_cents": subtotal_cents, "gst_cents": gst_cents,
+        "total_paid_cents": total_paid_cents,
+        "single_pack_price_cents": single_pack_price_cents, "currency": currency,
+    }
+    fingerprint = _event_fingerprint(facts)
+    try:
+        if session.bind.dialect.name == "postgresql":
+            balance = session.execute(text("""
+                select public.process_stripe_purchase_event(
+                    :event_id, :fingerprint, :session_id, :payment_intent_id, :user_id, :package_code,
+                    :credits, :subtotal, :gst, :total, :single_price, :currency
+                )
+            """), {"event_id": stripe_event_id, "fingerprint": fingerprint,
+                  "session_id": stripe_checkout_session_id,
+                  "payment_intent_id": stripe_payment_intent_id, "user_id": user_id,
+                  "package_code": package_code, "credits": credits, "subtotal": subtotal_cents,
+                  "gst": gst_cents, "total": total_paid_cents, "single_price": single_pack_price_cents,
+                  "currency": currency}).scalar_one()
+        else:
+            event = session.get(StripeEvent, stripe_event_id)
+            if event and event.facts_fingerprint != fingerprint:
+                raise ValueError("Stripe event facts do not match the original delivery.")
+            if event and event.status == "processed":
+                return session.get(PackCreditAccount, user_id).balance
+            if not event:
+                event = StripeEvent(
+                    stripe_event_id=stripe_event_id, event_type="checkout.session.completed",
+                    facts_fingerprint=fingerprint, status="processing", attempt_count=1,
+                )
+                session.add(event)
+            else:
+                event.status, event.attempt_count, event.last_error = "processing", event.attempt_count + 1, None
+            purchase = session.exec(select(Purchase).where(
+                Purchase.stripe_checkout_session_id == stripe_checkout_session_id
+            )).first()
+            if not purchase:
+                purchase = Purchase(
+                    user_id=user_id, stripe_checkout_session_id=stripe_checkout_session_id,
+                    stripe_payment_intent_id=stripe_payment_intent_id, status="pending",
+                    package_code=package_code, credits=credits, amount_cents=total_paid_cents,
+                    subtotal_cents=subtotal_cents, gst_cents=gst_cents,
+                    total_paid_cents=total_paid_cents, single_pack_price_cents=single_pack_price_cents,
+                    currency=currency,
+                )
+                session.add(purchase); session.flush()
+            balance = _grant_pack_credits(
+                session, user_id, "stripe", package_code, credits, total_paid_cents,
+                f"stripe-purchase:{stripe_checkout_session_id}", purchase_id=purchase.id,
+            )
+            now = datetime.now(timezone.utc)
+            purchase.status, purchase.paid_at, purchase.updated_at = "paid", now, now
+            event.purchase_id, event.status, event.processed_at, event.updated_at = purchase.id, "processed", now, now
+        session.commit()
+        return int(balance)
+    except Exception as error:
+        session.rollback()
+        if session.bind.dialect.name == "postgresql":
+            session.execute(text("select public.record_stripe_event_failure(:id, :fingerprint, :error)"), {
+                "id": stripe_event_id, "fingerprint": fingerprint, "error": str(error)[:1000],
+            })
+        else:
+            event = session.get(StripeEvent, stripe_event_id)
+            if event and event.facts_fingerprint != fingerprint:
+                raise
+            if not event:
+                event = StripeEvent(
+                    stripe_event_id=stripe_event_id, event_type="checkout.session.completed",
+                    facts_fingerprint=fingerprint, status="failed", attempt_count=1,
+                )
+                session.add(event)
+            else:
+                event.status, event.attempt_count = "failed", event.attempt_count + 1
+            event.last_error, event.updated_at = str(error)[:1000], datetime.now(timezone.utc)
+        session.commit()
+        raise

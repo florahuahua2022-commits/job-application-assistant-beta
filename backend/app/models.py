@@ -177,7 +177,44 @@ class PackCreditLedger(SQLModel, table=True):
     note: str | None = None
     idempotency_key: str = Field(unique=True, index=True)
     created_by_user_id: UUID | None = None
+    purchase_id: int | None = Field(default=None, foreign_key="purchase.id", index=True)
     created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class Purchase(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    stripe_checkout_session_id: str = Field(unique=True, index=True)
+    stripe_payment_intent_id: str | None = Field(default=None, unique=True)
+    stripe_charge_id: str | None = Field(default=None, unique=True)
+    stripe_balance_transaction_id: str | None = Field(default=None, unique=True)
+    status: str = "pending"
+    dispute_status: str = "none"
+    package_code: str
+    currency: str = "AUD"
+    credits: int
+    amount_cents: int
+    subtotal_cents: int
+    gst_cents: int = 0
+    total_paid_cents: int
+    single_pack_price_cents: int
+    actual_stripe_fee_cents: int | None = None
+    paid_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class StripeEvent(SQLModel, table=True):
+    stripe_event_id: str = Field(primary_key=True)
+    event_type: str
+    facts_fingerprint: str
+    purchase_id: int | None = Field(default=None, foreign_key="purchase.id", index=True)
+    status: str = "received"
+    attempt_count: int = 0
+    last_error: str | None = None
+    processed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class GlobalMonthlyUsage(SQLModel, table=True):

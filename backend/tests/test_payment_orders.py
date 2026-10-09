@@ -1,0 +1,151 @@
+import os
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from uuid import uuid4
+
+from sqlalchemy.pool import NullPool
+from sqlmodel import Session, SQLModel, create_engine, select
+
+from app import database
+from app.config import settings
+from app.models import PackCreditAccount, PackCreditLedger, Purchase, StripeEvent
+from app.pack_credits import _event_fingerprint, process_stripe_purchase_event
+
+
+class PaymentEventTransactionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory(dir=Path(__file__).parent)
+        self.engine = create_engine(
+            f"sqlite:///{Path(self.temp.name) / 'payments.db'}",
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool,
+        )
+        SQLModel.metadata.create_all(self.engine)
+
+    def tearDown(self):
+        self.engine.dispose()
+        self.temp.cleanup()
+
+    def test_online_create_all_excludes_migration_only_payment_tables(self):
+        with patch.object(settings, "deployment_mode", "online"):
+            names = {table.name for table in database._create_all_tables()}
+        self.assertTrue(database.MIGRATION_ONLY_TABLES.isdisjoint(names))
+
+    def test_failed_processing_rolls_back_records_failure_and_reraises_then_retries_once(self):
+        user_id = uuid4()
+        facts = dict(
+            stripe_event_id="evt_retry_once",
+            stripe_checkout_session_id="cs_retry_once",
+            stripe_payment_intent_id="pi_retry_once",
+            user_id=user_id,
+            package_code="single",
+            credits=1,
+            subtotal_cents=1695,
+            gst_cents=0,
+            total_paid_cents=1695,
+            single_pack_price_cents=1695,
+            currency="AUD",
+        )
+
+        with Session(self.engine) as session, patch(
+            "app.pack_credits._grant_pack_credits", side_effect=RuntimeError("transient database failure")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "transient database failure"):
+                process_stripe_purchase_event(session, **facts)
+
+        with Session(self.engine) as session:
+            event = session.get(StripeEvent, "evt_retry_once")
+            self.assertEqual((event.status, event.attempt_count), ("failed", 1))
+            self.assertIsNone(session.exec(select(Purchase)).first())
+            self.assertIsNone(session.get(PackCreditAccount, user_id))
+
+        with Session(self.engine) as session:
+            first = process_stripe_purchase_event(session, **facts)
+            repeated = process_stripe_purchase_event(session, **facts)
+
+        with Session(self.engine) as session:
+            event = session.get(StripeEvent, "evt_retry_once")
+            grants = session.exec(select(PackCreditLedger).where(
+                PackCreditLedger.entry_type == "grant_stripe_purchase"
+            )).all()
+            self.assertEqual((first, repeated), (3, 3))
+            self.assertEqual((event.status, event.attempt_count), ("processed", 2))
+            self.assertEqual(len(grants), 1)
+
+
+@unittest.skipUnless(os.getenv("PACK_CREDIT_TEST_DATABASE_URL"), "requires PostgreSQL 16 test service")
+class PostgreSQLPaymentOrderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import psycopg
+
+        cls.url = os.environ["PACK_CREDIT_TEST_DATABASE_URL"]
+        with psycopg.connect(cls.url) as connection:
+            if "test" not in connection.info.dbname.lower():
+                raise RuntimeError("PACK_CREDIT_TEST_DATABASE_URL must identify a test database")
+            connection.execute("drop schema if exists public cascade")
+            connection.execute("drop schema if exists auth cascade")
+            connection.execute("create schema public")
+            connection.execute("create schema auth")
+            connection.execute("create table auth.users (id uuid primary key)")
+            connection.execute("create function auth.uid() returns uuid language sql stable as 'select null::uuid'")
+            root = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
+            for name in (
+                "20260807_commercial_foundation.sql", "20261002_pack_credit_ledger.sql",
+                "20261003080058_pack_credit_engine.sql", "20261003085650_pack_credit_column_defaults.sql",
+                "20261003093309_custom_manual_pack_topup.sql", "2026100901_payment_orders_events.sql",
+            ):
+                connection.execute((root / name).read_text(encoding="utf-8"))
+
+    def test_concurrent_duplicate_event_grants_once(self):
+        import psycopg
+
+        user_id = uuid4()
+        facts = {
+            "stripe_checkout_session_id": "cs_pg_concurrent", "stripe_payment_intent_id": "pi_pg_concurrent",
+            "user_id": str(user_id), "package_code": "starter", "credits": 8,
+            "subtotal_cents": 9995, "gst_cents": 1000, "total_paid_cents": 10995,
+            "single_pack_price_cents": 1374, "currency": "AUD",
+        }
+        fingerprint = _event_fingerprint(facts)
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+
+        def deliver():
+            with psycopg.connect(self.url) as connection:
+                return connection.execute("""
+                    select public.process_stripe_purchase_event(
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                """, ("evt_pg_concurrent", fingerprint, "cs_pg_concurrent", "pi_pg_concurrent",
+                      user_id, "starter", 8, 9995, 1000, 10995, 1374, "AUD")).fetchone()[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            balances = list(pool.map(lambda _: deliver(), range(2)))
+        with psycopg.connect(self.url) as connection:
+            grants = connection.execute("select count(*) from public.packcreditledger where entry_type='grant_stripe_purchase'").fetchone()[0]
+            attempts = connection.execute("select status, attempt_count from public.stripeevent where stripe_event_id='evt_pg_concurrent'").fetchone()
+        self.assertEqual(balances, [10, 10])
+        self.assertEqual(grants, 1)
+        self.assertEqual(attempts, ("processed", 1))
+
+    def test_frontend_roles_cannot_read_payment_tables_or_execute_grants(self):
+        import psycopg
+
+        with psycopg.connect(self.url) as connection:
+            table_acl = connection.execute(
+                "select has_table_privilege('authenticated', 'public.purchase', 'select')"
+            ).fetchone()[0]
+            function_acl = connection.execute("""
+                select has_function_privilege('authenticated',
+                    'public.grant_manual_pack_topup(uuid,text,integer,integer,text,uuid,text)', 'execute')
+            """).fetchone()[0]
+        self.assertFalse(table_acl)
+        self.assertFalse(function_acl)
+
+
+if __name__ == "__main__":
+    unittest.main()

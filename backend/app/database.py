@@ -15,9 +15,19 @@ if database_url.startswith("sqlite:///"):
 connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
 engine = create_engine(database_url, connect_args=connect_args)
 
+MIGRATION_ONLY_TABLES = {
+    "purchase", "stripeevent", "packcreditlot", "packcreditallocation", "paymentrefund",
+}
+
+
+def _create_all_tables():
+    if settings.deployment_mode != "online":
+        return None
+    return [table for table in SQLModel.metadata.sorted_tables if table.name not in MIGRATION_ONLY_TABLES]
+
 
 def create_db_and_tables() -> None:
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.create_all(engine, tables=_create_all_tables())
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
     if engine.dialect.name == "postgresql":
