@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     supabase_jwt_audience: str = "authenticated"
     supabase_service_role_key: str | None = None
     admin_user_ids: str = ""
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    stripe_mode: str = "test"
+    stripe_gst_enabled: bool = False
     monthly_pack_limit_global: int = 500
     allow_public_signup: bool = False
     enable_tailored_resume: bool = True

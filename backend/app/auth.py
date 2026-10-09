@@ -1,4 +1,5 @@
 from functools import lru_cache
+from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import Header, HTTPException
@@ -16,9 +17,13 @@ def _jwks_client():
     return PyJWKClient(url, cache_jwk_set=True, lifespan=600)
 
 
-def get_current_user(authorization: str | None = Header(default=None)) -> UUID | None:
-    if settings.deployment_mode.strip().lower() != "online":
-        return None
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    id: UUID
+    email: str | None = None
+
+
+def _verified_claims(authorization: str | None) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Sign in is required.")
     token = authorization.split(" ", 1)[1].strip()
@@ -38,7 +43,8 @@ def get_current_user(authorization: str | None = Header(default=None)) -> UUID |
         )
         if claims.get("role") != "authenticated":
             raise HTTPException(403, "An authenticated user account is required.")
-        return UUID(claims["sub"])
+        UUID(claims["sub"])
+        return claims
     except HTTPException:
         raise
     except (KeyError, ValueError) as error:
@@ -47,6 +53,18 @@ def get_current_user(authorization: str | None = Header(default=None)) -> UUID |
         # PyJWT is loaded only in online mode so the current local installation
         # remains usable before cloud dependencies are installed.
         raise HTTPException(401, "Your session is invalid or has expired. Sign in again.") from error
+
+
+def get_current_user(authorization: str | None = Header(default=None)) -> UUID | None:
+    if settings.deployment_mode.strip().lower() != "online":
+        return None
+    return UUID(_verified_claims(authorization)["sub"])
+
+
+def get_authenticated_user(authorization: str | None = Header(default=None)) -> AuthenticatedUser:
+    claims = _verified_claims(authorization)
+    email = claims.get("email")
+    return AuthenticatedUser(id=UUID(claims["sub"]), email=email if isinstance(email, str) else None)
 
 
 def require_admin_user(user_id: UUID | None) -> UUID:

@@ -117,7 +117,7 @@ class OnlineSecurityTests(unittest.TestCase):
             "job_search": {"credits": 18, "amount_cents": 19900, "currency": "AUD"},
         })
         requirements = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(encoding="utf-8").lower()
-        self.assertNotIn("stripe", requirements)
+        self.assertIn("stripe==16.0.0", requirements)
 
     def test_pack_credit_migration_has_constraints_rls_and_historical_usage_mapping(self):
         migration = (
