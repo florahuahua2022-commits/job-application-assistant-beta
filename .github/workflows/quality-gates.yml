@@ -39,7 +39,7 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.100.1
       - name: Install backend dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r backend/requirements.txt
       - name: Reproduce Supabase default grants
