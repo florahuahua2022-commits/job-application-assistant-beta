@@ -217,6 +217,48 @@ class StripeEvent(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class PackCreditLot(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    source_ledger_id: int = Field(foreign_key="packcreditledger.id", unique=True)
+    purchase_id: int | None = Field(default=None, foreign_key="purchase.id", index=True)
+    source_type: str
+    granted_credits: int
+    remaining_credits: int
+    refundable: bool = False
+    refunded: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class PackCreditAllocation(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    lot_id: int = Field(foreign_key="packcreditlot.id", index=True)
+    user_id: UUID = Field(index=True)
+    pack_id: UUID = Field(index=True)
+    credits: int
+    status: str
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class PaymentRefund(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    purchase_id: int = Field(foreign_key="purchase.id", unique=True)
+    status: str
+    currency: str = "AUD"
+    requested_amount_cents: int
+    refunded_amount_cents: int | None = None
+    actual_stripe_fee_cents: int | None = None
+    stripe_refund_id: str | None = Field(default=None, unique=True)
+    stripe_idempotency_key: str = Field(unique=True)
+    processing_lease_expires_at: datetime | None = Field(default=None, index=True)
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+
 class GlobalMonthlyUsage(SQLModel, table=True):
     month_start: date = Field(primary_key=True)
     reserved_count: int = 0
