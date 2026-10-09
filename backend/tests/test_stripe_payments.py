@@ -264,6 +264,63 @@ class CheckoutSessionTests(unittest.TestCase):
         self.assertEqual((recorded.status, recorded.failure_reason_code), ("failed", "livemode_mismatch"))
         self.assertEqual(order.status, "pending")
 
+    def _post_signed_event(self, event):
+        payload = json.dumps(event, separators=(",", ":")).encode()
+        timestamp, secret = int(time.time()), "whsec_test_fixture"
+        signature = hmac.new(secret.encode(), f"{timestamp}.".encode() + payload, hashlib.sha256).hexdigest()
+        with patch.object(settings, "stripe_webhook_secret", secret):
+            return self.client.post(
+                "/payments/stripe/webhook", content=payload,
+                headers={"Stripe-Signature": f"t={timestamp},v1={signature}"},
+            )
+
+    def test_async_failure_only_downgrades_pending_order(self):
+        with Session(self.engine) as session:
+            session.add_all([
+                Purchase(
+                    user_id=self.user.id, stripe_checkout_session_id="cs_pending", status="pending",
+                    package_code="single", currency="AUD", credits=1, amount_cents=1695,
+                    subtotal_cents=1695, gst_cents=0, total_paid_cents=1695, single_pack_price_cents=1695,
+                ),
+                Purchase(
+                    user_id=self.user.id, stripe_checkout_session_id="cs_paid_terminal", status="paid",
+                    package_code="single", currency="AUD", credits=1, amount_cents=1695,
+                    subtotal_cents=1695, gst_cents=0, total_paid_cents=1695, single_pack_price_cents=1695,
+                ),
+            ])
+            session.commit()
+        for suffix in ("pending", "paid_terminal"):
+            response = self._post_signed_event({
+                "id": f"evt_failed_{suffix}", "type": "checkout.session.async_payment_failed", "livemode": False,
+                "data": {"object": {"id": f"cs_{suffix}", "object": "checkout.session"}},
+            })
+            self.assertEqual(response.status_code, 200)
+        with Session(self.engine) as session:
+            states = {row.stripe_checkout_session_id: row.status for row in session.exec(select(Purchase)).all()}
+        self.assertEqual(states["cs_pending"], "failed")
+        self.assertEqual(states["cs_paid_terminal"], "paid")
+
+    def test_refund_is_observed_pending_and_does_not_change_paid_state(self):
+        with Session(self.engine) as session:
+            session.add(Purchase(
+                user_id=self.user.id, stripe_checkout_session_id="cs_refund", stripe_payment_intent_id="pi_refund",
+                stripe_charge_id="ch_refund", status="paid", package_code="single", currency="AUD",
+                credits=1, amount_cents=1695, subtotal_cents=1695, gst_cents=0,
+                total_paid_cents=1695, single_pack_price_cents=1695,
+            ))
+            session.commit()
+        response = self._post_signed_event({
+            "id": "evt_refund", "type": "charge.refunded", "livemode": False,
+            "data": {"object": {"id": "ch_refund", "object": "charge", "payment_intent": "pi_refund"}},
+        })
+        self.assertEqual(response.status_code, 200)
+        with Session(self.engine) as session:
+            event = session.get(StripeEvent, "evt_refund")
+            order = session.exec(select(Purchase).where(Purchase.stripe_checkout_session_id == "cs_refund")).one()
+        self.assertEqual(event.status, "observed_pending")
+        self.assertIsNotNone(order.refund_detected_at)
+        self.assertEqual(order.status, "paid")
+
     def test_stripe_settings_require_webhook_secret_when_key_is_configured(self):
         from app.payments import validate_stripe_settings
 

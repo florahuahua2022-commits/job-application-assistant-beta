@@ -11,7 +11,7 @@ from sqlmodel import Session, func, select
 
 from .auth import AuthenticatedUser
 from .config import settings
-from .models import PaymentCheckoutRate, Purchase
+from .models import PaymentCheckoutRate, Purchase, StripeEvent
 from .pack_credits import process_stripe_purchase_event, record_stripe_event_failure
 
 
@@ -227,6 +227,19 @@ def construct_webhook_event(payload: bytes, signature: str, secret: str):
 
 def handle_payment_webhook(session: Session, event: dict) -> None:
     event_type = event.get("type")
+    observed_types = {
+        "refund.created", "refund.updated", "charge.refunded",
+        "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed",
+    }
+    business_types = {
+        "checkout.session.async_payment_failed", "checkout.session.expired",
+    }
+    if event_type in observed_types | business_types or (
+        event_type == "checkout.session.completed"
+        and event.get("data", {}).get("object", {}).get("payment_status") != "paid"
+    ):
+        record_payment_observation(session, event)
+        return
     if event_type not in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
         return
     obj = event["data"]["object"]
@@ -253,6 +266,45 @@ def handle_payment_webhook(session: Session, event: dict) -> None:
         total_paid_cents=order.total_paid_cents,
         single_pack_price_cents=order.single_pack_price_cents, currency=order.currency,
     )
+
+
+def record_payment_observation(session: Session, event: dict) -> None:
+    event_type = event["type"]
+    obj = event["data"]["object"]
+    session_id = obj.get("id") if event_type.startswith("checkout.session.") else None
+    order = session.exec(select(Purchase).where(Purchase.stripe_checkout_session_id == session_id)).first() if session_id else None
+    if not order and obj.get("payment_intent"):
+        order = session.exec(select(Purchase).where(Purchase.stripe_payment_intent_id == obj["payment_intent"])).first()
+    if not order and obj.get("charge"):
+        order = session.exec(select(Purchase).where(Purchase.stripe_charge_id == obj["charge"])).first()
+
+    observed_pending = event_type.startswith("refund.") or event_type.startswith("charge.")
+    status = "observed_pending" if observed_pending else "processed"
+    fingerprint = sha256(json.dumps({"type": event_type, "object_id": obj.get("id")}, sort_keys=True).encode()).hexdigest()
+    recorded = session.get(StripeEvent, event["id"])
+    if recorded:
+        if recorded.facts_fingerprint != fingerprint:
+            raise DeterministicPaymentConflict("event_facts_conflict")
+        return
+    recorded = StripeEvent(
+        stripe_event_id=event["id"], event_type=event_type, facts_fingerprint=fingerprint,
+        purchase_id=order.id if order else None, status=status, attempt_count=1,
+        livemode=bool(event.get("livemode")), stripe_object_id=obj.get("id"),
+        processed_at=datetime.now(timezone.utc) if status == "processed" else None,
+    )
+    session.add(recorded)
+    if order and order.status == "pending":
+        if event_type == "checkout.session.async_payment_failed":
+            order.status = "failed"
+        elif event_type == "checkout.session.expired":
+            order.status = "cancelled"
+    if order and event_type == "charge.refunded":
+        order.refund_detected_at = datetime.now(timezone.utc)
+    if order and event_type in {"charge.dispute.created", "charge.dispute.updated"}:
+        order.dispute_status = "needs_review"
+    if order and event_type == "charge.dispute.closed":
+        order.dispute_status = "won" if obj.get("status") == "won" else "lost"
+    session.commit()
 
 
 def record_webhook_conflict(session: Session, event: dict, conflict: DeterministicPaymentConflict) -> None:
