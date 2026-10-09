@@ -28,7 +28,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       PYTHONPATH: backend
-      PACK_CREDIT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/payment_test
+      PACK_CREDIT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/payment_test?sslmode=disable
       DEPLOYMENT_MODE: local
     steps:
       - uses: actions/checkout@v6
