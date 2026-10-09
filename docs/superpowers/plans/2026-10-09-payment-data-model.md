@@ -27,7 +27,7 @@ The repository cannot infer the username inside Render's production `DATABASE_UR
 
 ## Production Backup and Execution Gate
 
-Before each migration, create a restorable custom-format backup limited to `public.packcreditaccount`, `public.packcreditledger`, `public.generationusage`, and `public.purchase`. Use `pg_dump --format=custom --table=...` from the owner's secure environment, store it privately, and verify it with `pg_restore --list`. Do not commit the backup.
+First ask whether the current Supabase plan includes automatic backups or Point-in-Time Recovery. If available, record the latest successful backup and retention. If unavailable, export `packcreditaccount`, `packcreditledger`, `generationusage`, and `purchase` from Supabase Table Editor as CSV, name each file with table and UTC timestamp, verify it opens and its row count matches `count(*)`, and store it privately. Never commit or paste backup contents into chat. CSV is an emergency data snapshot, so also retain the pre-migration schema audit and prior application SHA.
 
 Each migration uses one transaction and takes locks in this order before backfill or constraint replacement: account advisory lock namespace, `packcreditaccount`, `generationusage`, `purchase`, `packcreditledger`. Use the weakest lock that prevents concurrent writes; 2b uses explicit table locks during historical replay. Any error rolls back the whole migration. Do not retry blindly after an unknown disconnect; first rerun the read-only preflight.
 
@@ -41,6 +41,15 @@ Create `supabase/diagnostics/payment_preflight.sql`, containing only SELECT/CTE 
 4. Current database role and its future function privileges.
 
 Any mismatch or unknown purchase status blocks production migration and is resolved by an explicit migration decision, never an automatic guess.
+
+## Recovery and Rollback Runbook
+
+- Migration fails before commit: PostgreSQL rolls back; do not deploy code. Rerun preflight before retrying.
+- 2a migration commits but verification fails: do not push `main`; keep the old app, restore through automatic backup/PITR or reviewed CSV recovery, and remove 2a objects only through a forward rollback migration.
+- 2a code fails after deploy: use Render rollback to the recorded prior SHA; the additive 2a schema remains compatible.
+- 2b migration commits but verification fails before code deploy: do not push `main`; the 2a app remains correct through `get_available_pack_credits`. Restore source rows if required and remove 2b objects through a forward rollback migration.
+- Problem appears after 2b deploy: stop generation writes, roll Render back to the 2a SHA, preserve post-migration ledger rows, then use PITR or a reviewed compensating migration. Never overwrite newer writes with old CSVs without reconciling the delta.
+- Finish every recovery with balance/ledger/lot reconciliation, permission checks, and an incident record containing timestamps and SHAs.
 
 ## Backward-Compatible Balance Contract
 
@@ -93,6 +102,7 @@ The 2a code is therefore safe after the 2b migration but before the 2b code push
 - [ ] Route `pack_credit_balance` and PostgreSQL reservation responses/checks through `get_available_pack_credits`; 2a behavior remains numerically unchanged.
 - [ ] Search all balance reads. Tests and backup serialization may remain; production authorization/API decisions must use the compatibility function.
 - [ ] Add startup read-only checks for required payment tables, function signatures, and confirmed backend-role EXECUTE privilege; missing objects/privilege make readiness fail without DDL.
+- [ ] Ask the owner for only the username portion in the format `postgresql://USERNAME:***@host:port/database`; never request the password or full URL. Use that confirmed username in grants and permission checks.
 
 ### Task 2a.4 Add CI dry-run and PostgreSQL 16 job
 
@@ -150,7 +160,7 @@ The 2a code is therefore safe after the 2b migration but before the 2b code push
 - [ ] Run Supabase dry-run first, apply both migrations to fresh PostgreSQL 16, and run all payment/credit tests with no skips.
 - [ ] Run full backend/frontend verification, invariant/permission tests, and `git diff --check`.
 - [ ] Commit: `git commit -m "Add FIFO credit lots and refund storage"`.
-- [ ] Production: rerun preflight → create/verify backup → pause generation writes → execute migration transactionally with backfill locks → verify invariants/permissions/2a compatibility → only then push `main` and deploy 2b.
+- [ ] Production: rerun preflight and backup; first prove whether temporary `MONTHLY_PACK_LIMIT_GLOBAL=0` blocks all new generation before reservation. If proven, set it to `0`, redeploy, and wait until preflight reports zero `generationusage.status='reserved'`; otherwise use a dedicated maintenance flag. Execute migration with locks, verify, restore the prior limit/flag and redeploy, then only with explicit owner approval push `main` and deploy 2b.
 
 ## Deferred to the Refund Implementation
 
