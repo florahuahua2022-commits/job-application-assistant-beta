@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, update
@@ -21,7 +21,7 @@ from .ats_verification import verify_resume_artifact, verify_document_export
 from .applicant_profile import applicant_profile_prompt, confirmed_availability_wording, availability_issues, polish_availability
 from .delivery_checks import delivery_issues, aggregate_experience, profile_missing_fields, apply_delivery_review
 from .generation_trace import build_generation_trace, build_trace_bundle
-from .auth import get_current_user, require_admin_user
+from .auth import AuthenticatedUser, get_authenticated_user, get_current_user, require_admin_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
 from .ckb import build_career_knowledge_base, career_knowledge_base_is_current, split_time_period, validate_career_knowledge_base
 from .config import settings
@@ -36,6 +36,7 @@ from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
+from .payments import CheckoutSessionRequest, CheckoutSessionResponse, StripeGateway, create_checkout_session, get_stripe_gateway
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -104,6 +105,17 @@ def health():
             for document_type, setting in GENERATION_FEATURES.items()
         },
     }
+
+
+@app.post("/payments/checkout-sessions", response_model=CheckoutSessionResponse)
+def checkout_session(
+    payload: CheckoutSessionRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: Session = Depends(get_session),
+    identity: AuthenticatedUser = Depends(get_authenticated_user),
+    gateway: StripeGateway = Depends(get_stripe_gateway),
+):
+    return create_checkout_session(session, gateway, identity, payload.package_code, idempotency_key or "")
 
 
 def select_for_user(model, user_id: UUID | None):
