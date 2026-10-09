@@ -34,6 +34,20 @@ class PaymentEventTransactionTests(unittest.TestCase):
             names = {table.name for table in database._create_all_tables()}
         self.assertTrue(database.MIGRATION_ONLY_TABLES.isdisjoint(names))
 
+    def test_checkout_operational_schema_is_declared_but_never_created_at_startup(self):
+        purchase_columns = set(Purchase.__table__.columns.keys())
+        event_columns = set(StripeEvent.__table__.columns.keys())
+        self.assertTrue({
+            "livemode", "expires_at", "refund_detected_at",
+            "checkout_idempotency_key_hash", "gst_enabled",
+        }.issubset(purchase_columns))
+        self.assertTrue({
+            "livemode", "failure_reason_code", "stripe_object_id",
+        }.issubset(event_columns))
+        self.assertTrue({
+            "paymentcheckoutrate", "paymentoperationaudit",
+        }.issubset(database.MIGRATION_ONLY_TABLES))
+
     def test_failed_processing_rolls_back_records_failure_and_reraises_then_retries_once(self):
         user_id = uuid4()
         facts = dict(

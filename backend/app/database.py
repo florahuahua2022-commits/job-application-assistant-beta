@@ -17,6 +17,7 @@ engine = create_engine(database_url, connect_args=connect_args)
 
 MIGRATION_ONLY_TABLES = {
     "purchase", "stripeevent", "packcreditlot", "packcreditallocation", "paymentrefund",
+    "paymentcheckoutrate", "paymentoperationaudit",
 }
 
 

@@ -198,6 +198,11 @@ class Purchase(SQLModel, table=True):
     gst_cents: int = 0
     total_paid_cents: int
     single_pack_price_cents: int
+    gst_enabled: bool = False
+    livemode: bool = False
+    expires_at: datetime | None = None
+    refund_detected_at: datetime | None = None
+    checkout_idempotency_key_hash: str | None = Field(default=None, index=True)
     actual_stripe_fee_cents: int | None = None
     paid_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -212,9 +217,36 @@ class StripeEvent(SQLModel, table=True):
     status: str = "received"
     attempt_count: int = 0
     last_error: str | None = None
+    livemode: bool = False
+    failure_reason_code: str | None = None
+    stripe_object_id: str | None = Field(default=None, index=True)
     processed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class PaymentCheckoutRate(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    idempotency_key_hash: str = Field(index=True)
+    package_code: str
+    status: str = Field(default="reserved", index=True)
+    stripe_checkout_session_id: str | None = Field(default=None, unique=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    released_at: datetime | None = None
+
+
+class PaymentOperationAudit(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    admin_user_id: UUID = Field(index=True)
+    operation: str
+    target_type: str
+    target_id: str
+    before_status: str | None = None
+    after_status: str | None = None
+    result: str
+    reason: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, index=True)
 
 
 class PackCreditLot(SQLModel, table=True):
