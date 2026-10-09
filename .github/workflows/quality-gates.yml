@@ -48,7 +48,7 @@ jobs:
       - name: Supabase migration dry-run
         run: supabase db push --db-url "$PACK_CREDIT_TEST_DATABASE_URL" --dry-run --include-all
       - name: Run PostgreSQL 16 payment contracts
-        run: python -m unittest backend.tests.test_credit_lots backend.tests.test_payment_orders backend.tests.test_pack_credits -v
+        run: python -m unittest backend.tests.test_credit_lots backend.tests.test_payment_orders backend.tests.test_pack_credits backend.tests.test_stripe_payments backend.tests.test_payment_operations -v
 
   backend-tests:
     runs-on: ubuntu-latest

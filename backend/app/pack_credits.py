@@ -321,6 +321,11 @@ def process_stripe_purchase_event(
                   "package_code": package_code, "credits": credits, "subtotal": subtotal_cents,
                   "gst": gst_cents, "total": total_paid_cents, "single_price": single_pack_price_cents,
                   "currency": currency}).scalar_one()
+            session.execute(text("""
+                update public.stripeevent
+                set event_type = :event_type, livemode = :livemode, updated_at = now()
+                where stripe_event_id = :event_id
+            """), {"event_id": stripe_event_id, "event_type": stripe_event_type, "livemode": livemode})
         else:
             event = session.get(StripeEvent, stripe_event_id)
             if event and event.facts_fingerprint != fingerprint:
@@ -363,6 +368,15 @@ def process_stripe_purchase_event(
         if session.bind.dialect.name == "postgresql":
             session.execute(text("select public.record_stripe_event_failure(:id, :fingerprint, :error)"), {
                 "id": stripe_event_id, "fingerprint": fingerprint, "error": str(error)[:1000],
+            })
+            session.execute(text("""
+                update public.stripeevent
+                set event_type = :event_type, livemode = :livemode,
+                    failure_reason_code = :reason_code, updated_at = now()
+                where stripe_event_id = :event_id
+            """), {
+                "event_id": stripe_event_id, "event_type": stripe_event_type,
+                "livemode": livemode, "reason_code": failure_reason_code,
             })
         else:
             event = session.get(StripeEvent, stripe_event_id)
