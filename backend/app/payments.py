@@ -137,9 +137,9 @@ def create_checkout_session(
     if session.bind.dialect.name == "postgresql":
         reservation = session.execute(text("""
             select result, stripe_checkout_session_id
-            from public.reserve_checkout_creation(:user_id, :key_hash, :package_code, :now)
+            from public.reserve_checkout_creation(:user_id, :key_hash, :package_code)
         """), {"user_id": identity.id, "key_hash": key_hash,
-                "package_code": package_code, "now": now}).one()
+                "package_code": package_code}).one()
         session.commit()
         result, existing_session_id = reservation
         if result == "conflict":
