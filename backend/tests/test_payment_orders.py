@@ -630,7 +630,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         self.assertTrue(all(allowed for _, allowed in sequence_permissions), sequence_permissions)
 
     def test_application_privilege_self_check_covers_payment_dependencies(self):
-        from backend.app.payment_operations import backend_privilege_check
+        from app.payment_operations import backend_privilege_check
 
         engine = create_engine(self.url, poolclass=NullPool)
         try:

@@ -50,7 +50,7 @@ with checks as (
     select 'post_2b_balance_lot_reservation_mismatch', 'ERROR',
         case when to_regclass('public.packcreditlot') is null
                or to_regclass('public.packcreditallocation') is null then 0
-        else cardinality(xpath('/table/row', query_to_xml($check$
+        else cardinality(xpath('/root/table/row', xmlelement(name root, query_to_xml($check$
             select 1 from public.packcreditaccount a
             left join (select user_id,sum(remaining_credits) remaining
                        from public.packcreditlot group by user_id) l on l.user_id=a.user_id
@@ -58,7 +58,7 @@ with checks as (
                        from public.packcreditallocation where status='reserved' group by user_id) r
                 on r.user_id=a.user_id
             where a.balance <> coalesce(l.remaining,0) + coalesce(r.reserved,0)
-        $check$, false, true, ''))) end
+        $check$, false, true, '')))) end
 ), inventory as (
     select 'purchase_status:'||status check_name, 'INFO' severity, count(*) issue_count
     from public.purchase group by status
