@@ -11,12 +11,22 @@ create table private_payment_backup_20261010.packcreditaccount as table public.p
 create table private_payment_backup_20261010.packcreditledger as table public.packcreditledger with data;
 create table private_payment_backup_20261010.generationusage as table public.generationusage with data;
 create table private_payment_backup_20261010.purchase as table public.purchase with data;
+create table private_payment_backup_20261010.globalmonthlyusage as table public.globalmonthlyusage with data;
 commit;
 
-select 'packcreditaccount' table_name,count(*) rows from private_payment_backup_20261010.packcreditaccount
-union all select 'packcreditledger',count(*) from private_payment_backup_20261010.packcreditledger
-union all select 'generationusage',count(*) from private_payment_backup_20261010.generationusage
-union all select 'purchase',count(*) from private_payment_backup_20261010.purchase;
+select table_name, live_rows, backup_rows,
+  case when live_rows=backup_rows then 'MATCH' else 'MISMATCH' end result
+from (values
+  ('packcreditaccount', (select count(*) from public.packcreditaccount),
+    (select count(*) from private_payment_backup_20261010.packcreditaccount)),
+  ('packcreditledger', (select count(*) from public.packcreditledger),
+    (select count(*) from private_payment_backup_20261010.packcreditledger)),
+  ('generationusage', (select count(*) from public.generationusage),
+    (select count(*) from private_payment_backup_20261010.generationusage)),
+  ('purchase', (select count(*) from public.purchase),
+    (select count(*) from private_payment_backup_20261010.purchase)),
+  ('globalmonthlyusage', (select count(*) from public.globalmonthlyusage),
+    (select count(*) from private_payment_backup_20261010.globalmonthlyusage))
+) counts(table_name,live_rows,backup_rows);
 
--- Restore is intentionally a separate guarded script: payment_restore.sql.
--- Never restore over post-backup payments or generations; reconcile/export those writes first.
+-- These copies are evidence for manual reconciliation only. Do not restore them automatically.

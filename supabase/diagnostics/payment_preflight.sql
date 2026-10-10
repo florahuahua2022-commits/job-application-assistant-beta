@@ -1,5 +1,17 @@
 -- One read-only SELECT. Any ERROR row blocks rollout.
 with checks as (
+    select 'pre_2b_exact_balance_mismatch' check_name, 'ERROR' severity, count(*) issue_count
+    from (
+        select a.user_id from public.packcreditaccount a
+        left join public.packcreditledger l on l.user_id=a.user_id
+        group by a.user_id,a.balance having a.balance <>
+            coalesce(sum(l.credits_delta) filter (where l.entry_type in
+                ('grant_free','grant_manual_topup','grant_stripe_purchase')),0)
+            - coalesce(-sum(l.credits_delta) filter (where l.entry_type='debit_generation'
+                and exists (select 1 from public.generationusage u
+                    where u.user_id=l.user_id and u.pack_id=l.pack_id and u.status <> 'released')),0)
+    ) x
+    union all
     select 'account_ledger_mismatch' check_name, 'ERROR' severity, count(*) issue_count
     from (
         select a.user_id from public.packcreditaccount a
@@ -62,8 +74,6 @@ with checks as (
 ), inventory as (
     select 'purchase_status:'||status check_name, 'INFO' severity, count(*) issue_count
     from public.purchase group by status
-    union all
-    select 'database_role:'||current_user, 'INFO', 0
 )
 select check_name, severity, issue_count,
     case when severity='ERROR' and issue_count>0 then 'BLOCK' else 'OK' end result

@@ -331,6 +331,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                 insert into public.paymentoperationaudit(admin_user_id,operation,target_type,target_id,result)
                 values (%s,'test','purchase',%s,'created')
             """, (user_id, str(purchase_id)))
+            connection.commit()
             with self.assertRaises(psycopg.errors.ForeignKeyViolation):
                 connection.execute("delete from auth.users where id=%s", (user_id,))
             connection.rollback()
