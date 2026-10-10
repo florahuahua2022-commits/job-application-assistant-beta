@@ -170,6 +170,163 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             version = connection.execute("show server_version_num").fetchone()[0]
         self.assertTrue(version.startswith("16"), version)
 
+    def _insert_observation_order(self, suffix, status="pending", dispute_status="none"):
+        import psycopg
+
+        user_id = uuid4()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+            order_id = connection.execute("""
+                insert into public.purchase(
+                    user_id,stripe_checkout_session_id,stripe_payment_intent_id,status,dispute_status,
+                    currency,amount_cents,credits,package_code,subtotal_cents,gst_cents,
+                    total_paid_cents,single_pack_price_cents,gst_enabled,livemode,catalog_version
+                ) values (%s,%s,%s,%s,%s,'AUD',1695,1,'single',1695,0,1695,1695,false,false,'2026-10-09')
+                returning id
+            """, (user_id, f"cs_obs_{suffix}", f"pi_obs_{suffix}", status, dispute_status)).fetchone()[0]
+        return order_id
+
+    def _record_observation(self, suffix, action, matched=True):
+        import psycopg
+
+        session_id = f"cs_obs_{suffix}" if matched else f"cs_missing_{suffix}"
+        payment_intent_id = f"pi_obs_{suffix}" if matched else f"pi_missing_{suffix}"
+        with psycopg.connect(self.url) as connection:
+            result = connection.execute("""
+                select public.record_stripe_event_observation(
+                    %s,%s,%s,%s,%s,%s,false,%s
+                )
+            """, (f"evt_obs_{suffix}", f"test.{action}", f"fp_{suffix}",
+                  f"obj_{suffix}", session_id, payment_intent_id, action)).fetchone()[0]
+            event = connection.execute("""
+                select status,failure_reason_code from public.stripeevent where stripe_event_id=%s
+            """, (f"evt_obs_{suffix}",)).fetchone()
+            order = connection.execute("""
+                select status,dispute_status,refund_detected_at is not null from public.purchase
+                where stripe_checkout_session_id=%s
+            """, (session_id,)).fetchone()
+        return result, event, order
+
+    def test_observation_payment_failed(self):
+        self._insert_observation_order("payment_failed")
+        result, event, order = self._record_observation("payment_failed", "payment_failed")
+        self.assertEqual((result, event, order[0]), ("processed", ("processed", None), "failed"))
+
+    def test_observation_expired(self):
+        self._insert_observation_order("expired")
+        result, event, order = self._record_observation("expired", "expired")
+        self.assertEqual((result, event, order[0]), ("processed", ("processed", None), "cancelled"))
+
+    def test_observation_refund_detected(self):
+        self._insert_observation_order("refund", status="paid")
+        result, event, order = self._record_observation("refund", "refund_detected")
+        self.assertEqual((result, event, order[2]), ("observed_pending", ("observed_pending", None), True))
+
+    def test_observation_dispute_pending(self):
+        self._insert_observation_order("dispute_pending", status="paid")
+        result, event, order = self._record_observation("dispute_pending", "dispute_pending")
+        self.assertEqual((result, event, order[1]), ("observed_pending", ("observed_pending", None), "needs_review"))
+
+    def test_observation_dispute_won(self):
+        self._insert_observation_order("dispute_won", status="paid", dispute_status="needs_review")
+        result, event, order = self._record_observation("dispute_won", "dispute_won")
+        self.assertEqual((result, event, order[1]), ("observed_pending", ("observed_pending", None), "won"))
+
+    def test_observation_dispute_lost(self):
+        self._insert_observation_order("dispute_lost", status="paid", dispute_status="needs_review")
+        result, event, order = self._record_observation("dispute_lost", "dispute_lost")
+        self.assertEqual((result, event, order[1]), ("observed_pending", ("observed_pending", None), "lost"))
+
+    def test_observation_unmatched_order_records_failure(self):
+        result, event, order = self._record_observation("unmatched", "refund_detected", matched=False)
+        self.assertEqual((result, event, order), ("failed", ("failed", "order_not_found"), None))
+
+    def test_terminal_order_async_failure_is_order_state_conflict(self):
+        self._insert_observation_order("terminal", status="paid")
+        result, event, order = self._record_observation("terminal", "payment_failed")
+        self.assertEqual((result, event, order[0]), ("failed", ("failed", "order_state_conflict"), "paid"))
+
+    def test_dispute_status_never_moves_backward(self):
+        self._insert_observation_order("late_dispute", status="paid", dispute_status="lost")
+        result, event, order = self._record_observation("late_dispute", "dispute_pending")
+        self.assertEqual((result, event, order[1]), ("observed_pending", ("observed_pending", None), "lost"))
+
+    def test_failure_recorder_preserves_processed_and_observed_events(self):
+        import psycopg
+
+        with psycopg.connect(self.url) as connection:
+            for suffix, status in (("processed", "processed"), ("observed", "observed_pending")):
+                connection.execute("""
+                    insert into public.stripeevent(stripe_event_id,event_type,facts_fingerprint,status,
+                        attempt_count,livemode) values (%s,'test.event',%s,%s,1,false)
+                """, (f"evt_keep_{suffix}", f"fp_keep_{suffix}", status))
+                connection.execute("""
+                    select public.record_stripe_event_failure(%s,'test.event',%s,'late_error','late',false)
+                """, (f"evt_keep_{suffix}", f"fp_keep_{suffix}"))
+            rows = connection.execute("""
+                select stripe_event_id,status,failure_reason_code from public.stripeevent
+                where stripe_event_id like 'evt_keep_%' order by stripe_event_id
+            """).fetchall()
+        self.assertEqual(rows, [
+            ("evt_keep_observed", "observed_pending", None),
+            ("evt_keep_processed", "processed", None),
+        ])
+
+    def test_released_key_reentry_and_new_key_share_five_slot_lock(self):
+        import psycopg
+
+        user_id = uuid4()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+            for index in range(4):
+                connection.execute("""
+                    insert into public.paymentcheckoutrate(user_id,idempotency_key_hash,package_code,status)
+                    values (%s,%s,'single','reserved')
+                """, (user_id, f"active-{index}"))
+            connection.execute("""
+                insert into public.paymentcheckoutrate(user_id,idempotency_key_hash,package_code,status,released_at)
+                values (%s,'released-key','single','released',now())
+            """, (user_id,))
+
+        def reserve(key):
+            with psycopg.connect(self.url) as connection:
+                return connection.execute(
+                    "select result from public.reserve_checkout_creation(%s,%s,'single')", (user_id, key)
+                ).fetchone()[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(reserve, ("released-key", "new-key")))
+        self.assertEqual(sorted(results), ["rate_limited", "reserved"])
+
+    def test_account_delete_cascades_all_payment_rows(self):
+        import psycopg
+
+        user_id = uuid4()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+            purchase_id = connection.execute("""
+                insert into public.purchase(user_id,stripe_checkout_session_id,status,currency,amount_cents,
+                    credits,package_code,subtotal_cents,gst_cents,total_paid_cents,single_pack_price_cents,
+                    gst_enabled,livemode,catalog_version)
+                values (%s,'cs_delete','paid','AUD',1695,1,'single',1695,0,1695,1695,false,false,'2026-10-09') returning id
+            """, (user_id,)).fetchone()[0]
+            connection.execute("""
+                insert into public.paymentrefund(user_id,purchase_id,status,currency,requested_amount_cents,
+                    stripe_idempotency_key) values (%s,%s,'requested','AUD',1695,'refund-delete')
+            """, (user_id, purchase_id))
+            connection.execute("""
+                insert into public.paymentoperationaudit(admin_user_id,operation,target_type,target_id,result)
+                values (%s,'test','purchase',%s,'created')
+            """, (user_id, str(purchase_id)))
+            connection.execute("delete from auth.users where id=%s", (user_id,))
+            counts = connection.execute("""
+                select
+                  (select count(*) from public.purchase where user_id=%s),
+                  (select count(*) from public.paymentrefund where user_id=%s),
+                  (select count(*) from public.paymentoperationaudit where admin_user_id=%s)
+            """, (user_id, user_id, user_id)).fetchone()
+        self.assertEqual(counts, (0, 0, 0))
+
     def test_checkout_then_success_webhook_fills_payment_intent_once(self):
         import psycopg
 
@@ -290,7 +447,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             "public.process_stripe_purchase_event(text,text,text,text,text,uuid,text,integer,integer,integer,integer,integer,text,boolean,boolean,text)",
             "public.record_stripe_event_failure(text,text,text,text,text,boolean)",
             "public.record_stripe_event_observation(text,text,text,text,text,text,boolean,text)",
-            "public.reserve_checkout_creation(uuid,text,text,timestamp with time zone)",
+            "public.reserve_checkout_creation(uuid,text,text)",
         )
         with psycopg.connect(self.url) as connection:
             found = [connection.execute("select to_regprocedure(%s)", (signature,)).fetchone()[0] for signature in signatures]
@@ -300,9 +457,13 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         import psycopg
 
         script = Path(__file__).resolve().parents[2] / "supabase" / "diagnostics" / "payment_preflight.sql"
+        sql = script.read_text(encoding="utf-8")
+        self.assertNotIn("begin", sql.lower())
+        self.assertNotIn("rollback", sql.lower())
+        self.assertEqual(sql.count(";"), 1)
         with psycopg.connect(self.url) as connection:
             cursor = connection.cursor()
-            cursor.execute(script.read_text(encoding="utf-8"))
+            cursor.execute(sql)
             result_sets, columns = [], []
             while True:
                 if cursor.description:
@@ -312,6 +473,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                     break
         self.assertEqual(len(result_sets), 1)
         self.assertEqual(columns, ["check_name", "severity", "issue_count", "result"])
+        self.assertIn("post_2b_balance_lot_reservation_mismatch", {row[0] for row in result_sets[0]})
 
     def test_six_concurrent_checkout_requests_reserve_exactly_five(self):
         import psycopg
@@ -323,7 +485,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         def reserve(index):
             with psycopg.connect(self.url) as connection:
                 return connection.execute("""
-                    select result from public.reserve_checkout_creation(%s, %s, 'single', now())
+                    select result from public.reserve_checkout_creation(%s, %s, 'single')
                 """, (user_id, f"key-{index}")).fetchone()[0]
 
         with ThreadPoolExecutor(max_workers=6) as pool:
@@ -448,6 +610,42 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         self.assertFalse(table_acl)
         self.assertFalse(function_acl)
         self.assertFalse(sequence_acl)
+
+    def test_service_role_has_all_payment_table_and_sequence_permissions(self):
+        import psycopg
+
+        with psycopg.connect(self.url) as connection:
+            table_permissions = connection.execute("""
+                select table_name, has_table_privilege('service_role', 'public.' || table_name,
+                    'select,insert,update,delete')
+                from (values ('packcreditlot'),('packcreditallocation'),('paymentrefund')) t(table_name)
+            """).fetchall()
+            sequence_permissions = connection.execute("""
+                select sequence_name, has_sequence_privilege('service_role', 'public.' || sequence_name,
+                    'usage,select')
+                from (values ('packcreditlot_id_seq'),('packcreditallocation_id_seq'),
+                    ('paymentrefund_id_seq')) s(sequence_name)
+            """).fetchall()
+        self.assertTrue(all(allowed for _, allowed in table_permissions), table_permissions)
+        self.assertTrue(all(allowed for _, allowed in sequence_permissions), sequence_permissions)
+
+    def test_application_privilege_self_check_covers_payment_dependencies(self):
+        from backend.app.payment_operations import backend_privilege_check
+
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with Session(engine) as session:
+                result = backend_privilege_check(session)
+        finally:
+            engine.dispose()
+        self.assertTrue(result["ready"], result)
+        checked = {item["name"] for item in result["checks"]}
+        self.assertTrue({
+            "globalmonthlyusage", "packcreditaccount", "packcreditledger", "generationusage",
+            "packcreditlot", "packcreditallocation", "paymentrefund",
+            "process_stripe_purchase_event", "record_stripe_event_failure",
+            "record_stripe_event_observation", "reserve_checkout_creation",
+        }.issubset(checked), checked)
 
 
 if __name__ == "__main__":
