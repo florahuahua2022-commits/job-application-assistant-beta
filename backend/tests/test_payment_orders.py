@@ -315,7 +315,11 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             balances = list(pool.map(lambda _: deliver(), range(2)))
         with psycopg.connect(self.url) as connection:
-            grants = connection.execute("select count(*) from public.packcreditledger where entry_type='grant_stripe_purchase'").fetchone()[0]
+            grants = connection.execute("""
+                select count(*) from public.packcreditledger l join public.purchase p on p.id = l.purchase_id
+                where l.entry_type = 'grant_stripe_purchase'
+                  and p.stripe_checkout_session_id = 'cs_pg_concurrent'
+            """).fetchone()[0]
             attempts = connection.execute("select status, attempt_count from public.stripeevent where stripe_event_id='evt_pg_concurrent'").fetchone()
         self.assertEqual(balances, [10, 10])
         self.assertEqual(grants, 1)
