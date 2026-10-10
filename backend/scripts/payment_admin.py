@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 
 def call(base_url: str, token: str, method: str, path: str, body: dict | None = None):
@@ -21,12 +22,20 @@ def main() -> None:
     parser.add_argument("command", choices=["failed", "reconcile", "replay-event", "replay-session"])
     parser.add_argument("target", nargs="?")
     parser.add_argument("--base-url", default=os.getenv("PAYMENT_ADMIN_BASE_URL", "http://localhost:8000"))
+    parser.add_argument("--status", choices=["failed", "observed_pending"])
+    parser.add_argument("--event-type")
+    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--offset", type=int, default=0)
     args = parser.parse_args()
     token = os.getenv("PAYMENT_ADMIN_TOKEN")
     if not token:
         parser.error("Set PAYMENT_ADMIN_TOKEN for this process")
     if args.command == "failed":
-        result = call(args.base_url, token, "GET", "/admin/payments/failed-events")
+        query = urlencode({key: value for key, value in {
+            "status": args.status, "event_type": args.event_type,
+            "limit": args.limit, "offset": args.offset,
+        }.items() if value is not None})
+        result = call(args.base_url, token, "GET", "/admin/payments/failed-events?" + query)
     elif args.command == "reconcile":
         result = call(args.base_url, token, "GET", "/admin/payments/reconciliation")
     else:

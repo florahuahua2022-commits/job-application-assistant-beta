@@ -268,6 +268,15 @@ def _event_fingerprint(facts: dict) -> str:
     return sha256(json.dumps(facts, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _payment_failure_reason(error: Exception) -> str:
+    sqlstate = getattr(getattr(error, "orig", error), "sqlstate", None)
+    if sqlstate in {"55P03", "57014", "40P01", "40001"}:
+        return "lock_timeout"
+    if sqlstate and sqlstate.startswith("08"):
+        return "database_unavailable"
+    return "internal_error"
+
+
 def record_stripe_event_failure(
     session: Session, *, stripe_event_id: str, stripe_event_type: str,
     facts: dict, reason_code: str, error: str, livemode: bool,
@@ -406,7 +415,7 @@ def process_stripe_purchase_event(
                 )
             """), {
                 "id": stripe_event_id, "event_type": stripe_event_type,
-                "fingerprint": fingerprint, "reason_code": failure_reason_code,
+                "fingerprint": fingerprint, "reason_code": failure_reason_code or _payment_failure_reason(error),
                 "error": str(error)[:1000], "livemode": livemode,
             })
         else:
@@ -417,12 +426,13 @@ def process_stripe_purchase_event(
                 event = StripeEvent(
                     stripe_event_id=stripe_event_id, event_type=stripe_event_type,
                     facts_fingerprint=fingerprint, status="failed", attempt_count=1,
-                    livemode=livemode, failure_reason_code=failure_reason_code,
+                    livemode=livemode, failure_reason_code=failure_reason_code or _payment_failure_reason(error),
                 )
                 session.add(event)
             else:
                 event.status, event.attempt_count = "failed", event.attempt_count + 1
-            event.last_error, event.failure_reason_code = str(error)[:1000], failure_reason_code
+            event.last_error = str(error)[:1000]
+            event.failure_reason_code = failure_reason_code or _payment_failure_reason(error)
             event.updated_at = datetime.now(timezone.utc)
         session.commit()
         raise

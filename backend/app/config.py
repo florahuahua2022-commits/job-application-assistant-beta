@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     stripe_secret_key: str | None = None
     stripe_webhook_secret: str | None = None
     stripe_mode: str = "test"
+    stripe_api_version: str = "2026-09-30.endive"
     stripe_gst_enabled: bool = False
     monthly_pack_limit_global: int = 500
     allow_public_signup: bool = False

@@ -74,11 +74,13 @@ def validate_stripe_settings(configured=settings) -> None:
     mode = configured.stripe_mode.strip().lower()
     if mode not in {"test", "live"}:
         raise ValueError("STRIPE_MODE must be test or live")
+    if configured.stripe_api_version != STRIPE_API_VERSION:
+        raise ValueError(f"STRIPE_API_VERSION must be {STRIPE_API_VERSION}")
     key = configured.stripe_secret_key
-    if not key:
+    if not key and not configured.stripe_webhook_secret:
         return
-    if not configured.stripe_webhook_secret:
-        raise ValueError("STRIPE_WEBHOOK_SECRET is required when Stripe is enabled")
+    if not key or not configured.stripe_webhook_secret:
+        raise ValueError("STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be configured together")
     expected_prefix = "sk_live_" if mode == "live" else "sk_test_"
     if not key.startswith(expected_prefix):
         raise ValueError("Stripe key does not match STRIPE_MODE")

@@ -37,7 +37,7 @@ from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
 from .payment_operations import ReplayRequest, failed_events, reconciliation, replay
-from .payments import MAX_WEBHOOK_BYTES, CheckoutSessionRequest, CheckoutSessionResponse, DeterministicPaymentConflict, StripeGateway, construct_webhook_event, create_checkout_session, get_stripe_gateway, handle_payment_webhook, record_webhook_conflict
+from .payments import MAX_WEBHOOK_BYTES, CheckoutSessionRequest, CheckoutSessionResponse, DeterministicPaymentConflict, StripeGateway, construct_webhook_event, create_checkout_session, get_stripe_gateway, handle_payment_webhook, record_webhook_conflict, validate_stripe_settings
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
@@ -81,6 +81,7 @@ async def operation_log(request: Request, call_next):
 
 @app.on_event("startup")
 def on_startup() -> None:
+    validate_stripe_settings()
     create_db_and_tables()
 
 
@@ -124,9 +125,12 @@ async def stripe_webhook(request: Request, session: Session = Depends(get_sessio
     declared_length = request.headers.get("content-length")
     if declared_length and int(declared_length) > MAX_WEBHOOK_BYTES:
         raise HTTPException(413, "Webhook body is too large.")
-    payload = await request.body()
-    if len(payload) > MAX_WEBHOOK_BYTES:
-        raise HTTPException(413, "Webhook body is too large.")
+    payload = bytearray()
+    async for chunk in request.stream():
+        payload.extend(chunk)
+        if len(payload) > MAX_WEBHOOK_BYTES:
+            raise HTTPException(413, "Webhook body is too large.")
+    payload = bytes(payload)
     signature = request.headers.get("stripe-signature")
     if not signature or not settings.stripe_webhook_secret:
         raise HTTPException(400, "Invalid webhook signature.")
@@ -144,15 +148,22 @@ async def stripe_webhook(request: Request, session: Session = Depends(get_sessio
 
 
 @app.get("/admin/payments/failed-events")
-def admin_payment_failures(session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+def admin_payment_failures(
+    status: str | None = None, event_type: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
     require_admin_user(user_id)
-    return failed_events(session)
+    return failed_events(session, status=status, event_type=event_type, limit=limit, offset=offset)
 
 
 @app.get("/admin/payments/reconciliation")
-def admin_payment_reconciliation(session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+def admin_payment_reconciliation(
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+    gateway: StripeGateway = Depends(get_stripe_gateway),
+):
     require_admin_user(user_id)
-    return reconciliation(session)
+    return reconciliation(session, gateway)
 
 
 @app.post("/admin/payments/replay")
