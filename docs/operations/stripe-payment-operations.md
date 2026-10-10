@@ -10,17 +10,9 @@
 
 ### 确认生产后端数据库角色授权
 
-1. 只在自己的密码管理器或 Render 环境页面查看连接串，记下 `postgresql://用户名:...` 中的用户名；不要把连接串或密码贴到聊天、文档或工单。
-2. 用该连接串从受控终端直接连接数据库（不要在 Supabase SQL Editor 猜 `current_user`），运行下面的只读查询，把 `backend_role` 换成刚记下的用户名：
-
-```sql
-select
-  has_function_privilege('backend_role','public.process_stripe_purchase_event(text,text,text,text,text,uuid,text,integer,integer,integer,integer,integer,text,boolean,boolean,text)','execute') process_event,
-  has_function_privilege('backend_role','public.reserve_checkout_creation(uuid,text,text,timestamptz)','execute') reserve_checkout,
-  has_table_privilege('backend_role','public.purchase','select,insert,update') purchase_access;
-```
-
-3. 三列都必须为 `true`。若后端角色不是 `service_role`，由数据库负责人在 migration 事务内只对这个准确角色授予上述函数和支付表权限，再次运行查询确认。不得给 `anon` 或 `authenticated` 补权。
+1. 只在自己的密码管理器或 Render 环境页面查看连接串；不要把连接串或密码贴到聊天、文档或工单。
+2. 后端部署后，由管理员在受控终端运行 `python backend/scripts/payment_admin.py permissions`。脚本调用应用内只读接口 `/admin/payments/backend-privileges`，返回实际数据库角色，并核对 `globalmonthlyusage`、`packcreditaccount`、`packcreditledger`、`generationusage`、全部支付表、相关序列和函数。
+3. `ready` 必须为 `true`。若后端角色不是 `service_role`，由数据库负责人在 migration 事务内只给该准确角色补齐报告中为 `false` 的权限，再运行一次。不得给 `anon` 或 `authenticated` 补权。
 
 ## 暂停生成写入、恢复与回滚
 
@@ -28,7 +20,7 @@ select
 2. 在 SQL Editor 运行 `select count(*) from public.generationusage where status='reserved';`。结果必须为 `0`；否则等正在生成的任务完成或过期释放，不得开始 migration。
 3. 在一个事务内执行 migration。失败时 PostgreSQL 自动回滚；保留私有备份 schema，不启动新版本。
 4. migration 成功并完成只读核对后再部署应用；最后把 `MONTHLY_PACK_LIMIT_GLOBAL` 改回原值并重新部署。
-5. 若 2b 后发现问题：再次设为 `0`、停止 Checkout、确认无 `reserved`；回滚应用版本；先做第二份现场备份，再由负责人取消恢复脚本 RESTORE 部分的注释并执行。恢复后重新运行预检，不得只手改账号余额。
+5. 若 2b 后发现问题：再次设为 `0`、停止 Checkout、确认无 `reserved`；回滚应用版本；先做第二份现场备份，再执行 `supabase/operations/payment_restore.sql`。脚本若发现备份后新增付款或生成记录会中止，因为整表恢复不能合并这些业务写入；须先导出并人工对账。恢复后重新运行预检，不得只手改账号余额。
 
 ## 用导出数据演练历史回填
 
@@ -44,6 +36,7 @@ select
 ```powershell
 python backend/scripts/payment_admin.py failed
 python backend/scripts/payment_admin.py reconcile
+python backend/scripts/payment_admin.py permissions
 python backend/scripts/payment_admin.py replay-event evt_test_xxx
 python backend/scripts/payment_admin.py replay-session cs_test_xxx
 ```

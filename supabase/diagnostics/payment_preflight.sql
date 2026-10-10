@@ -1,6 +1,4 @@
--- One read-only result set. Run before payment migrations; any ERROR row blocks rollout.
-begin transaction read only;
-
+-- One read-only SELECT. Any ERROR row blocks rollout.
 with checks as (
     select 'account_ledger_mismatch' check_name, 'ERROR' severity, count(*) issue_count
     from (
@@ -48,6 +46,19 @@ with checks as (
         from pg_class c join pg_namespace n on n.oid=c.relnamespace
         where n.nspname='public' and c.relname='stripeevent'
     ),0)
+    union all
+    select 'post_2b_balance_lot_reservation_mismatch', 'ERROR',
+        case when to_regclass('public.packcreditlot') is null
+               or to_regclass('public.packcreditallocation') is null then 0
+        else cardinality(xpath('/table/row', query_to_xml($check$
+            select 1 from public.packcreditaccount a
+            left join (select user_id,sum(remaining_credits) remaining
+                       from public.packcreditlot group by user_id) l on l.user_id=a.user_id
+            left join (select user_id,sum(credits) reserved
+                       from public.packcreditallocation where status='reserved' group by user_id) r
+                on r.user_id=a.user_id
+            where a.balance <> coalesce(l.remaining,0) + coalesce(r.reserved,0)
+        $check$, false, true, ''))) end
 ), inventory as (
     select 'purchase_status:'||status check_name, 'INFO' severity, count(*) issue_count
     from public.purchase group by status
@@ -58,5 +69,3 @@ select check_name, severity, issue_count,
     case when severity='ERROR' and issue_count>0 then 'BLOCK' else 'OK' end result
 from (select * from checks union all select * from inventory) report
 order by severity desc, check_name;
-
-rollback;
