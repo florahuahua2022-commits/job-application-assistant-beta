@@ -289,6 +289,23 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             found = [connection.execute("select to_regprocedure(%s)", (signature,)).fetchone()[0] for signature in signatures]
         self.assertTrue(all(found), found)
 
+    def test_unified_preflight_is_read_only_and_returns_one_result_set(self):
+        import psycopg
+
+        script = Path(__file__).resolve().parents[2] / "supabase" / "diagnostics" / "payment_preflight.sql"
+        with psycopg.connect(self.url) as connection:
+            cursor = connection.cursor()
+            cursor.execute(script.read_text(encoding="utf-8"))
+            result_sets, columns = [], []
+            while True:
+                if cursor.description:
+                    columns = [column.name for column in cursor.description]
+                    result_sets.append(cursor.fetchall())
+                if not cursor.nextset():
+                    break
+        self.assertEqual(len(result_sets), 1)
+        self.assertEqual(columns, ["check_name", "severity", "issue_count", "result"])
+
     def test_six_concurrent_checkout_requests_reserve_exactly_five(self):
         import psycopg
 
