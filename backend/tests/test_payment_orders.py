@@ -246,6 +246,19 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         result, event, order = self._record_observation("terminal", "payment_failed")
         self.assertEqual((result, event, order[0]), ("failed", ("failed", "order_state_conflict"), "paid"))
 
+    def test_duplicate_terminal_observations_are_idempotently_processed(self):
+        cases = (
+            ("failed_duplicate", "failed", "none", "payment_failed", "processed"),
+            ("expired_duplicate", "cancelled", "none", "expired", "processed"),
+            ("won_duplicate", "paid", "won", "dispute_won", "observed_pending"),
+            ("lost_duplicate", "paid", "lost", "dispute_lost", "observed_pending"),
+        )
+        for suffix, status, dispute_status, action, expected in cases:
+            with self.subTest(action=action):
+                self._insert_observation_order(suffix, status=status, dispute_status=dispute_status)
+                result, event, _ = self._record_observation(suffix, action)
+                self.assertEqual((result, event), (expected, (expected, None)))
+
     def test_dispute_status_never_moves_backward(self):
         self._insert_observation_order("late_dispute", status="paid", dispute_status="lost")
         result, event, order = self._record_observation("late_dispute", "dispute_pending")
@@ -298,7 +311,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             results = list(pool.map(reserve, ("released-key", "new-key")))
         self.assertEqual(sorted(results), ["rate_limited", "reserved"])
 
-    def test_account_delete_cascades_all_payment_rows(self):
+    def test_account_delete_is_blocked_and_financial_rows_are_retained(self):
         import psycopg
 
         user_id = uuid4()
@@ -318,14 +331,16 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                 insert into public.paymentoperationaudit(admin_user_id,operation,target_type,target_id,result)
                 values (%s,'test','purchase',%s,'created')
             """, (user_id, str(purchase_id)))
-            connection.execute("delete from auth.users where id=%s", (user_id,))
+            with self.assertRaises(psycopg.errors.ForeignKeyViolation):
+                connection.execute("delete from auth.users where id=%s", (user_id,))
+            connection.rollback()
             counts = connection.execute("""
                 select
                   (select count(*) from public.purchase where user_id=%s),
                   (select count(*) from public.paymentrefund where user_id=%s),
                   (select count(*) from public.paymentoperationaudit where admin_user_id=%s)
             """, (user_id, user_id, user_id)).fetchone()
-        self.assertEqual(counts, (0, 0, 0))
+        self.assertEqual(counts, (1, 1, 1))
 
     def test_checkout_then_success_webhook_fills_payment_intent_once(self):
         import psycopg
@@ -473,7 +488,29 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                     break
         self.assertEqual(len(result_sets), 1)
         self.assertEqual(columns, ["check_name", "severity", "issue_count", "result"])
-        self.assertIn("post_2b_balance_lot_reservation_mismatch", {row[0] for row in result_sets[0]})
+        names = {row[0] for row in result_sets[0]}
+        self.assertIn("pre_2b_exact_balance_mismatch", names)
+        self.assertIn("post_2b_balance_lot_reservation_mismatch", names)
+        self.assertFalse(any(name.startswith("database_role:") for name in names))
+
+    def test_backup_copies_all_five_tables_and_compares_live_counts(self):
+        import psycopg
+
+        script = Path(__file__).resolve().parents[2] / "supabase" / "operations" / "payment_backup_and_restore.sql"
+        with psycopg.connect(self.url) as connection:
+            cursor = connection.cursor()
+            cursor.execute(script.read_text(encoding="utf-8"))
+            result_sets = []
+            while True:
+                if cursor.description:
+                    result_sets.append(cursor.fetchall())
+                if not cursor.nextset():
+                    break
+        comparisons = result_sets[-1]
+        self.assertEqual({row[0] for row in comparisons}, {
+            "packcreditaccount", "packcreditledger", "generationusage", "purchase", "globalmonthlyusage",
+        })
+        self.assertTrue(all(live == backup and result == "MATCH" for _, live, backup, result in comparisons), comparisons)
 
     def test_six_concurrent_checkout_requests_reserve_exactly_five(self):
         import psycopg
