@@ -265,7 +265,7 @@ max(0, total_paid_cents - used_pack_count * single_pack_price_cents - actual_str
 
 若实际手续费暂时读取不到，不使用估算值、不调用 Stripe 退款；记录进入 `reconciling`，使用同一订单和幂等键重试读取并告警。退款金额计算为 0 时仍扣回该订单剩余积分并把退款记录完成为 `succeeded`，但不调用 Stripe Refund API；该成功记录占用 30 天额度。
 
-有 `dispute_status = 'pending_manual'` 或其他未关闭拒付状态的订单不可申请退款，返回待人工处理。
+自助退款资格检查必须在创建退款记录和调用 Stripe 前同时读取锁定订单并确认：`refund_detected_at is null`，且 `dispute_status = 'none'`。任一条件不满足都拒绝自助退款并转人工处理；不得因本地退款记录尚不存在而绕过 Stripe 已退款或拒付状态。有 `needs_review`、`lost`、旧值 `pending_manual` 或其他非 `none` 状态的订单均不可自助退款。
 
 ### 拒付
 

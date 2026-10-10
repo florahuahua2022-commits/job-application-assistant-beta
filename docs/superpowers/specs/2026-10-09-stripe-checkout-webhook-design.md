@@ -116,7 +116,7 @@ Stripe 创建调用本身失败时必须释放刚占用的限频名额，但保�
 - 退款：`refund.created`、`refund.updated`、`charge.refunded`；
 - 拒付：`charge.dispute.created`、`charge.dispute.updated`、`charge.dispute.closed`。
 
-退款事件本阶段不计算退款、不改积分、不推进 `paymentrefund`。`charge.refunded` 必须给匹配订单设置 `refund_detected_at`，作为“Stripe 已检测到退款、待人工核对”的标记。
+退款事件本阶段不计算退款、不改积分、不推进 `paymentrefund`。`charge.refunded` 必须给匹配订单设置 `refund_detected_at`，作为“Stripe 已检测到退款、待人工核对”的标记。后续任何自助退款入口必须先锁定订单并同时确认 `refund_detected_at is null` 与 `dispute_status = 'none'`，否则拒绝并转人工处理。
 
 拒付事件本阶段不自动扣回积分，但必须更新订单现有的 `dispute_status`：`charge.dispute.created/updated` 置为 `needs_review`，`charge.dispute.closed` 根据 Stripe 结果置为 `won` 或 `lost`；无法匹配订单时仍保存 `observed_pending` 并进入告警列表。存在 `needs_review` 或 `lost` 的订单禁止进入自动退款流程。
 
