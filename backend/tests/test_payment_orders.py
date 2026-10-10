@@ -163,6 +163,13 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         cls.url = os.environ["PACK_CREDIT_TEST_DATABASE_URL"]
         _reset_postgres(cls.url)
 
+    def setUp(self):
+        import psycopg
+
+        with psycopg.connect(self.url) as connection:
+            version = connection.execute("show server_version_num").fetchone()[0]
+        self.assertTrue(version.startswith("16"), version)
+
     def test_checkout_then_success_webhook_fills_payment_intent_once(self):
         import psycopg
 
