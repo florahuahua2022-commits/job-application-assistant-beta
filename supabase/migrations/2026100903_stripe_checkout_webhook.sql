@@ -2,9 +2,26 @@ begin;
 
 lock table public.purchase, public.stripeevent in share row exclusive mode;
 
+do $$
+begin
+    if not exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'purchase' and column_name = 'livemode'
+    ) and exists (select 1 from public.purchase) then
+        raise exception 'Cannot infer livemode for existing purchase rows';
+    end if;
+    if not exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'stripeevent' and column_name = 'livemode'
+    ) and exists (select 1 from public.stripeevent) then
+        raise exception 'Cannot infer livemode for existing stripeevent rows';
+    end if;
+end $$;
+
 alter table public.purchase
     add column if not exists gst_enabled boolean not null default false,
     add column if not exists livemode boolean not null default false,
+    add column if not exists catalog_version text not null default '2026-10-09',
     add column if not exists expires_at timestamptz,
     add column if not exists refund_detected_at timestamptz,
     add column if not exists checkout_idempotency_key_hash text;
@@ -53,6 +70,175 @@ create table if not exists public.paymentoperationaudit (
 create index if not exists paymentoperationaudit_target_idx
     on public.paymentoperationaudit(target_type, target_id, created_at);
 
+create or replace function public.reserve_checkout_creation(
+    p_user_id uuid, p_idempotency_key_hash text, p_package_code text, p_now timestamptz
+) returns table(result text, stripe_checkout_session_id text)
+language plpgsql security invoker set search_path = public as $$
+declare v_existing public.paymentcheckoutrate%rowtype;
+begin
+    perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+    select * into v_existing from public.paymentcheckoutrate
+    where user_id = p_user_id and idempotency_key_hash = p_idempotency_key_hash for update;
+    if found then
+        if v_existing.package_code <> p_package_code then
+            return query select 'conflict'::text, null::text; return;
+        end if;
+        if v_existing.stripe_checkout_session_id is not null then
+            return query select 'existing'::text, v_existing.stripe_checkout_session_id; return;
+        end if;
+        if v_existing.status = 'released' then
+            update public.paymentcheckoutrate set status = 'reserved', created_at = p_now, released_at = null
+            where id = v_existing.id;
+        end if;
+        return query select 'reserved'::text, null::text; return;
+    end if;
+    if (select count(*) from public.paymentcheckoutrate
+        where user_id = p_user_id and created_at >= p_now - interval '10 minutes'
+          and status <> 'released') >= 5 then
+        return query select 'rate_limited'::text, null::text; return;
+    end if;
+    insert into public.paymentcheckoutrate(user_id, idempotency_key_hash, package_code, created_at)
+    values (p_user_id, p_idempotency_key_hash, p_package_code, p_now);
+    return query select 'reserved'::text, null::text;
+end;
+$$;
+
+create or replace function public.record_stripe_event_failure(
+    p_id text, p_event_type text, p_fingerprint text, p_reason_code text,
+    p_error text, p_livemode boolean
+) returns void language plpgsql security invoker set search_path = public as $$
+declare v_event public.stripeevent%rowtype;
+begin
+    perform pg_advisory_xact_lock(hashtextextended(p_id, 0));
+    select * into v_event from public.stripeevent where stripe_event_id = p_id for update;
+    if found and (v_event.facts_fingerprint <> p_fingerprint
+        or v_event.livemode is distinct from p_livemode) then
+        raise exception 'Event facts conflict';
+    end if;
+    insert into public.stripeevent(
+        stripe_event_id, event_type, facts_fingerprint, status, attempt_count,
+        last_error, failure_reason_code, livemode
+    ) values (p_id, p_event_type, p_fingerprint, 'failed', 1,
+        left(p_error, 1000), p_reason_code, p_livemode)
+    on conflict (stripe_event_id) do update set
+        status = 'failed', attempt_count = stripeevent.attempt_count + 1,
+        last_error = left(p_error, 1000), failure_reason_code = p_reason_code,
+        updated_at = now();
+end;
+$$;
+
+create or replace function public.record_stripe_event_observation(
+    p_id text, p_event_type text, p_fingerprint text, p_object_id text,
+    p_session_id text, p_payment_intent_id text, p_livemode boolean, p_action text
+) returns text language plpgsql security invoker set search_path = public as $$
+declare v_event public.stripeevent%rowtype; v_purchase public.purchase%rowtype; v_status text;
+begin
+    perform pg_advisory_xact_lock(hashtextextended(p_id, 0));
+    select * into v_event from public.stripeevent where stripe_event_id = p_id for update;
+    if found and (v_event.facts_fingerprint <> p_fingerprint
+        or v_event.livemode is distinct from p_livemode) then raise exception 'Event facts conflict'; end if;
+    if found and v_event.status in ('processed', 'observed_pending') then return v_event.status; end if;
+    select * into v_purchase from public.purchase where
+        stripe_checkout_session_id = p_session_id
+        or (p_payment_intent_id is not null and stripe_payment_intent_id = p_payment_intent_id)
+    order by (stripe_checkout_session_id = p_session_id) desc limit 1 for update;
+    if found and v_purchase.livemode is distinct from p_livemode then raise exception 'Livemode conflict'; end if;
+    v_status := case when p_action in ('refund_detected', 'dispute_pending', 'dispute_won', 'dispute_lost')
+        then 'observed_pending' else 'processed' end;
+    insert into public.stripeevent(stripe_event_id, event_type, facts_fingerprint, purchase_id,
+        status, attempt_count, livemode, stripe_object_id, processed_at)
+    values (p_id, p_event_type, p_fingerprint, v_purchase.id, v_status, 1,
+        p_livemode, p_object_id, case when v_status = 'processed' then now() end)
+    on conflict (stripe_event_id) do update set status = excluded.status,
+        purchase_id = excluded.purchase_id, attempt_count = stripeevent.attempt_count + 1,
+        stripe_object_id = excluded.stripe_object_id, processed_at = excluded.processed_at,
+        updated_at = now();
+    if v_purchase.id is not null then
+        if p_action = 'payment_failed' and v_purchase.status = 'pending' then
+            update public.purchase set status = 'failed', updated_at = now() where id = v_purchase.id;
+        elsif p_action = 'expired' and v_purchase.status = 'pending' then
+            update public.purchase set status = 'cancelled', updated_at = now() where id = v_purchase.id;
+        elsif p_action = 'refund_detected' then
+            update public.purchase set refund_detected_at = now(), updated_at = now() where id = v_purchase.id;
+        elsif p_action = 'dispute_pending' then
+            update public.purchase set dispute_status = 'needs_review', updated_at = now() where id = v_purchase.id;
+        elsif p_action in ('dispute_won', 'dispute_lost') then
+            update public.purchase set dispute_status = substring(p_action from 9), updated_at = now()
+            where id = v_purchase.id;
+        end if;
+    end if;
+    return v_status;
+end;
+$$;
+
+create or replace function public.process_stripe_purchase_event(
+    p_event_id text, p_event_type text, p_fingerprint text, p_session_id text,
+    p_payment_intent_id text, p_user_id uuid, p_package_code text, p_credits integer,
+    p_subtotal integer, p_gst integer, p_total integer, p_single_price integer,
+    p_currency text, p_livemode boolean, p_gst_enabled boolean, p_catalog_version text
+) returns integer language plpgsql security invoker set search_path = public as $$
+declare v_event public.stripeevent%rowtype; v_purchase public.purchase%rowtype; v_balance integer;
+begin
+    if p_event_type not in ('checkout.session.completed', 'checkout.session.async_payment_succeeded', 'admin.replay')
+        or p_currency <> 'AUD' or p_credits <= 0 or p_total <= 0
+        or p_subtotal + p_gst <> p_total or p_single_price <= 0
+        or p_catalog_version is null then raise exception 'Invalid purchase facts'; end if;
+    perform pg_advisory_xact_lock(hashtextextended(p_event_id, 0));
+    select * into v_event from public.stripeevent where stripe_event_id = p_event_id for update;
+    if found and (v_event.facts_fingerprint <> p_fingerprint
+        or v_event.event_type <> p_event_type
+        or v_event.livemode is distinct from p_livemode) then raise exception 'Event facts conflict'; end if;
+    if found and v_event.status = 'processed' then return public.get_available_pack_credits(p_user_id); end if;
+    insert into public.stripeevent(stripe_event_id, event_type, facts_fingerprint, status,
+        attempt_count, last_error, failure_reason_code, livemode)
+    values (p_event_id, p_event_type, p_fingerprint, 'processing', 1, null, null, p_livemode)
+    on conflict (stripe_event_id) do update set status = 'processing',
+        attempt_count = stripeevent.attempt_count + 1, last_error = null,
+        failure_reason_code = null, updated_at = now();
+    select * into v_purchase from public.purchase where stripe_checkout_session_id = p_session_id for update;
+    if found then
+        if v_purchase.status not in ('pending', 'paid')
+            or v_purchase.user_id is distinct from p_user_id
+            or (v_purchase.stripe_payment_intent_id is not null
+                and v_purchase.stripe_payment_intent_id is distinct from p_payment_intent_id)
+            or v_purchase.package_code is distinct from p_package_code
+            or v_purchase.credits is distinct from p_credits
+            or v_purchase.subtotal_cents is distinct from p_subtotal
+            or v_purchase.gst_cents is distinct from p_gst
+            or v_purchase.total_paid_cents is distinct from p_total
+            or v_purchase.single_pack_price_cents is distinct from p_single_price
+            or v_purchase.currency is distinct from p_currency
+            or v_purchase.livemode is distinct from p_livemode
+            or v_purchase.gst_enabled is distinct from p_gst_enabled
+            or v_purchase.catalog_version is distinct from p_catalog_version then
+            raise exception 'Checkout session facts conflict';
+        end if;
+        if v_purchase.status = 'paid' then
+            update public.stripeevent set purchase_id = v_purchase.id, status = 'processed',
+                processed_at = now(), updated_at = now() where stripe_event_id = p_event_id;
+            return public.get_available_pack_credits(p_user_id);
+        end if;
+        update public.purchase set stripe_payment_intent_id = p_payment_intent_id, updated_at = now()
+        where id = v_purchase.id and stripe_payment_intent_id is null;
+    else
+        insert into public.purchase(user_id, stripe_checkout_session_id, stripe_payment_intent_id,
+            status, package_code, currency, credits, amount_cents, subtotal_cents, gst_cents,
+            total_paid_cents, single_pack_price_cents, gst_enabled, livemode, catalog_version)
+        values (p_user_id, p_session_id, p_payment_intent_id, 'pending', p_package_code,
+            p_currency, p_credits, p_total, p_subtotal, p_gst, p_total, p_single_price,
+            p_gst_enabled, p_livemode, p_catalog_version) returning * into v_purchase;
+    end if;
+    v_balance := public.grant_pack_credits(p_user_id, 'stripe', p_package_code, p_credits,
+        p_total, 'stripe-purchase:' || p_session_id, v_purchase.id, null, null);
+    update public.purchase set status = 'paid', paid_at = coalesce(paid_at, now()), updated_at = now()
+    where id = v_purchase.id and status = 'pending';
+    if not found then raise exception 'Purchase is no longer pending'; end if;
+    update public.stripeevent set purchase_id = v_purchase.id, status = 'processed',
+        processed_at = now(), updated_at = now() where stripe_event_id = p_event_id;
+    return v_balance;
+end;
+$$;
+
 alter table public.purchase enable row level security;
 alter table public.stripeevent enable row level security;
 alter table public.paymentcheckoutrate enable row level security;
@@ -64,5 +250,16 @@ grant select, insert, update, delete on public.purchase, public.stripeevent,
     public.paymentcheckoutrate to service_role;
 grant select, insert on public.paymentoperationaudit to service_role;
 grant usage, select on all sequences in schema public to service_role;
+
+drop function if exists public.process_stripe_purchase_event(text, text, text, text, uuid, text, integer, integer, integer, integer, integer, text);
+drop function if exists public.record_stripe_event_failure(text, text, text);
+revoke all on function public.process_stripe_purchase_event(text,text,text,text,text,uuid,text,integer,integer,integer,integer,integer,text,boolean,boolean,text) from public, anon, authenticated;
+revoke all on function public.record_stripe_event_failure(text,text,text,text,text,boolean) from public, anon, authenticated;
+revoke all on function public.record_stripe_event_observation(text,text,text,text,text,text,boolean,text) from public, anon, authenticated;
+revoke all on function public.reserve_checkout_creation(uuid,text,text,timestamptz) from public, anon, authenticated;
+grant execute on function public.process_stripe_purchase_event(text,text,text,text,text,uuid,text,integer,integer,integer,integer,integer,text,boolean,boolean,text) to service_role;
+grant execute on function public.record_stripe_event_failure(text,text,text,text,text,boolean) to service_role;
+grant execute on function public.record_stripe_event_observation(text,text,text,text,text,text,boolean,text) to service_role;
+grant execute on function public.reserve_checkout_creation(uuid,text,text,timestamptz) to service_role;
 
 commit;

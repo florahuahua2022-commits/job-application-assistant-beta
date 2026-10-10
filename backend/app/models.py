@@ -200,6 +200,7 @@ class Purchase(SQLModel, table=True):
     single_pack_price_cents: int
     gst_enabled: bool = False
     livemode: bool = False
+    catalog_version: str = "2026-10-09"
     expires_at: datetime | None = None
     refund_detected_at: datetime | None = None
     checkout_idempotency_key_hash: str | None = Field(default=None, index=True)

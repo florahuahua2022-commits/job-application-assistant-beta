@@ -70,7 +70,7 @@ def replay(session: Session, gateway, admin_user_id, request: ReplayRequest) -> 
         user_id=order.user_id, package_code=order.package_code, credits=order.credits,
         subtotal_cents=order.subtotal_cents, gst_cents=order.gst_cents,
         total_paid_cents=order.total_paid_cents, single_pack_price_cents=order.single_pack_price_cents,
-        currency=order.currency,
+        currency=order.currency, gst_enabled=order.gst_enabled, catalog_version=order.catalog_version,
     )
     session.add(PaymentOperationAudit(
         admin_user_id=admin_user_id, operation="replay", target_type="event" if request.stripe_event_id else "session",

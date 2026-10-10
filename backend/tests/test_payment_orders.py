@@ -3,6 +3,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -10,9 +11,11 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import database
+from app.auth import AuthenticatedUser
 from app.config import settings
 from app.models import PackCreditAccount, PackCreditLedger, Purchase, StripeEvent
 from app.pack_credits import _event_fingerprint, process_stripe_purchase_event
+from app.payments import create_checkout_session
 
 
 MIGRATIONS = (
@@ -183,9 +186,9 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                 where stripe_checkout_session_id = 'cs_checkout_success'
             """).fetchone()
             grants = connection.execute("""
-                select count(*) from public.packcreditledger
-                where stripe_checkout_session_id = 'cs_checkout_success'
-                  and entry_type = 'grant_stripe_purchase'
+                select count(*) from public.packcreditledger l join public.purchase p on p.id = l.purchase_id
+                where p.stripe_checkout_session_id = 'cs_checkout_success'
+                  and l.entry_type = 'grant_stripe_purchase'
             """).fetchone()[0]
         self.assertEqual(balance, 3)
         self.assertEqual(order, ("paid", "pi_first"))
@@ -244,13 +247,45 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                         1695, 0, 1695, 1695, 'AUD', false, false, '2026-10-09'
                     )
                 """, (user_id,))
-            root = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
-            for name in (
-                "20260807_commercial_foundation.sql", "20261002_pack_credit_ledger.sql",
-                "20261003080058_pack_credit_engine.sql", "20261003085650_pack_credit_column_defaults.sql",
-                "20261003093309_custom_manual_pack_topup.sql", "2026100901_payment_orders_events.sql",
-            ):
-                connection.execute((root / name).read_text(encoding="utf-8"))
+
+    def test_retry_after_local_persistence_failure_recovers_same_stripe_session(self):
+        import psycopg
+
+        user_id = uuid4()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+        identity = AuthenticatedUser(user_id, "buyer@example.test")
+        remote = SimpleNamespace(id="cs_recovered", url="https://stripe.test/recovered", livemode=False)
+        gateway = unittest.mock.Mock()
+        gateway.create_checkout_session.return_value = remote
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with Session(engine) as session:
+                real_commit = session.commit
+                commits = 0
+
+                def fail_second_commit():
+                    nonlocal commits
+                    commits += 1
+                    if commits == 2:
+                        raise RuntimeError("simulated local persistence failure")
+                    real_commit()
+
+                with patch.object(session, "commit", side_effect=fail_second_commit):
+                    with self.assertRaisesRegex(RuntimeError, "persistence"):
+                        create_checkout_session(session, gateway, identity, "single", "retry-key")
+            with Session(engine) as session:
+                response = create_checkout_session(session, gateway, identity, "single", "retry-key")
+                order = session.exec(select(Purchase).where(
+                    Purchase.stripe_checkout_session_id == "cs_recovered"
+                )).one()
+            self.assertEqual(response.checkout_session_id, "cs_recovered")
+            self.assertEqual(order.status, "pending")
+            self.assertEqual(gateway.create_checkout_session.call_count, 2)
+            keys = [call.args[1] for call in gateway.create_checkout_session.call_args_list]
+            self.assertEqual(keys[0], keys[1])
+        finally:
+            engine.dispose()
 
     def test_concurrent_duplicate_event_grants_once(self):
         import psycopg
@@ -259,8 +294,8 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         facts = {
             "stripe_checkout_session_id": "cs_pg_concurrent", "stripe_payment_intent_id": "pi_pg_concurrent",
             "user_id": str(user_id), "package_code": "starter", "credits": 8,
-            "subtotal_cents": 9995, "gst_cents": 1000, "total_paid_cents": 10995,
-            "single_pack_price_cents": 1374, "currency": "AUD",
+            "subtotal_cents": 10995, "gst_cents": 0, "total_paid_cents": 10995,
+            "single_pack_price_cents": 1695, "currency": "AUD",
         }
         fingerprint = _event_fingerprint(facts)
         with psycopg.connect(self.url) as connection:
@@ -275,7 +310,7 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                     )
                 """, ("evt_pg_concurrent", "checkout.session.completed", fingerprint,
                       "cs_pg_concurrent", "pi_pg_concurrent", user_id, "starter", 8,
-                      9995, 1000, 10995, 1374, "AUD", False, True, "2026-10-09")).fetchone()[0]
+                      10995, 0, 10995, 1695, "AUD", False, False, "2026-10-09")).fetchone()[0]
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             balances = list(pool.map(lambda _: deliver(), range(2)))

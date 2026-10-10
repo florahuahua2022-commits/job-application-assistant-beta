@@ -273,6 +273,18 @@ def record_stripe_event_failure(
     facts: dict, reason_code: str, error: str, livemode: bool,
 ) -> None:
     fingerprint = _event_fingerprint(facts)
+    if session.bind.dialect.name == "postgresql":
+        session.execute(text("""
+            select public.record_stripe_event_failure(
+                :id, :event_type, :fingerprint, :reason_code, :error, :livemode
+            )
+        """), {
+            "id": stripe_event_id, "event_type": stripe_event_type,
+            "fingerprint": fingerprint, "reason_code": reason_code,
+            "error": error[:1000], "livemode": livemode,
+        })
+        session.commit()
+        return
     event = session.get(StripeEvent, stripe_event_id)
     if event and event.facts_fingerprint != fingerprint:
         raise ValueError("Stripe event facts do not match the original delivery.")
@@ -298,6 +310,7 @@ def process_stripe_purchase_event(
     single_pack_price_cents: int, currency: str,
     stripe_event_type: str = "checkout.session.completed", livemode: bool = False,
     failure_reason_code: str | None = None,
+    gst_enabled: bool = False, catalog_version: str = "2026-10-09",
 ) -> int:
     facts = {
         "stripe_checkout_session_id": stripe_checkout_session_id,
@@ -306,26 +319,26 @@ def process_stripe_purchase_event(
         "subtotal_cents": subtotal_cents, "gst_cents": gst_cents,
         "total_paid_cents": total_paid_cents,
         "single_pack_price_cents": single_pack_price_cents, "currency": currency,
+        "stripe_event_type": stripe_event_type, "livemode": livemode,
+        "gst_enabled": gst_enabled, "catalog_version": catalog_version,
     }
     fingerprint = _event_fingerprint(facts)
     try:
         if session.bind.dialect.name == "postgresql":
             balance = session.execute(text("""
                 select public.process_stripe_purchase_event(
-                    :event_id, :fingerprint, :session_id, :payment_intent_id, :user_id, :package_code,
-                    :credits, :subtotal, :gst, :total, :single_price, :currency
+                    :event_id, :event_type, :fingerprint, :session_id, :payment_intent_id,
+                    :user_id, :package_code, :credits, :subtotal, :gst, :total,
+                    :single_price, :currency, :livemode, :gst_enabled, :catalog_version
                 )
-            """), {"event_id": stripe_event_id, "fingerprint": fingerprint,
+            """), {"event_id": stripe_event_id, "event_type": stripe_event_type,
+                  "fingerprint": fingerprint,
                   "session_id": stripe_checkout_session_id,
                   "payment_intent_id": stripe_payment_intent_id, "user_id": user_id,
                   "package_code": package_code, "credits": credits, "subtotal": subtotal_cents,
                   "gst": gst_cents, "total": total_paid_cents, "single_price": single_pack_price_cents,
-                  "currency": currency}).scalar_one()
-            session.execute(text("""
-                update public.stripeevent
-                set event_type = :event_type, livemode = :livemode, updated_at = now()
-                where stripe_event_id = :event_id
-            """), {"event_id": stripe_event_id, "event_type": stripe_event_type, "livemode": livemode})
+                  "currency": currency, "livemode": livemode, "gst_enabled": gst_enabled,
+                  "catalog_version": catalog_version}).scalar_one()
         else:
             event = session.get(StripeEvent, stripe_event_id)
             if event and event.facts_fingerprint != fingerprint:
@@ -351,9 +364,30 @@ def process_stripe_purchase_event(
                     package_code=package_code, credits=credits, amount_cents=total_paid_cents,
                     subtotal_cents=subtotal_cents, gst_cents=gst_cents,
                     total_paid_cents=total_paid_cents, single_pack_price_cents=single_pack_price_cents,
-                    currency=currency,
+                    currency=currency, gst_enabled=gst_enabled, livemode=livemode,
+                    catalog_version=catalog_version,
                 )
                 session.add(purchase); session.flush()
+            elif (
+                purchase.status not in {"pending", "paid"}
+                or purchase.user_id != user_id
+                or (purchase.stripe_payment_intent_id is not None
+                    and purchase.stripe_payment_intent_id != stripe_payment_intent_id)
+                or purchase.package_code != package_code or purchase.credits != credits
+                or purchase.subtotal_cents != subtotal_cents or purchase.gst_cents != gst_cents
+                or purchase.total_paid_cents != total_paid_cents
+                or purchase.single_pack_price_cents != single_pack_price_cents
+                or purchase.currency != currency or purchase.livemode != livemode
+                or purchase.gst_enabled != gst_enabled or purchase.catalog_version != catalog_version
+            ):
+                raise ValueError("Checkout session facts conflict")
+            if purchase.status == "paid":
+                event.purchase_id, event.status = purchase.id, "processed"
+                event.processed_at = event.updated_at = datetime.now(timezone.utc)
+                session.commit()
+                return session.get(PackCreditAccount, user_id).balance
+            if purchase.stripe_payment_intent_id is None:
+                purchase.stripe_payment_intent_id = stripe_payment_intent_id
             balance = _grant_pack_credits(
                 session, user_id, "stripe", package_code, credits, total_paid_cents,
                 f"stripe-purchase:{stripe_checkout_session_id}", purchase_id=purchase.id,
@@ -366,17 +400,14 @@ def process_stripe_purchase_event(
     except Exception as error:
         session.rollback()
         if session.bind.dialect.name == "postgresql":
-            session.execute(text("select public.record_stripe_event_failure(:id, :fingerprint, :error)"), {
-                "id": stripe_event_id, "fingerprint": fingerprint, "error": str(error)[:1000],
-            })
             session.execute(text("""
-                update public.stripeevent
-                set event_type = :event_type, livemode = :livemode,
-                    failure_reason_code = :reason_code, updated_at = now()
-                where stripe_event_id = :event_id
+                select public.record_stripe_event_failure(
+                    :id, :event_type, :fingerprint, :reason_code, :error, :livemode
+                )
             """), {
-                "event_id": stripe_event_id, "event_type": stripe_event_type,
-                "livemode": livemode, "reason_code": failure_reason_code,
+                "id": stripe_event_id, "event_type": stripe_event_type,
+                "fingerprint": fingerprint, "reason_code": failure_reason_code,
+                "error": str(error)[:1000], "livemode": livemode,
             })
         else:
             event = session.get(StripeEvent, stripe_event_id)

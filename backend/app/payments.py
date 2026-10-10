@@ -7,6 +7,7 @@ from typing import Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import text
 from sqlmodel import Session, func, select
 
 from .auth import AuthenticatedUser
@@ -131,39 +132,60 @@ def create_checkout_session(
 ) -> CheckoutSessionResponse:
     now = now or datetime.now(timezone.utc)
     key_hash = _checkout_key(identity.id, raw_idempotency_key)
-    existing = session.exec(select(PaymentCheckoutRate).where(
-        PaymentCheckoutRate.user_id == identity.id,
-        PaymentCheckoutRate.idempotency_key_hash == key_hash,
-    )).first()
-    if existing:
-        if existing.package_code != package_code:
+    if session.bind.dialect.name == "postgresql":
+        reservation = session.execute(text("""
+            select result, stripe_checkout_session_id
+            from public.reserve_checkout_creation(:user_id, :key_hash, :package_code, :now)
+        """), {"user_id": identity.id, "key_hash": key_hash,
+                "package_code": package_code, "now": now}).one()
+        session.commit()
+        result, existing_session_id = reservation
+        if result == "conflict":
             raise HTTPException(409, "Idempotency-Key is already used for another package.")
-        if existing.stripe_checkout_session_id:
-            remote = gateway.retrieve_checkout_session(existing.stripe_checkout_session_id)
-            return CheckoutSessionResponse(checkout_session_id=remote.id, checkout_url=remote.url)
-        if existing.status == "released":
-            existing.status, existing.released_at = "reserved", None
-        else:
-            raise HTTPException(409, "Checkout creation is already in progress.")
-    else:
-        active = session.exec(select(func.count()).select_from(PaymentCheckoutRate).where(
-            PaymentCheckoutRate.user_id == identity.id,
-            PaymentCheckoutRate.created_at >= now - timedelta(minutes=10),
-            PaymentCheckoutRate.status != "released",
-        )).one()
-        if active >= 5:
+        if result == "rate_limited":
             raise HTTPException(429, "Too many checkout sessions.", headers={"Retry-After": "600"})
-        existing = PaymentCheckoutRate(
-            user_id=identity.id, idempotency_key_hash=key_hash, package_code=package_code, created_at=now,
-        )
-        session.add(existing)
-    session.commit()
+        if result == "existing":
+            remote = gateway.retrieve_checkout_session(existing_session_id)
+            return CheckoutSessionResponse(checkout_session_id=remote.id, checkout_url=remote.url)
+        existing = session.exec(select(PaymentCheckoutRate).where(
+            PaymentCheckoutRate.user_id == identity.id,
+            PaymentCheckoutRate.idempotency_key_hash == key_hash,
+        )).one()
+    else:
+        existing = session.exec(select(PaymentCheckoutRate).where(
+            PaymentCheckoutRate.user_id == identity.id,
+            PaymentCheckoutRate.idempotency_key_hash == key_hash,
+        )).first()
+        if existing:
+            if existing.package_code != package_code:
+                raise HTTPException(409, "Idempotency-Key is already used for another package.")
+            if existing.stripe_checkout_session_id:
+                remote = gateway.retrieve_checkout_session(existing.stripe_checkout_session_id)
+                return CheckoutSessionResponse(checkout_session_id=remote.id, checkout_url=remote.url)
+            if existing.status == "released":
+                existing.status, existing.released_at = "reserved", None
+            else:
+                raise HTTPException(409, "Checkout creation is already in progress.")
+        else:
+            active = session.exec(select(func.count()).select_from(PaymentCheckoutRate).where(
+                PaymentCheckoutRate.user_id == identity.id,
+                PaymentCheckoutRate.created_at >= now - timedelta(minutes=10),
+                PaymentCheckoutRate.status != "released",
+            )).one()
+            if active >= 5:
+                raise HTTPException(429, "Too many checkout sessions.", headers={"Retry-After": "600"})
+            existing = PaymentCheckoutRate(
+                user_id=identity.id, idempotency_key_hash=key_hash, package_code=package_code, created_at=now,
+            )
+            session.add(existing)
+        session.commit()
 
     package = purchasable_package(package_code)
     expires_at = now + timedelta(minutes=30)
     metadata = {
         "user_id": str(identity.id), "package_code": package.code,
         "credits": str(package.credits), "catalog_version": package.catalog_version,
+        "gst_enabled": str(settings.stripe_gst_enabled).lower(),
     }
     params = {
         "mode": "payment",
@@ -206,6 +228,7 @@ def create_checkout_session(
         single_pack_price_cents=package.single_pack_price_cents,
         gst_enabled=settings.stripe_gst_enabled,
         livemode=bool(remote.livemode),
+        catalog_version=package.catalog_version,
         expires_at=expires_at,
         checkout_idempotency_key_hash=key_hash,
     ))
@@ -257,8 +280,19 @@ def handle_payment_webhook(session: Session, event: dict) -> None:
         raise DeterministicPaymentConflict("livemode_mismatch")
     if str(obj.get("currency", "")).upper() != order.currency or obj.get("amount_total") != order.total_paid_cents:
         raise DeterministicPaymentConflict("amount_or_currency_mismatch")
-    if obj.get("metadata", {}).get("user_id") != str(order.user_id):
+    metadata = obj.get("metadata", {})
+    if metadata.get("user_id") != str(order.user_id):
         raise DeterministicPaymentConflict("user_mismatch")
+    expected_metadata = {
+        "package_code": order.package_code,
+        "credits": str(order.credits),
+        "gst_enabled": str(order.gst_enabled).lower(),
+        "catalog_version": order.catalog_version,
+    }
+    if any(metadata.get(key) != value for key, value in expected_metadata.items()):
+        raise DeterministicPaymentConflict("catalog_facts_mismatch")
+    if not obj.get("payment_intent"):
+        raise DeterministicPaymentConflict("payment_intent_missing")
     process_stripe_purchase_event(
         session,
         stripe_event_id=event["id"], stripe_event_type=event_type, livemode=event_livemode,
@@ -268,6 +302,7 @@ def handle_payment_webhook(session: Session, event: dict) -> None:
         subtotal_cents=order.subtotal_cents, gst_cents=order.gst_cents,
         total_paid_cents=order.total_paid_cents,
         single_pack_price_cents=order.single_pack_price_cents, currency=order.currency,
+        gst_enabled=order.gst_enabled, catalog_version=order.catalog_version,
     )
 
 
@@ -281,9 +316,38 @@ def record_payment_observation(session: Session, event: dict) -> None:
     if not order and obj.get("charge"):
         order = session.exec(select(Purchase).where(Purchase.stripe_charge_id == obj["charge"])).first()
 
+    event_livemode = bool(event.get("livemode"))
+    configured_live = settings.stripe_mode.strip().lower() == "live"
+    if event_livemode != configured_live or (order and event_livemode != order.livemode):
+        raise DeterministicPaymentConflict("livemode_mismatch")
+
     observed_pending = event_type.startswith("refund.") or event_type.startswith("charge.")
     status = "observed_pending" if observed_pending else "processed"
     fingerprint = sha256(json.dumps({"type": event_type, "object_id": obj.get("id")}, sort_keys=True).encode()).hexdigest()
+    action = {
+        "checkout.session.async_payment_failed": "payment_failed",
+        "checkout.session.expired": "expired",
+        "charge.refunded": "refund_detected",
+        "refund.created": "refund_detected",
+        "refund.updated": "refund_detected",
+        "charge.dispute.created": "dispute_pending",
+        "charge.dispute.updated": "dispute_pending",
+        "charge.dispute.closed": "dispute_won" if obj.get("status") == "won" else "dispute_lost",
+    }.get(event_type, "observed")
+    if session.bind.dialect.name == "postgresql":
+        session.execute(text("""
+            select public.record_stripe_event_observation(
+                :id, :event_type, :fingerprint, :object_id, :session_id,
+                :payment_intent_id, :livemode, :action
+            )
+        """), {
+            "id": event["id"], "event_type": event_type, "fingerprint": fingerprint,
+            "object_id": obj.get("id"), "session_id": order.stripe_checkout_session_id if order else session_id,
+            "payment_intent_id": order.stripe_payment_intent_id if order else obj.get("payment_intent"),
+            "livemode": event_livemode, "action": action,
+        })
+        session.commit()
+        return
     recorded = session.get(StripeEvent, event["id"])
     if recorded:
         if recorded.facts_fingerprint != fingerprint:

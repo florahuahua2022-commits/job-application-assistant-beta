@@ -200,7 +200,10 @@ class CheckoutSessionTests(unittest.TestCase):
                 "id": "cs_paid", "object": "checkout.session", "mode": "payment",
                 "payment_status": "paid", "payment_intent": "pi_paid",
                 "amount_total": 1695, "currency": "aud",
-                "metadata": {"user_id": str(self.user.id), "package_code": "single"},
+                "metadata": {
+                    "user_id": str(self.user.id), "package_code": "single", "credits": "1",
+                    "gst_enabled": "false", "catalog_version": "2026-10-09",
+                },
             }},
         }
         payload = json.dumps(event, separators=(",", ":")).encode()
