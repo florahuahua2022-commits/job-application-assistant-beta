@@ -30,7 +30,7 @@ class PaymentOperationTests(unittest.TestCase):
             listed = failed_events(session)
             report = reconciliation(session)
             after = session.exec(select(PaymentOperationAudit)).all()
-        self.assertEqual(listed[0]["failure_reason_code"], "amount_mismatch")
+        self.assertEqual(listed["items"][0]["failure_reason_code"], "amount_mismatch")
         self.assertEqual(report["failed_or_observed_event_ids"], ["evt_failed"])
         self.assertEqual((before, after), ([], []))
 
@@ -45,6 +45,9 @@ class PaymentOperationTests(unittest.TestCase):
             session.commit()
             gateway = SimpleNamespace(retrieve_checkout_session=lambda _id: {
                 "id": "cs_replay", "payment_intent": "pi_replay", "livemode": False,
+                "payment_status": "paid", "mode": "payment", "currency": "aud", "amount_total": 1695,
+                "metadata": {"user_id": str(self.user), "package_code": "single", "credits": "1",
+                             "gst_enabled": "false", "catalog_version": "2026-10-09"},
             })
             first = replay(session, gateway, self.admin, ReplayRequest(checkout_session_id="cs_replay"))
             second = replay(session, gateway, self.admin, ReplayRequest(checkout_session_id="cs_replay"))

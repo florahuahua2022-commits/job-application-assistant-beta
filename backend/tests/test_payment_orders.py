@@ -1,6 +1,8 @@
 import os
+import asyncio
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -12,10 +14,11 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import database
 from app.auth import AuthenticatedUser
-from app.config import settings
+from app.config import Settings, settings
 from app.models import PackCreditAccount, PackCreditLedger, Purchase, StripeEvent
-from app.pack_credits import _event_fingerprint, process_stripe_purchase_event
-from app.payments import create_checkout_session
+from app.pack_credits import _event_fingerprint, _payment_failure_reason, process_stripe_purchase_event
+from app.payment_operations import ReplayRequest, failed_events, reconciliation, replay
+from app.payments import STRIPE_API_VERSION, create_checkout_session, validate_stripe_settings
 
 
 MIGRATIONS = (
@@ -193,6 +196,85 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
         self.assertEqual(balance, 3)
         self.assertEqual(order, ("paid", "pi_first"))
         self.assertEqual(grants, 1)
+
+    def test_admin_failure_paging_filters_and_reconciliation_categories(self):
+        import psycopg
+
+        user_id = uuid4()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with Session(engine) as session:
+                expired = Purchase(
+                    user_id=user_id, stripe_checkout_session_id="cs_report_expired", status="pending",
+                    package_code="single", currency="AUD", credits=1, amount_cents=1695,
+                    subtotal_cents=1695, gst_cents=0, total_paid_cents=1695,
+                    single_pack_price_cents=1695, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                )
+                session.add(expired)
+                session.add_all([
+                    StripeEvent(stripe_event_id="evt_report_failed", event_type="checkout.session.completed",
+                                facts_fingerprint="a", status="failed", attempt_count=1),
+                    StripeEvent(stripe_event_id="evt_report_observed", event_type="charge.refunded",
+                                facts_fingerprint="b", status="observed_pending", attempt_count=1),
+                    StripeEvent(stripe_event_id="evt_report_orphan", event_type="checkout.session.completed",
+                                facts_fingerprint="c", status="processed", attempt_count=1),
+                ])
+                session.commit()
+                expired_id = expired.id
+                page = failed_events(session, status="failed", limit=1)
+                report = reconciliation(session)
+            self.assertEqual([item["stripe_event_id"] for item in page["items"]], ["evt_report_failed"])
+            self.assertIn("evt_report_orphan", report["processed_event_without_order_ids"])
+            self.assertIn(expired_id, report["expired_pending_order_ids"])
+        finally:
+            engine.dispose()
+
+    def test_stream_limit_and_unified_stripe_configuration_contracts(self):
+        from app.main import stripe_webhook
+
+        class StreamingRequest:
+            headers = {}
+
+            async def stream(self):
+                yield b"x" * (200 * 1024)
+                yield b"y" * (100 * 1024)
+
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with Session(engine) as session:
+                with self.assertRaisesRegex(Exception, "too large"):
+                    asyncio.run(stripe_webhook(StreamingRequest(), session))
+        finally:
+            engine.dispose()
+        validate_stripe_settings(Settings(_env_file=None, stripe_api_version=STRIPE_API_VERSION))
+        with self.assertRaisesRegex(ValueError, "STRIPE_API_VERSION"):
+            validate_stripe_settings(Settings(_env_file=None, stripe_api_version="wrong"))
+
+    def test_transient_failure_reason_codes_are_never_empty(self):
+        class DatabaseUnavailable(Exception):
+            sqlstate = "08006"
+
+        class LockTimeout(Exception):
+            sqlstate = "55P03"
+
+        self.assertEqual(_payment_failure_reason(DatabaseUnavailable()), "database_unavailable")
+        self.assertEqual(_payment_failure_reason(LockTimeout()), "lock_timeout")
+        self.assertEqual(_payment_failure_reason(RuntimeError()), "internal_error")
+
+    def test_replay_rejects_refund_events_before_credit_processing(self):
+        gateway = SimpleNamespace(retrieve_event=lambda _id: {
+            "id": "evt_refund_replay", "type": "charge.refunded", "livemode": False,
+            "data": {"object": {"id": "ch_replay"}},
+        })
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with Session(engine) as session:
+                with self.assertRaisesRegex(ValueError, "successful Checkout"):
+                    replay(session, gateway, uuid4(), ReplayRequest(stripe_event_id="evt_refund_replay"))
+        finally:
+            engine.dispose()
 
     def test_required_0903_database_functions_exist(self):
         import psycopg
