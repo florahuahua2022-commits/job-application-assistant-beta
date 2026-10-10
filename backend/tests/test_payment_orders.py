@@ -435,8 +435,12 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                 select has_function_privilege('authenticated',
                     'public.grant_manual_pack_topup(uuid,text,integer,integer,text,uuid,text)', 'execute')
             """).fetchone()[0]
+            sequence_acl = connection.execute(
+                "select has_sequence_privilege('authenticated','public.paymentcheckoutrate_id_seq','usage')"
+            ).fetchone()[0]
         self.assertFalse(table_acl)
         self.assertFalse(function_acl)
+        self.assertFalse(sequence_acl)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,8 @@ alter table public.packcreditallocation enable row level security;
 alter table public.paymentrefund enable row level security;
 revoke all on public.packcreditlot, public.packcreditallocation, public.paymentrefund
     from public, anon, authenticated;
+revoke all on sequence public.packcreditlot_id_seq, public.packcreditallocation_id_seq,
+    public.paymentrefund_id_seq from public, anon, authenticated;
 
 insert into public.packcreditlot(
     user_id, source_ledger_id, purchase_id, source_type, granted_credits,

@@ -8,6 +8,20 @@
 4. Stripe Workbench Endpoint 固定 API 版本 `2026-09-30.endive`。优先使用受限密钥：Checkout Session 创建/读取；Event、PaymentIntent、Charge、Refund、Dispute 只读。本阶段不授予 Refund 写权限。
 5. 必须先在测试模式确认下面的管理员脚本能列出失败事件、生成对账结果并补发测试 Session。不得使用真实卡、真实退款或生产密钥。
 
+### 确认生产后端数据库角色授权
+
+1. 只在自己的密码管理器或 Render 环境页面查看连接串，记下 `postgresql://用户名:...` 中的用户名；不要把连接串或密码贴到聊天、文档或工单。
+2. 用该连接串从受控终端直接连接数据库（不要在 Supabase SQL Editor 猜 `current_user`），运行下面的只读查询，把 `backend_role` 换成刚记下的用户名：
+
+```sql
+select
+  has_function_privilege('backend_role','public.process_stripe_purchase_event(text,text,text,text,text,uuid,text,integer,integer,integer,integer,integer,text,boolean,boolean,text)','execute') process_event,
+  has_function_privilege('backend_role','public.reserve_checkout_creation(uuid,text,text,timestamptz)','execute') reserve_checkout,
+  has_table_privilege('backend_role','public.purchase','select,insert,update') purchase_access;
+```
+
+3. 三列都必须为 `true`。若后端角色不是 `service_role`，由数据库负责人在 migration 事务内只对这个准确角色授予上述函数和支付表权限，再次运行查询确认。不得给 `anon` 或 `authenticated` 补权。
+
 ## 暂停生成写入、恢复与回滚
 
 1. 在 Render 把 `MONTHLY_PACK_LIMIT_GLOBAL` 的原值记在变更单，临时改为 `0` 并重新部署；这只阻止新预留。

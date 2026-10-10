@@ -246,6 +246,8 @@ alter table public.paymentoperationaudit enable row level security;
 
 revoke all on public.purchase, public.stripeevent, public.paymentcheckoutrate,
     public.paymentoperationaudit from public, anon, authenticated;
+revoke all on sequence public.paymentcheckoutrate_id_seq,
+    public.paymentoperationaudit_id_seq from public, anon, authenticated;
 grant select, insert, update, delete on public.purchase, public.stripeevent,
     public.paymentcheckoutrate to service_role;
 grant select, insert on public.paymentoperationaudit to service_role;
