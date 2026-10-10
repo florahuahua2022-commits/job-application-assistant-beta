@@ -1,7 +1,13 @@
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+
+from sqlalchemy.pool import NullPool
+from sqlmodel import Session, create_engine
+
+from app.pack_credits import expire_pack_reservations
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -118,6 +124,43 @@ class PostgreSQLCreditLotTests(unittest.TestCase):
         self.assertEqual(result, ("reserved", 1))
         self.assertEqual((raw, available), (2, 1))
         self.assertFalse(refund_acl)
+
+    def test_crashed_expired_reservation_releases_and_preserves_balance_invariant(self):
+        import psycopg
+
+        user_id, pack_id = uuid4(), uuid4()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("insert into auth.users(id) values (%s)", (user_id,))
+            self.assertEqual(connection.execute(
+                "select result_status from public.reserve_pack_credits(%s,%s,1,500)",
+                (user_id, pack_id),
+            ).fetchone()[0], "reserved")
+            connection.execute(
+                "update public.generationusage set expires_at=now()-interval '1 minute' where pack_id=%s",
+                (pack_id,),
+            )
+
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with Session(engine) as session:
+                self.assertEqual(expire_pack_reservations(session, datetime.now(timezone.utc)), 1)
+                session.commit()
+        finally:
+            engine.dispose()
+
+        with psycopg.connect(self.url) as connection:
+            state = connection.execute(
+                "select status from public.generationusage where pack_id=%s", (pack_id,)
+            ).fetchone()[0]
+            invariant = connection.execute("""
+                select a.balance,
+                    (select coalesce(sum(remaining_credits),0) from public.packcreditlot where user_id=a.user_id)
+                    + (select coalesce(sum(credits),0) from public.packcreditallocation
+                       where user_id=a.user_id and status='reserved')
+                from public.packcreditaccount a where user_id=%s
+            """, (user_id,)).fetchone()
+        self.assertEqual(state, "released")
+        self.assertEqual(invariant, (2, 2))
 
 
 if __name__ == "__main__":
