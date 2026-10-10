@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pydantic import BaseModel, ConfigDict, model_validator
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from .models import PackCreditLedger, PaymentOperationAudit, Purchase, StripeEvent
@@ -16,6 +17,44 @@ class ReplayRequest(BaseModel):
         if bool(self.stripe_event_id) == bool(self.checkout_session_id):
             raise ValueError("Provide exactly one replay target")
         return self
+
+
+def backend_privilege_check(session: Session) -> dict:
+    tables = (
+        "globalmonthlyusage", "packcreditaccount", "packcreditledger", "generationusage",
+        "purchase", "stripeevent", "packcreditlot", "packcreditallocation", "paymentrefund",
+        "paymentcheckoutrate", "paymentoperationaudit",
+    )
+    sequences = (
+        "packcreditledger_id_seq", "generationusage_id_seq", "purchase_id_seq",
+        "packcreditlot_id_seq", "packcreditallocation_id_seq", "paymentrefund_id_seq",
+        "paymentcheckoutrate_id_seq", "paymentoperationaudit_id_seq",
+    )
+    functions = {
+        "process_stripe_purchase_event": "public.process_stripe_purchase_event(text,text,text,text,text,uuid,text,integer,integer,integer,integer,integer,text,boolean,boolean,text)",
+        "record_stripe_event_failure": "public.record_stripe_event_failure(text,text,text,text,text,boolean)",
+        "record_stripe_event_observation": "public.record_stripe_event_observation(text,text,text,text,text,text,boolean,text)",
+        "reserve_checkout_creation": "public.reserve_checkout_creation(uuid,text,text)",
+        "get_available_pack_credits": "public.get_available_pack_credits(uuid)",
+        "reserve_pack_credits": "public.reserve_pack_credits(uuid,uuid,integer,integer)",
+        "complete_pack_credits": "public.complete_pack_credits(uuid,uuid)",
+        "release_pack_credits": "public.release_pack_credits(uuid,uuid)",
+    }
+    checks = []
+    for name in tables:
+        allowed = session.execute(text("select has_table_privilege(current_user,:object,'select,insert,update,delete')"),
+                                  {"object": f"public.{name}"}).scalar_one()
+        checks.append({"kind": "table", "name": name, "allowed": allowed})
+    for name in sequences:
+        allowed = session.execute(text("select has_sequence_privilege(current_user,:object,'usage,select')"),
+                                  {"object": f"public.{name}"}).scalar_one()
+        checks.append({"kind": "sequence", "name": name, "allowed": allowed})
+    for name, signature in functions.items():
+        allowed = session.execute(text("select has_function_privilege(current_user,:object,'execute')"),
+                                  {"object": signature}).scalar_one()
+        checks.append({"kind": "function", "name": name, "allowed": allowed})
+    role = session.execute(text("select current_user")).scalar_one()
+    return {"ready": all(item["allowed"] for item in checks), "database_role": role, "checks": checks}
 
 
 def failed_events(

@@ -19,7 +19,7 @@ def call(base_url: str, token: str, method: str, path: str, body: dict | None = 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Payment administrator operations")
-    parser.add_argument("command", choices=["failed", "reconcile", "replay-event", "replay-session"])
+    parser.add_argument("command", choices=["failed", "reconcile", "permissions", "replay-event", "replay-session"])
     parser.add_argument("target", nargs="?")
     parser.add_argument("--base-url", default=os.getenv("PAYMENT_ADMIN_BASE_URL", "http://localhost:8000"))
     parser.add_argument("--status", choices=["failed", "observed_pending"])
@@ -38,6 +38,8 @@ def main() -> None:
         result = call(args.base_url, token, "GET", "/admin/payments/failed-events?" + query)
     elif args.command == "reconcile":
         result = call(args.base_url, token, "GET", "/admin/payments/reconciliation")
+    elif args.command == "permissions":
+        result = call(args.base_url, token, "GET", "/admin/payments/backend-privileges")
     else:
         if not args.target:
             parser.error("Replay requires an Event or Session ID")

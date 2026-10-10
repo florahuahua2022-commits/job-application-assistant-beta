@@ -36,7 +36,7 @@ from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
-from .payment_operations import ReplayRequest, failed_events, reconciliation, replay
+from .payment_operations import ReplayRequest, backend_privilege_check, failed_events, reconciliation, replay
 from .payments import MAX_WEBHOOK_BYTES, CheckoutSessionRequest, CheckoutSessionResponse, DeterministicPaymentConflict, StripeGateway, construct_webhook_event, create_checkout_session, get_stripe_gateway, handle_payment_webhook, record_webhook_conflict, validate_stripe_settings
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
@@ -164,6 +164,14 @@ def admin_payment_reconciliation(
 ):
     require_admin_user(user_id)
     return reconciliation(session, gateway)
+
+
+@app.get("/admin/payments/backend-privileges")
+def admin_payment_backend_privileges(
+    session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user),
+):
+    require_admin_user(user_id)
+    return backend_privilege_check(session)
 
 
 @app.post("/admin/payments/replay")

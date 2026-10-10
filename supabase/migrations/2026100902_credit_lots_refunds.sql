@@ -65,6 +65,10 @@ revoke all on public.packcreditlot, public.packcreditallocation, public.paymentr
     from public, anon, authenticated;
 revoke all on sequence public.packcreditlot_id_seq, public.packcreditallocation_id_seq,
     public.paymentrefund_id_seq from public, anon, authenticated;
+grant select, insert, update, delete on public.packcreditlot, public.packcreditallocation,
+    public.paymentrefund to service_role;
+grant usage, select on sequence public.packcreditlot_id_seq, public.packcreditallocation_id_seq,
+    public.paymentrefund_id_seq to service_role;
 
 insert into public.packcreditlot(
     user_id, source_ledger_id, purchase_id, source_type, granted_credits,
