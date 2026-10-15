@@ -1,12 +1,10 @@
 # Stripe 积分支付测试环境搭建手册
 
 适用分支：`codex/payment-data-model`  
-基准提交：`a8e114b`  
+基准提交：运行前用 `git rev-parse --short HEAD` 核对负责人批准的功能分支提交。
 适用范围：全新的 Supabase 测试项目、全新的 Render 测试服务、Stripe 测试模式。
 
 > 安全边界：不要在聊天、工单、截图或仓库中粘贴数据库连接串、Bearer Token、Stripe 密钥或 Webhook 签名密钥。本手册不访问生产数据库、生产 Render 服务或 Stripe 真实模式，也不触发真实付款或退款。
-
-> `a8e114b` 已知上线阻断项：真实 PostgreSQL 路径中，Checkout 先写入的 `pending` 订单尚无 PaymentIntent，而 2a SQL 当前会把成功 Webhook 带来的首个 PaymentIntent 判为事实冲突。搭建环境可以继续，用于验证迁移、权限、失败审计和复现问题；在修复并补充 PostgreSQL 端到端测试前，不应把“成功付款发积分”判为验收通过，也不得进入生产。
 
 ## 0. 准备清单
 
@@ -25,7 +23,7 @@ git switch codex/payment-data-model
 git rev-parse --short HEAD
 ```
 
-预期第二条输出为 `a8e114b`。如果不是，停止并让工程人员确认版本。
+把第二条输出发给负责人核对。如果不是负责人批准的提交，停止。
 
 ## 1. 新建独立 Supabase 测试项目
 
@@ -40,27 +38,89 @@ git rev-parse --short HEAD
 
 影响：只创建一个空的测试项目，不影响任何已有项目。
 
-### 1.2 先建立基础 schema
+### 1.2 核对 Session pooler 连接目标
 
-三个支付 migration 不是空库初始化脚本：`2026100901` 依赖早期 migration 已建立的 `auth.users`、`purchase`、`packcreditaccount`、`packcreditledger` 和 `generationusage`。新项目必须先应用仓库中排在 `2026100901` 之前的全部 migration。
+在 Supabase 的 **Connect → Session pooler** 复制连接信息。主机必须包含 `ap-southeast-1` 并以 `pooler.supabase.com` 结尾，端口必须是 `5432`，用户名必须是 `postgres.edywbrvugcptvifbcjnk`。不要选择 Direct connection。
 
-在本机仓库根目录的 PowerShell 中运行：
-
-```powershell
-supabase login
-supabase link --project-ref <仅填写测试项目的 Project Ref>
-supabase db push --linked --dry-run --include-all
-```
-
-影响：前两条只让本机 CLI 连接测试项目；第三条只预演全部待执行 migration，不写数据库。逐项确认目标 Project Ref 是测试项目，且预演列表以 `20260804_online_beta.sql` 开始、包含三个 `20261009` 支付 migration。
-
-确认无误后，在同一个 PowerShell 窗口运行：
+在本机仓库根目录的 PowerShell 中临时设置连接串；密码只在当前窗口输入，不写文件、不回显：
 
 ```powershell
-supabase db push --linked --include-all
+$ProjectRef = "edywbrvugcptvifbcjnk"
+$DbHost = "<Connect 页面显示的 Session pooler 主机名>"
+$SecurePassword = Read-Host "请输入 Supabase 测试数据库密码" -AsSecureString
+$PlainPassword = [System.Net.NetworkCredential]::new("", $SecurePassword).Password
+$EncodedPassword = [System.Uri]::EscapeDataString($PlainPassword)
+$env:PAYMENT_TEST_DB_URL = "postgresql://postgres.${ProjectRef}:${EncodedPassword}@${DbHost}:5432/postgres?sslmode=require"
+
+function Assert-PaymentTestTarget {
+    $u = [uri]$env:PAYMENT_TEST_DB_URL
+    $username = $u.UserInfo.Split(':')[0]
+    [pscustomobject]@{ Host=$u.Host; Port=$u.Port; Username=$username; Password="******" }
+    if (-not $u.Host.EndsWith("pooler.supabase.com")) { throw "不是 Session pooler，停止" }
+    if (-not $u.Host.Contains("ap-southeast-1")) { throw "区域不是 ap-southeast-1，停止" }
+    if ($u.Port -ne 5432) { throw "端口不是 5432，停止" }
+    if ($username -ne "postgres.edywbrvugcptvifbcjnk") { throw "不是批准的测试项目，停止" }
+    if (("$($u.Host)|$username").Contains("bbrlvyatkgotcmlswtse")) { throw "检测到生产项目标识，停止" }
+}
+Assert-PaymentTestTarget
 ```
 
-影响：只在已链接的测试项目中按文件名顺序执行 migration。三个目标文件会依次执行：
+影响：只在当前 PowerShell 保存临时连接串并显示脱敏目标，不写数据库。把 Host、Port、Username 发给负责人确认；不要发送连接串或密码。
+
+### 1.3 空库基线引导与五个历史版本登记
+
+旧迁移存在重复的八位版本号，不能直接对空库执行仓库目录下的 `db push --include-all`。基线脚本使用后端现有依赖 `psycopg`，不要求本机安装 `psql`；它按依赖顺序执行截至 `20260820` 的历史 SQL，并生成不含重复版本的临时 CLI 工作目录。执行前它会再次显示 Host、Port、Username、隐藏密码，并要求输入测试 Project Ref。
+
+负责人确认目标后，在同一 PowerShell 运行：
+
+```powershell
+Assert-PaymentTestTarget
+$env:PYTHONPATH = "backend"
+python backend/scripts/empty_database_bootstrap.py
+```
+
+影响：写入批准的空测试项目，执行历史基线；不写 migration history。任一 SQL 失败时整个基线事务回滚。
+
+然后登记基线已执行的五个版本：
+
+```powershell
+Assert-PaymentTestTarget
+$Supabase = "D:\Users\Administrator\Documents\GitHub\job-application-assistant-beta\tools\supabase-cli\supabase.exe"
+& $Supabase migration repair 20260804 20260807 20260809 20260818 20260820 `
+  --status applied --db-url $env:PAYMENT_TEST_DB_URL --yes
+```
+
+影响：只写测试库的 `supabase_migrations.schema_migrations` 五行，不执行业务 migration。
+
+### 1.4 先 dry-run，再执行剩余 migration
+
+```powershell
+Assert-PaymentTestTarget
+& $Supabase db push --db-url $env:PAYMENT_TEST_DB_URL --dry-run --include-all `
+  --workdir "tmp/payment-test-cli-workdir"
+```
+
+影响：只读预演，不写数据库。预期只列出以下九个文件，多一个或少一个都停止：
+
+1. `20260826_application_archive.sql`
+2. `20261002_pack_credit_ledger.sql`
+3. `20261003080058_pack_credit_engine.sql`
+4. `20261003085650_pack_credit_column_defaults.sql`
+5. `20261003093309_custom_manual_pack_topup.sql`
+6. `2026100901_payment_orders_events.sql`
+7. `2026100902_credit_lots_refunds.sql`
+8. `2026100903_stripe_checkout_webhook.sql`
+9. `20261015000100_ensure_jobsource_discovery_context.sql`
+
+负责人确认 dry-run 输出后才运行：
+
+```powershell
+Assert-PaymentTestTarget
+& $Supabase db push --db-url $env:PAYMENT_TEST_DB_URL --include-all `
+  --workdir "tmp/payment-test-cli-workdir"
+```
+
+影响：只向批准的测试项目执行上述九个 migration。三个支付文件依次执行：
 
 1. `2026100901_payment_orders_events.sql`
 2. `2026100902_credit_lots_refunds.sql`
@@ -68,14 +128,13 @@ supabase db push --linked --include-all
 
 任一 migration 失败时停止，不要手工跳过失败文件。每个目标脚本都使用事务；失败应回滚该脚本。
 
-### 1.3 在 SQL Editor 执行两个只读预检
+### 1.5 在 SQL Editor 执行只读预检
 
 在 Supabase Dashboard 打开测试项目的 **SQL Editor**。从功能分支逐个打开下列文件，复制全文到新的查询窗口并点击 **Run**：
 
-1. `supabase/diagnostics/payment_preflight.sql`
-2. `supabase/diagnostics/stripe_checkout_preflight.sql`
+`supabase/diagnostics/payment_preflight.sql`
 
-影响：两份脚本都只读，不修改业务数据。第一份检查余额与流水、歧义释放、`purchase` 行/状态和数据库角色；第二份在只读事务中检查订单、Stripe 事件、重复 Session、RLS 和权限。
+影响：脚本只读且只返回一个结果集，检查余额与流水、歧义释放、订单/事件、RLS 和权限。
 
 新测试项目的预期结果：
 
@@ -86,7 +145,7 @@ supabase db push --linked --include-all
 - `purchase`、`stripeevent` 的 `rowsecurity` 为 `true`；
 - `anon`、`authenticated` 没有支付表权限。
 
-### 1.4 验证表、RLS 和权限
+### 1.6 验证表、RLS 和权限
 
 在测试项目 SQL Editor 中运行以下查询。影响：只读验证，不改数据。
 
@@ -368,3 +427,10 @@ Remove-Item Env:PAYMENT_ADMIN_BASE_URL
 7. 确认 Stripe Dashboard 仍处于测试模式，且没有遗留指向测试 Render 的端点或有效受限密钥。
 
 清理完成后，不要把测试配置复制到生产。生产 migration、Render 变更、PR、合并或推送 `main` 仍需负责人另行明确批准。
+
+最后清除当前 PowerShell 中的数据库秘密：
+
+```powershell
+Remove-Item Env:PAYMENT_TEST_DB_URL -ErrorAction SilentlyContinue
+Remove-Variable PlainPassword, EncodedPassword, SecurePassword, DbHost -ErrorAction SilentlyContinue
+```

@@ -203,9 +203,10 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             """, (user_id, f"cs_obs_{suffix}", f"pi_obs_{suffix}", status, dispute_status)).fetchone()[0]
         return order_id
 
-    def _record_observation(self, suffix, action, matched=True):
+    def _record_observation(self, suffix, action, matched=True, event_suffix=None):
         import psycopg
 
+        event_suffix = event_suffix or suffix
         session_id = f"cs_obs_{suffix}" if matched else f"cs_missing_{suffix}"
         payment_intent_id = f"pi_obs_{suffix}" if matched else f"pi_missing_{suffix}"
         with psycopg.connect(self.url) as connection:
@@ -213,16 +214,26 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
                 select public.record_stripe_event_observation(
                     %s,%s,%s,%s,%s,%s,false,%s
                 )
-            """, (f"evt_obs_{suffix}", f"test.{action}", f"fp_{suffix}",
+            """, (f"evt_obs_{event_suffix}", f"test.{action}", f"fp_{event_suffix}",
                   f"obj_{suffix}", session_id, payment_intent_id, action)).fetchone()[0]
             event = connection.execute("""
                 select status,failure_reason_code from public.stripeevent where stripe_event_id=%s
-            """, (f"evt_obs_{suffix}",)).fetchone()
+            """, (f"evt_obs_{event_suffix}",)).fetchone()
             order = connection.execute("""
                 select status,dispute_status,refund_detected_at is not null from public.purchase
                 where stripe_checkout_session_id=%s
             """, (session_id,)).fetchone()
         return result, event, order
+
+    def test_expired_after_payment_failed_is_conflict_and_preserves_failed_order(self):
+        self._insert_observation_order("failed_then_expired")
+        first, _, first_order = self._record_observation("failed_then_expired", "payment_failed")
+        second, event, second_order = self._record_observation(
+            "failed_then_expired", "expired", event_suffix="failed_then_expired_late"
+        )
+        self.assertEqual((first, first_order[0]), ("processed", "failed"))
+        self.assertEqual((second, event, second_order[0]),
+                         ("failed", ("failed", "order_state_conflict"), "failed"))
 
     def test_observation_payment_failed(self):
         self._insert_observation_order("payment_failed")

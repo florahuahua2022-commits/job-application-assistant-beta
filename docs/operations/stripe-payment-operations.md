@@ -4,7 +4,7 @@
 
 1. 先确认 Supabase 套餐是否提供自动备份/PITR。无论套餐如何，migration 前都在 SQL Editor 执行 `supabase/operations/payment_backup_and_restore.sql`，把 `packcreditaccount`、`packcreditledger`、`generationusage`、`purchase`、`globalmonthlyusage` 整表复制到私有 schema；实时表与备份表五组行数必须全部为 `MATCH`。没有自动备份时，另外把五个备份表导出 CSV 到受控位置。备份只用于人工核对，不自动恢复。
 2. 由负责人在生产库执行唯一的只读预检 `supabase/diagnostics/payment_preflight.sql`。它只返回一个结果集；任何 `result=BLOCK` 都停止。后端数据库用户名只需提供连接串中 `postgresql://用户名:...` 的“用户名”部分，不提供密码。
-3. 先执行生产 migration，成功后才能推送/合并 `main`。失败依赖事务自动回滚；若提交后发现异常，先暂停生成写入、停止新支付、保留事件与备份，实施向前修复，不执行整表自动恢复。
+3. 先执行生产 migration，成功后才能推送/合并 `main`。生产上线不得运行 `supabase db push --include-all` 回放仓库历史迁移；只执行本次经审阅的新增 migration SQL，并在事务内逐份执行、逐份核对。失败依赖事务自动回滚；若提交后发现异常，先暂停生成写入、停止新支付、保留事件与备份，实施向前修复，不执行整表自动恢复。
 4. Stripe Workbench Endpoint 固定 API 版本 `2026-09-30.endive`。优先使用受限密钥：Checkout Session 创建/读取；Event、PaymentIntent、Charge、Refund、Dispute 只读。本阶段不授予 Refund 写权限。
 5. 必须先在测试模式确认下面的管理员脚本能列出失败事件、生成对账结果并补发测试 Session。不得使用真实卡、真实退款或生产密钥。
 
@@ -15,6 +15,20 @@
 3. `ready` 必须为 `true`。若后端角色不是 `service_role`，由数据库负责人在 migration 事务内只给该准确角色补齐报告中为 `false` 的权限，再运行一次。不得给 `anon` 或 `authenticated` 补权。
 
 ## 暂停生成写入与异常处理
+
+如需确认生产 `jobsource.discovery_context` 是否存在，只由负责人在生产 SQL Editor 自行执行以下只读查询；Codex 不连接生产：
+
+```sql
+select exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'jobsource'
+      and column_name = 'discovery_context'
+) as discovery_context_exists;
+```
+
+结果为 `false` 时，`20261015000100_ensure_jobsource_discovery_context.sql` 必须随生产新增 migration 执行；结果为 `true` 时该 migration 仍可执行，因 `IF NOT EXISTS` 会安全跳过。不得因此修改旧迁移历史。
 
 1. 在 Render 把 `MONTHLY_PACK_LIMIT_GLOBAL` 的原值记在变更单，临时改为 `0` 并重新部署；这只阻止新预留。
 2. 在 SQL Editor 运行 `select count(*) from public.generationusage where status='reserved' and expires_at > now();`。结果必须为 `0`；即没有未过期的预留。已过期记录可由既有释放任务处理，不阻断 migration。
@@ -36,6 +50,10 @@
 建议最终方案是新增不可登录的匿名支付主体：删除账号时在一个受审计事务内把订单、退款和审计记录的用户引用改到匿名主体，移除邮箱、姓名、Stripe Customer 等直接标识，只保留金额、币种、税额、时间、状态、Stripe 对象尾部或不可逆摘要及会计所需关联。匿名映射的访问仅限财务/合规角色，并按确认后的期限定时销毁。
 
 影响：账号删除流程需要新增“有支付记录则脱敏归档”的分支；导出、对账和补发接口必须能识别已脱敏订单；退款窗口内若无法合法保留 Stripe 标识，退款只能人工处理。保留字段、期限、合法依据与删除证明格式须经会计/隐私意见确认后才能实施，当前不创建匿名主体或自动脱敏任务。
+
+当前实现中，`purchase.user_id`、`paymentrefund.user_id` 和 `paymentoperationaudit.admin_user_id` 都是 PostgreSQL `NO ACTION` 外键（`pg_constraint.confdeltype='a'`）。因此有任一财务记录时，Supabase Auth 用户删除会被数据库拒绝，API 返回失败并转人工处理；不会先删除账号再丢失财务事实。PostgreSQL 16 测试 `test_account_delete_is_blocked_and_financial_rows_are_retained` 同时核对订单、退款和管理员审计记录均保留。
+
+迟到事件规则：订单已由 `payment_failed` 变为 `failed` 后，再收到另一个 `checkout.session.expired`，新事件记录为 `failed/order_state_conflict`，订单保持 `failed`。PostgreSQL 16 测试 `test_expired_after_payment_failed_is_conflict_and_preserves_failed_order` 覆盖该顺序。
 
 ## 管理员脚本
 
