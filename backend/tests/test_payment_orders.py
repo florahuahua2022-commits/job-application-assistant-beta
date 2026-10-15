@@ -170,6 +170,23 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             version = connection.execute("show server_version_num").fetchone()[0]
         self.assertTrue(version.startswith("16"), version)
 
+    def test_jobsource_discovery_context_repair_is_idempotent(self):
+        import psycopg
+
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / \
+            "20261015000100_ensure_jobsource_discovery_context.sql"
+        with psycopg.connect(self.url) as connection:
+            connection.execute("drop table if exists public.jobsource")
+            connection.execute("create table public.jobsource (id bigint primary key)")
+            connection.execute(migration.read_text(encoding="utf-8"))
+            connection.execute(migration.read_text(encoding="utf-8"))
+            columns = connection.execute("""
+                select count(*) from information_schema.columns
+                where table_schema = 'public' and table_name = 'jobsource'
+                  and column_name = 'discovery_context'
+            """).fetchone()[0]
+        self.assertEqual(columns, 1)
+
     def _insert_observation_order(self, suffix, status="pending", dispute_status="none"):
         import psycopg
 
