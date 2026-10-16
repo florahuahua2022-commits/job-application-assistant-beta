@@ -188,6 +188,27 @@ select
 
 预期两列都为 `false`。若任一检查不符，停止搭建，不进入 Render 或 Stripe 步骤。
 
+在测试项目 SQL Editor 中运行以下只读查询，单独核对 Supabase API 的 `service_role`：
+
+```sql
+select
+  has_table_privilege('service_role', 'public.paymentoperationaudit', 'select') as can_select,
+  has_table_privilege('service_role', 'public.paymentoperationaudit', 'insert') as can_insert,
+  has_table_privilege('service_role', 'public.paymentoperationaudit', 'update') as can_update,
+  has_table_privilege('service_role', 'public.paymentoperationaudit', 'delete') as can_delete,
+  has_table_privilege('service_role', 'public.paymentoperationaudit', 'truncate') as can_truncate;
+```
+
+预期依次为 `true, true, false, false, true`。保留 `TRUNCATE` 是 Supabase 平台默认的整表运维能力；应用没有调用它。“只追加”在这里表示应用没有逐行 `UPDATE/DELETE`，并非声称数据库管理员无法清空表。旧积分表不在这项检查中，因为应用通过 `DATABASE_URL` 的 PostgreSQL 登录角色访问它们，而不是通过 JWT `service_role`。
+
+测试服务部署后，在本机项目目录运行：
+
+```powershell
+python backend/scripts/payment_admin.py permissions
+```
+
+影响：只调用测试服务的只读自检接口，不修改数据库。结果中的 `database_role` 是 `DATABASE_URL` 实际连接角色；检查以该角色为准，不把 Supabase JWT `service_role` 当作后端数据库用户。`paymentoperationaudit` 的应用最小权限为 `SELECT + INSERT`；旧积分表则按代码真实的直接访问和 `SECURITY INVOKER` 函数访问逐项检查。`ready` 必须为 `true`。
+
 ## 2. 新建独立 Render 测试服务
 
 ### 2.1 创建后端测试服务

@@ -712,6 +712,12 @@ class PostgreSQLPaymentOrderTests(unittest.TestCase):
             "process_stripe_purchase_event", "record_stripe_event_failure",
             "record_stripe_event_observation", "reserve_checkout_creation",
         }.issubset(checked), checked)
+        tables = {item["name"]: item for item in result["checks"] if item["kind"] == "table"}
+        self.assertEqual(tables["globalmonthlyusage"]["required"], ["select", "insert", "update"])
+        self.assertEqual(tables["packcreditaccount"]["required"], ["select", "insert", "update", "delete"])
+        self.assertEqual(tables["packcreditledger"]["required"], ["select", "insert", "delete"])
+        self.assertEqual(tables["generationusage"]["required"], ["select", "insert", "update", "delete"])
+        self.assertEqual(tables["paymentoperationaudit"]["required"], ["select", "insert"])
 
 
 if __name__ == "__main__":

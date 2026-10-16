@@ -20,11 +20,19 @@ class ReplayRequest(BaseModel):
 
 
 def backend_privilege_check(session: Session) -> dict:
-    tables = (
-        "globalmonthlyusage", "packcreditaccount", "packcreditledger", "generationusage",
-        "purchase", "stripeevent", "packcreditlot", "packcreditallocation", "paymentrefund",
-        "paymentcheckoutrate", "paymentoperationaudit",
-    )
+    tables = {
+        "globalmonthlyusage": ("select", "insert", "update"),
+        "packcreditaccount": ("select", "insert", "update", "delete"),
+        "packcreditledger": ("select", "insert", "delete"),
+        "generationusage": ("select", "insert", "update", "delete"),
+        "purchase": ("select", "insert", "update"),
+        "stripeevent": ("select", "insert", "update"),
+        "packcreditlot": ("select", "insert", "update"),
+        "packcreditallocation": ("select", "insert", "update"),
+        "paymentrefund": ("select", "insert", "update"),
+        "paymentcheckoutrate": ("select", "insert", "update"),
+        "paymentoperationaudit": ("select", "insert"),
+    }
     sequences = (
         "packcreditledger_id_seq", "generationusage_id_seq", "purchase_id_seq",
         "packcreditlot_id_seq", "packcreditallocation_id_seq", "paymentrefund_id_seq",
@@ -41,10 +49,18 @@ def backend_privilege_check(session: Session) -> dict:
         "release_pack_credits": "public.release_pack_credits(uuid,uuid)",
     }
     checks = []
-    for name in tables:
-        allowed = session.execute(text("select has_table_privilege(current_user,:object,'select,insert,update,delete')"),
-                                  {"object": f"public.{name}"}).scalar_one()
-        checks.append({"kind": "table", "name": name, "allowed": allowed})
+    for name, required in tables.items():
+        permissions = {
+            privilege: session.execute(
+                text("select has_table_privilege(current_user,:object,:privilege)"),
+                {"object": f"public.{name}", "privilege": privilege},
+            ).scalar_one()
+            for privilege in required
+        }
+        checks.append({
+            "kind": "table", "name": name, "required": list(required),
+            "permissions": permissions, "allowed": all(permissions.values()),
+        })
     for name in sequences:
         allowed = session.execute(text("select has_sequence_privilege(current_user,:object,'usage,select')"),
                                   {"object": f"public.{name}"}).scalar_one()

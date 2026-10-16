@@ -11,8 +11,10 @@
 ### 确认生产后端数据库角色授权
 
 1. 只在自己的密码管理器或 Render 环境页面查看连接串；不要把连接串或密码贴到聊天、文档或工单。
-2. 后端部署后，由管理员在受控终端运行 `python backend/scripts/payment_admin.py permissions`。脚本调用应用内只读接口 `/admin/payments/backend-privileges`，返回实际数据库角色，并核对 `globalmonthlyusage`、`packcreditaccount`、`packcreditledger`、`generationusage`、全部支付表、相关序列和函数。
-3. `ready` 必须为 `true`。若后端角色不是 `service_role`，由数据库负责人在 migration 事务内只给该准确角色补齐报告中为 `false` 的权限，再运行一次。不得给 `anon` 或 `authenticated` 补权。
+2. `service_role` 是 Supabase API 的 JWT 角色，不等于后端 `DATABASE_URL` 使用的 PostgreSQL 登录角色。先在 Render 查看 `DATABASE_URL` 的用户名部分；Session pooler 通常显示为 `postgres.<project-ref>`，应用连接后由下一步返回数据库实际的 `current_user`。仓库本身不能确定生产配置中的准确用户名。
+3. 后端部署后，由管理员在受控终端运行 `python backend/scripts/payment_admin.py permissions`。脚本调用应用内只读接口 `/admin/payments/backend-privileges`，按实际 `current_user` 核对应用真实路径所需的最小权限：旧积分表既有直接读写，也会被 `SECURITY INVOKER` 函数读写；支付表、相关序列和八个函数也一并检查。
+4. `paymentoperationaudit` 对 `service_role` 的设计权限是 `SELECT + INSERT`，没有行级 `UPDATE/DELETE`。Supabase 默认 ACL 中的 `TRUNCATE` 保留给平台/运维整表维护，不被应用代码使用；因此这里的“只追加”特指应用不能修改或删除单行，并不宣称数据库层绝对不可清空。
+5. `ready` 必须为 `true`。如有 `false`，先确认 Render 使用的数据库角色和调用路径；任何补权都须另行审阅并通过 migration 完成。不得给 `anon` 或 `authenticated` 补权，也不要为了通过检查给 `service_role` 增加旧积分表的整套 CRUD。
 
 ## 暂停生成写入与异常处理
 
