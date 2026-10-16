@@ -76,17 +76,39 @@ class StripePaymentCatalogTests(unittest.TestCase):
 
         self.assertEqual((identity.id, identity.email), (user_id, "verified@example.test"))
 
+    def test_stripe_settings_accept_matching_secret_and_restricted_keys(self):
+        from app.payments import validate_stripe_settings
+
+        for mode, key in (
+            ("test", "sk_test_fake"),
+            ("test", "rk_test_fake"),
+            ("live", "sk_live_fake"),
+            ("live", "rk_live_fake"),
+        ):
+            with self.subTest(mode=mode, key=key):
+                validate_stripe_settings(Settings(
+                    _env_file=None,
+                    stripe_mode=mode,
+                    stripe_secret_key=key,
+                    stripe_webhook_secret="whsec_fake",
+                ))
+
     def test_stripe_settings_reject_mode_key_mismatch(self):
         from app.payments import validate_stripe_settings
 
-        configured = Settings(
-            _env_file=None,
-            stripe_mode="live",
-            stripe_secret_key="sk_test_fake",
-            stripe_webhook_secret="whsec_fake",
-        )
-        with self.assertRaises(ValueError):
-            validate_stripe_settings(configured)
+        for mode, key in (
+            ("test", "sk_live_fake"),
+            ("test", "rk_live_fake"),
+            ("live", "sk_test_fake"),
+            ("live", "rk_test_fake"),
+        ):
+            with self.subTest(mode=mode, key=key), self.assertRaises(ValueError):
+                validate_stripe_settings(Settings(
+                    _env_file=None,
+                    stripe_mode=mode,
+                    stripe_secret_key=key,
+                    stripe_webhook_secret="whsec_fake",
+                ))
 
 
 class CheckoutSessionTests(unittest.TestCase):

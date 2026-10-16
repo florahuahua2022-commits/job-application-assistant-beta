@@ -81,8 +81,8 @@ def validate_stripe_settings(configured=settings) -> None:
         return
     if not key or not configured.stripe_webhook_secret:
         raise ValueError("STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be configured together")
-    expected_prefix = "sk_live_" if mode == "live" else "sk_test_"
-    if not key.startswith(expected_prefix):
+    expected_prefixes = ("sk_live_", "rk_live_") if mode == "live" else ("sk_test_", "rk_test_")
+    if not key.startswith(expected_prefixes):
         raise ValueError("Stripe key does not match STRIPE_MODE")
 
 
