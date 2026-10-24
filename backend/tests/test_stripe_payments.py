@@ -137,7 +137,7 @@ class CheckoutSessionTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.engine.dispose()
 
-    def test_checkout_uses_server_price_card_and_verified_identity(self):
+    def test_checkout_uses_server_price_dashboard_methods_and_verified_identity(self):
         response = self.client.post(
             "/payments/checkout-sessions",
             headers={"Idempotency-Key": "attempt-one"},
@@ -146,13 +146,94 @@ class CheckoutSessionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         params, _idempotency_key = self.gateway.create_checkout_session.call_args.args
-        self.assertEqual(params["payment_method_types"], ["card"])
+        self.assertNotIn("payment_method_types", params)
+        self.assertNotIn("allowed_payment_method_types", params)
         self.assertEqual(params["line_items"][0]["price_data"]["unit_amount"], 1695)
         self.assertEqual(params["customer_email"], "buyer@example.test")
         self.assertEqual(params["metadata"]["user_id"], str(self.user.id))
         with Session(self.engine) as session:
             order = session.exec(select(Purchase)).one()
         self.assertEqual((order.total_paid_cents, order.gst_cents, order.single_pack_price_cents), (1695, 0, 1695))
+
+    def test_checkout_parameters_match_pinned_sdk_and_wire_version(self):
+        import stripe
+        from stripe.params.checkout import (
+            SessionCreateParams, SessionCreateParamsLineItem,
+            SessionCreateParamsLineItemPriceData, SessionCreateParamsLineItemPriceDataProductData,
+        )
+        from urllib.parse import parse_qs
+        from app.payments import StripeGateway, STRIPE_API_VERSION
+
+        gateway = StripeGateway("sk_test_contract_only")
+        response_body = json.dumps({
+            "id": "cs_test_contract", "object": "checkout.session",
+            "url": "https://checkout.stripe.test/contract", "livemode": False,
+        })
+        # Exercise the real SDK; intercept only HTTP, never contact Stripe.
+        with patch("stripe._http_client.RequestsClient.request", return_value=(
+            response_body, 200, {},
+        )) as request:
+            app.dependency_overrides[get_stripe_gateway] = lambda: gateway
+            response = self.client.post(
+                "/payments/checkout-sessions", headers={"Idempotency-Key": "contract"},
+                json={"package_code": "single"},
+            )
+        self.assertEqual(response.status_code, 200)
+        args, kwargs = request.call_args
+        headers = args[2] if len(args) > 2 else kwargs["headers"]
+        body = args[3] if len(args) > 3 else kwargs["post_data"]
+        fields = parse_qs(body)
+        self.assertEqual(headers["Stripe-Version"], STRIPE_API_VERSION)
+        self.assertTrue(headers["Idempotency-Key"].startswith("checkout:"))
+        self.assertEqual(args[0], "post")
+        self.assertTrue(args[1].endswith("/v1/checkout/sessions"))
+        self.assertEqual(fields["line_items[0][price_data][currency]"], ["aud"])
+        self.assertEqual(fields["line_items[0][price_data][unit_amount]"], ["1695"])
+        self.assertEqual(fields["line_items[0][quantity]"], ["1"])
+        self.assertEqual(fields["line_items[0][price_data][product_data][name]"], ["single credit pack"])
+        self.assertLessEqual(
+            {key.split("[")[0] for key in fields},
+            set(SessionCreateParams.__annotations__),
+        )
+        for prefix, schema in (
+            ("line_items[0][", SessionCreateParamsLineItem),
+            ("line_items[0][price_data][", SessionCreateParamsLineItemPriceData),
+            ("line_items[0][price_data][product_data][", SessionCreateParamsLineItemPriceDataProductData),
+        ):
+            self.assertLessEqual(
+                {key[len(prefix):].split("]")[0] for key in fields if key.startswith(prefix)},
+                set(schema.__annotations__),
+            )
+        self.assertEqual(stripe._api_version._ApiVersion.CURRENT, STRIPE_API_VERSION)
+
+    def test_invalid_request_leaves_no_purchase_and_new_key_retries_once(self):
+        import stripe
+        self.gateway.create_checkout_session.side_effect = stripe.InvalidRequestError(
+            "payment_method_types is no longer supported", "payment_method_types",
+        )
+        with self.assertRaises(stripe.InvalidRequestError):
+            self.client.post(
+                "/payments/checkout-sessions", headers={"Idempotency-Key": "invalid"},
+                json={"package_code": "single"},
+            )
+        with Session(self.engine) as session:
+            self.assertEqual(session.exec(select(Purchase)).all(), [])
+            reservation = session.exec(select(PaymentCheckoutRate)).one()
+            self.assertEqual(reservation.status, "released")
+            self.assertIsNotNone(reservation.released_at)
+            self.assertIsNone(reservation.stripe_checkout_session_id)
+        self.gateway.create_checkout_session.side_effect = None
+        headers = {"Idempotency-Key": "fixed-new-key"}
+        for _ in range(2):
+            response = self.client.post(
+                "/payments/checkout-sessions", headers=headers, json={"package_code": "single"},
+            )
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.gateway.create_checkout_session.call_count, 2)
+        with Session(self.engine) as session:
+            self.assertEqual(len(session.exec(select(Purchase)).all()), 1)
+            self.assertEqual(sorted(row.status for row in session.exec(select(PaymentCheckoutRate))),
+                             ["completed", "released"])
 
     def test_checkout_rejects_client_owned_payment_fields(self):
         response = self.client.post(
@@ -244,6 +325,36 @@ class CheckoutSessionTests(unittest.TestCase):
         with Session(self.engine) as session:
             order = session.exec(select(Purchase).where(Purchase.stripe_checkout_session_id == "cs_paid")).one()
         self.assertEqual(order.status, "paid")
+
+    def test_dashboard_async_payment_waits_for_paid_event_and_grants_once(self):
+        self.client.post(
+            "/payments/checkout-sessions", headers={"Idempotency-Key": "async"},
+            json={"package_code": "single"},
+        )
+        params = self.gateway.create_checkout_session.call_args.args[0]
+        event = {
+            "id": "evt_async_unpaid", "object": "event", "api_version": "2026-09-30.endive",
+            "type": "checkout.session.completed", "livemode": False,
+            "data": {"object": {
+                "id": "cs_test_one", "object": "checkout.session", "mode": "payment",
+                "payment_status": "unpaid", "payment_intent": "pi_async",
+                "amount_total": 1695, "currency": "aud", "metadata": params["metadata"],
+            }},
+        }
+        self.assertEqual(self._post_signed_event(event).status_code, 200)
+        with Session(self.engine) as session:
+            self.assertEqual(session.exec(select(Purchase)).one().status, "pending")
+        event["id"], event["type"] = "evt_async_paid", "checkout.session.async_payment_succeeded"
+        event["data"]["object"]["payment_status"] = "paid"
+        for _ in range(2):
+            self.assertEqual(self._post_signed_event(event).status_code, 200)
+        with Session(self.engine) as session:
+            self.assertEqual(session.exec(select(Purchase)).one().status, "paid")
+            from app.models import PackCreditLedger
+            grants = session.exec(select(PackCreditLedger).where(
+                PackCreditLedger.entry_type == "grant_stripe_purchase",
+            )).all()
+            self.assertEqual(len(grants), 1)
 
     def test_bad_signature_and_oversized_body_are_rejected(self):
         with patch.object(settings, "stripe_webhook_secret", "whsec_test_fixture"):

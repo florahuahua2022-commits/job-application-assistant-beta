@@ -191,7 +191,6 @@ def create_checkout_session(
     }
     params = {
         "mode": "payment",
-        "payment_method_types": ["card"],
         "line_items": [{"quantity": 1, "price_data": {
             "currency": package.currency.lower(),
             "unit_amount": package.total_cents,
