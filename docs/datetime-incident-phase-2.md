@@ -70,6 +70,7 @@ python backend/tests/run_pg16.py --incident-pg16-port 55439 --incident-timezone 
 
 - 既有 backend job 改为生产/旧组矩阵，运行同一份测试；Python 由 3.12 改为 3.13，与用户提供的生产 Python 次版本一致，不声称补丁版本完全相同。
 - 每个矩阵实例使用独立 PG16 服务，两种会话时区都执行；保留并上传离线及 PG16 证据。触发块逐项核对不变：pull_request，push 仅 main。创建草稿 PR 通过既有 pull_request 事件触发 CI。
+- backend job 显式使用 bash，确保 GitHub Actions 的 `-o pipefail` 生效，测试输出经 tee 保存时不会吞掉失败退出码。这是验收门禁的一部分，不改变触发条件。
 - 依赖固定仍留在阶段四；本阶段未新增 CI 专用约束文件。CI 结果以草稿 PR 的本次提交检查为准，本地结果如上。
 - 已完成只读整体审阅和 PG 合约入口增量复核，未发现阻断问题。CRLF 感知差异检查及 YAML 解析通过。
 - 差异文件 `datetime-incident-phase-2.patch` 以阶段一为基线，包含本阶段代码、测试、CI、说明及19处对照，不含它自身、阶段一 patch 或既有流量优化 patch。

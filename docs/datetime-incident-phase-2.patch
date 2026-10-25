@@ -1,11 +1,14 @@
 diff --git a/.github/workflows/quality-gates.yml b/.github/workflows/quality-gates.yml
-index 60941ad..5f91f27 100644
+index 60941ad..36f3455 100644
 --- a/.github/workflows/quality-gates.yml
 +++ b/.github/workflows/quality-gates.yml
-@@ -16,6 +16,31 @@ jobs:
+@@ -16,6 +16,34 @@ jobs:
    backend-tests:
      runs-on: ubuntu-latest
      timeout-minutes: 20
++    defaults:
++      run:
++        shell: bash
 +    strategy:
 +      fail-fast: false
 +      matrix:
@@ -34,7 +37,7 @@ index 60941ad..5f91f27 100644
      env:
        PYTHONPATH: backend
        DATABASE_URL: sqlite:///./ci-test.db
-@@ -24,21 +49,32 @@ jobs:
+@@ -24,21 +52,32 @@ jobs:
        - uses: actions/checkout@v6
        - uses: actions/setup-python@v6
          with:
@@ -728,10 +731,10 @@ index 0000000..bc80aff
 +另外的七处 datetime.utcnow() 用于 JSON、导出或辅助日期，不属于本次列赋值范围，保持原样。
 diff --git a/docs/datetime-incident-phase-2.md b/docs/datetime-incident-phase-2.md
 new file mode 100644
-index 0000000..ded8a8f
+index 0000000..868e1bf
 --- /dev/null
 +++ b/docs/datetime-incident-phase-2.md
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,79 @@
 +# 日期时区事故：阶段二
 +
 +阶段二基线为 `8d78b6d`，分支 `codex/production-datetime-incident`。只处理批准的日期写入、输入和读回兼容，以及相应验收基础设施；阶段三、四未开始。
@@ -804,6 +807,7 @@ index 0000000..ded8a8f
 +
 +- 既有 backend job 改为生产/旧组矩阵，运行同一份测试；Python 由 3.12 改为 3.13，与用户提供的生产 Python 次版本一致，不声称补丁版本完全相同。
 +- 每个矩阵实例使用独立 PG16 服务，两种会话时区都执行；保留并上传离线及 PG16 证据。触发块逐项核对不变：pull_request，push 仅 main。创建草稿 PR 通过既有 pull_request 事件触发 CI。
++- backend job 显式使用 bash，确保 GitHub Actions 的 `-o pipefail` 生效，测试输出经 tee 保存时不会吞掉失败退出码。这是验收门禁的一部分，不改变触发条件。
 +- 依赖固定仍留在阶段四；本阶段未新增 CI 专用约束文件。CI 结果以草稿 PR 的本次提交检查为准，本地结果如上。
 +- 已完成只读整体审阅和 PG 合约入口增量复核，未发现阻断问题。CRLF 感知差异检查及 YAML 解析通过。
 +- 差异文件 `datetime-incident-phase-2.patch` 以阶段一为基线，包含本阶段代码、测试、CI、说明及19处对照，不含它自身、阶段一 patch 或既有流量优化 patch。
