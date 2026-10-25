@@ -1,0 +1,969 @@
+{
+  "run_number": 163,
+  "commit": "e7bf7e20e630b136838e8453c7059132f71e82f1",
+  "job": "latest-documents-postgres-16",
+  "failed_step": "Run full isolated SQLite regression suite",
+  "classification_rule": "first observed failing write, not inferred feature coverage",
+  "tests": [
+    {
+      "number": 1,
+      "test": "backend/tests/test_application_decision_api.py::ApplicationDecisionApiTests::test_job_change_invalidates_decision",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_application_decision_api.py",
+          "line": 101,
+          "function": "test_job_change_invalidates_decision"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1851,
+          "function": "update_application"
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "test": "backend/tests/test_application_decision_api.py::ApplicationDecisionApiTests::test_missing_jdf_keeps_diagnosis_incomplete_without_gating_generation",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_application_decision_api.py",
+          "line": 105,
+          "function": "test_missing_jdf_keeps_diagnosis_incomplete_without_gating_generation"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "test": "backend/tests/test_egress_reads.py::IdentityReadTests::test_cross_application_reads_only_identity_preserving_leak_detection",
+      "category": "A",
+      "first_failure_source": "test_egress_reads.py:28 archived_at=datetime(2026, 1, 1); setUp commit at line 31",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_egress_reads.py",
+          "line": 31,
+          "function": "setUp"
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "test": "backend/tests/test_egress_reads.py::IdentityReadTests::test_parse_ad_reads_only_company_preserving_scope_duplicates_and_archive",
+      "category": "A",
+      "first_failure_source": "test_egress_reads.py:28 archived_at=datetime(2026, 1, 1); setUp commit at line 31",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_egress_reads.py",
+          "line": 31,
+          "function": "setUp"
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "test": "backend/tests/test_egress_reads.py::IdentityReadTests::test_probe_counts_actual_fetches",
+      "category": "A",
+      "first_failure_source": "test_egress_reads.py:28 archived_at=datetime(2026, 1, 1); setUp commit at line 31",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_egress_reads.py",
+          "line": 31,
+          "function": "setUp"
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "test": "backend/tests/test_job_sources.py::JobSourceTests::test_acquisition_endpoint_persists_validated_source_state",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 197,
+          "function": "test_acquisition_endpoint_persists_validated_source_state"
+        },
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 37,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 7,
+      "test": "backend/tests/test_job_sources.py::JobSourceTests::test_attached_jdf_creates_unresolved_source_without_fabricated_text",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 57,
+          "function": "test_attached_jdf_creates_unresolved_source_without_fabricated_text"
+        },
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 37,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 8,
+      "test": "backend/tests/test_job_sources.py::JobSourceTests::test_duplicate_fragments_are_deduplicated_and_unresolved_jdf_is_reconciled",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 140,
+          "function": "test_duplicate_fragments_are_deduplicated_and_unresolved_jdf_is_reconciled"
+        },
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 37,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 9,
+      "test": "backend/tests/test_job_sources.py::JobSourceTests::test_unrelated_application_update_preserves_sources",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 184,
+          "function": "test_unrelated_application_update_preserves_sources"
+        },
+        {
+          "file": "backend/tests/test_job_sources.py",
+          "line": 37,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 10,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_backend_rejects_invalid_type_and_mismatched_target",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 154,
+          "function": "test_backend_rejects_invalid_type_and_mismatched_target"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 54,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 11,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_duplicate_sha_is_persisted_without_duplicate_extracted_text",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 127,
+          "function": "test_duplicate_sha_is_persisted_without_duplicate_extracted_text"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 64,
+          "function": "upload"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1659,
+          "function": "upload_application_source"
+        }
+      ]
+    },
+    {
+      "number": 12,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_manual_docx_and_txt_uploads_create_extracted_sources",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 91,
+          "function": "test_manual_docx_and_txt_uploads_create_extracted_sources"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 64,
+          "function": "upload"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1659,
+          "function": "upload_application_source"
+        }
+      ]
+    },
+    {
+      "number": 13,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_manual_pdf_fulfils_unresolved_jdf_without_losing_provenance_or_binary",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 75,
+          "function": "test_manual_pdf_fulfils_unresolved_jdf_without_losing_provenance_or_binary"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 54,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 14,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_manual_upload_enforces_ownership",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 103,
+          "function": "test_manual_upload_enforces_ownership"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 54,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 15,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_oversized_mismatched_and_corrupt_uploads_are_rejected",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 111,
+          "function": "test_oversized_mismatched_and_corrupt_uploads_are_rejected"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 54,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 16,
+      "test": "backend/tests/test_manual_source_upload.py::ManualSourceUploadTests::test_partial_upload_is_truthfully_persisted",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 138,
+          "function": "test_partial_upload_is_truthfully_persisted"
+        },
+        {
+          "file": "backend/tests/test_manual_source_upload.py",
+          "line": 54,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 17,
+      "test": "backend/tests/test_outcome_learning.py::OutcomeEndpointTests::test_cross_user_access_is_rejected",
+      "category": "A",
+      "first_failure_source": "test_outcome_learning.py:131 GeneratedDocument.created_at=datetime.utcnow()-timedelta(days=1)",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_outcome_learning.py",
+          "line": 132,
+          "function": "setUp"
+        }
+      ]
+    },
+    {
+      "number": 18,
+      "test": "backend/tests/test_outcome_learning.py::OutcomeEndpointTests::test_record_correct_remove_unknown_and_exclude_without_ai",
+      "category": "A",
+      "first_failure_source": "test_outcome_learning.py:131 GeneratedDocument.created_at=datetime.utcnow()-timedelta(days=1)",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_outcome_learning.py",
+          "line": 132,
+          "function": "setUp"
+        }
+      ]
+    },
+    {
+      "number": 19,
+      "test": "backend/tests/test_outcome_learning.py::OutcomeEndpointTests::test_submission_snapshot_is_immutable_and_later_document_gets_no_credit",
+      "category": "A",
+      "first_failure_source": "test_outcome_learning.py:131 GeneratedDocument.created_at=datetime.utcnow()-timedelta(days=1)",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_outcome_learning.py",
+          "line": 132,
+          "function": "setUp"
+        }
+      ]
+    },
+    {
+      "number": 20,
+      "test": "backend/tests/test_real_user_regression.py::RealUserRegressionTests::test_job_edit_updates_primary_source_and_makes_old_documents_historical",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_real_user_regression.py",
+          "line": 1111,
+          "function": "test_job_edit_updates_primary_source_and_makes_old_documents_historical"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1851,
+          "function": "update_application"
+        }
+      ]
+    },
+    {
+      "number": 21,
+      "test": "backend/tests/test_real_user_regression.py::RealUserRegressionTests::test_production_shaped_historical_resume_requires_complete_reupload",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_real_user_regression.py",
+          "line": 709,
+          "function": "test_production_shaped_historical_resume_requires_complete_reupload"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1298,
+          "function": "upload_resume"
+        }
+      ]
+    },
+    {
+      "number": 22,
+      "test": "backend/tests/test_real_user_regression.py::RealUserRegressionTests::test_upload_unresolved_then_exclude_allows_update_and_generation",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_real_user_regression.py",
+          "line": 420,
+          "function": "test_upload_unresolved_then_exclude_allows_update_and_generation"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1298,
+          "function": "upload_resume"
+        }
+      ]
+    },
+    {
+      "number": 23,
+      "test": "backend/tests/test_release_gate.py::ReleaseGateTests::test_failed_ats_blocks_and_clean_release_can_be_marked_ready",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_release_gate.py",
+          "line": 101,
+          "function": "test_failed_ats_blocks_and_clean_release_can_be_marked_ready"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1912,
+          "function": "update_application_status"
+        }
+      ]
+    },
+    {
+      "number": 24,
+      "test": "backend/tests/test_source_aware_parsing.py::SourceAwareIntegrationTests::test_automatic_acquisition_rebuilds_from_extracted_source",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 231,
+          "function": "test_automatic_acquisition_rebuilds_from_extracted_source"
+        },
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 152,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 25,
+      "test": "backend/tests/test_source_aware_parsing.py::SourceAwareIntegrationTests::test_creation_persists_unresolved_attached_jdf_warning",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 190,
+          "function": "test_creation_persists_unresolved_attached_jdf_warning"
+        },
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 152,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 26,
+      "test": "backend/tests/test_source_aware_parsing.py::SourceAwareIntegrationTests::test_manual_upload_rebuilds_models_and_invalidates_stale_derivatives",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 170,
+          "function": "test_manual_upload_rebuilds_models_and_invalidates_stale_derivatives"
+        },
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 152,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 27,
+      "test": "backend/tests/test_source_aware_parsing.py::SourceAwareIntegrationTests::test_replacing_source_with_changed_text_rebuilds_and_preserves_source_id",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 199,
+          "function": "test_replacing_source_with_changed_text_rebuilds_and_preserves_source_id"
+        },
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 152,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 28,
+      "test": "backend/tests/test_source_aware_parsing.py::SourceAwareIntegrationTests::test_same_extracted_text_does_not_invalidate_derivatives",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 213,
+          "function": "test_same_extracted_text_does_not_invalidate_derivatives"
+        },
+        {
+          "file": "backend/tests/test_source_aware_parsing.py",
+          "line": 152,
+          "function": "create_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1467,
+          "function": "create_application"
+        }
+      ]
+    },
+    {
+      "number": 29,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_accepts_blank_optional_confirmation_reference",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 286,
+          "function": "test_accepts_blank_optional_confirmation_reference"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1876,
+          "function": "record_application_submission"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 568,
+          "function": "capture_first_submission"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 191,
+          "function": "application_master_resume"
+        }
+      ]
+    },
+    {
+      "number": 30,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_applied_status_records_date_without_confirmation_reference",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 627,
+          "function": "test_applied_status_records_date_without_confirmation_reference"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1910,
+          "function": "update_application_status"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 568,
+          "function": "capture_first_submission"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 191,
+          "function": "application_master_resume"
+        }
+      ]
+    },
+    {
+      "number": 31,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_archive_preserves_workflow_status",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 323,
+          "function": "test_archive_preserves_workflow_status"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1930,
+          "function": "update_application_archive"
+        }
+      ]
+    },
+    {
+      "number": 32,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_archives_own_application",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 306,
+          "function": "test_archives_own_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1930,
+          "function": "update_application_archive"
+        }
+      ]
+    },
+    {
+      "number": 33,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_confirmed_requirements_survive_unrelated_and_full_form_unchanged_updates",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 507,
+          "function": "test_confirmed_requirements_survive_unrelated_and_full_form_unchanged_updates"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1851,
+          "function": "update_application"
+        }
+      ]
+    },
+    {
+      "number": 34,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_editing_selection_criteria_clears_saved_confirmations_and_blocks_submission",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 781,
+          "function": "test_editing_selection_criteria_clears_saved_confirmations_and_blocks_submission"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 2756,
+          "function": "update_generated_document"
+        }
+      ]
+    },
+    {
+      "number": 35,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_material_job_description_or_selection_criteria_change_requires_confirmation",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 551,
+          "function": "test_material_job_description_or_selection_criteria_change_requires_confirmation"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1851,
+          "function": "update_application"
+        }
+      ]
+    },
+    {
+      "number": 36,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_permanently_deletes_archived_application_after_title_confirmation",
+      "category": "A",
+      "first_failure_source": "test_submission.py:357 JobApplication.archived_at=datetime.utcnow()",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 359,
+          "function": "test_permanently_deletes_archived_application_after_title_confirmation"
+        }
+      ]
+    },
+    {
+      "number": 37,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_records_confirmation_and_marks_application_applied",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 272,
+          "function": "test_records_confirmation_and_marks_application_applied"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1876,
+          "function": "record_application_submission"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 568,
+          "function": "capture_first_submission"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 191,
+          "function": "application_master_resume"
+        }
+      ]
+    },
+    {
+      "number": 38,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_restores_own_application",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 312,
+          "function": "test_restores_own_application"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1930,
+          "function": "update_application_archive"
+        }
+      ]
+    },
+    {
+      "number": 39,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_updates_saved_job_details_without_losing_jd",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 378,
+          "function": "test_updates_saved_job_details_without_losing_jd"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1851,
+          "function": "update_application"
+        }
+      ]
+    },
+    {
+      "number": 40,
+      "test": "backend/tests/test_submission.py::SubmissionRecordTests::test_user_overridden_requirements_survive_unrelated_update",
+      "category": "B",
+      "first_failure_source": "production DateTime assignment; see main-baseline source inventory",
+      "ci_backend_frames": [
+        {
+          "file": "backend/tests/test_submission.py",
+          "line": 529,
+          "function": "test_user_overridden_requirements_survive_unrelated_update"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 62,
+          "function": "operation_log"
+        },
+        {
+          "file": "backend/app/main.py",
+          "line": 1851,
+          "function": "update_application"
+        }
+      ]
+    }
+  ]
+}
