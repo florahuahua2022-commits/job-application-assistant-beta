@@ -3,7 +3,7 @@ name: Quality gates
 on:
   pull_request:
   push:
-    branches: [main, codex/egress-read-design]
+    branches: [main]
 
 permissions:
   contents: read
