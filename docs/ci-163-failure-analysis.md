@@ -1,5 +1,7 @@
 # #163 的 40 项失败：夹具与真实业务写入分类
 
+> 2026-10-25 更新：用户提供北京时间 17:34:13 的生产日志，确认 main.py:1199 save_profile 写 ApplicantProfile.updated_at 失败。该点已由“潜在”升级为用户日志已确认；本次未重新访问生产，#163 的 7/33 分类仍按当次日志第一处失败保留。后续修复设计见 `production-datetime-incident-design.md`。
+
 日期：2026-10-25。独立分析分支：`codex/dependency-stability-analysis`，基于 `origin/main` 的 `dbce8ca`；未引入流量优化实现。本次仅分析既有日志和源码，未重跑应用、测试、数据库或生产请求。
 
 ## 1. 证据及分类口径
