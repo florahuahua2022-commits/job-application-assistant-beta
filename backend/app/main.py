@@ -112,15 +112,20 @@ def select_for_user(model, user_id: UUID | None):
 
 
 def latest_application_documents(session: Session, application_id: int, user_id: UUID | None) -> dict[str, GeneratedDocument]:
+    ranked = select(
+        GeneratedDocument.id,
+        func.row_number().over(
+            partition_by=GeneratedDocument.document_type,
+            order_by=(GeneratedDocument.created_at.desc(), GeneratedDocument.id.desc()),
+        ).label("rank"),
+    ).where(GeneratedDocument.application_id == application_id)
+    if user_id is not None:
+        ranked = ranked.where(GeneratedDocument.user_id == user_id)
+    ranked = ranked.subquery()
     documents = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
+        select(GeneratedDocument).join(ranked, GeneratedDocument.id == ranked.c.id).where(ranked.c.rank == 1)
     ).all()
-    latest: dict[str, GeneratedDocument] = {}
-    for document in documents:
-        latest.setdefault(document.document_type, document)
-    return latest
+    return {document.document_type: document for document in documents}
 
 
 def resume_snapshot(resume: Resume, ckb_json: str | None = None) -> dict:
@@ -2113,14 +2118,7 @@ def quality_check(
         raise HTTPException(404, "Application not found.")
     application_master_resume(session, application, user_id, auto_update_pristine=True)
     require_current_resume_snapshot(session, application, user_id)
-    documents = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
-    ).all()
-    latest: dict[str, GeneratedDocument] = {}
-    for document in documents:
-        latest.setdefault(document.document_type, document)
+    latest = latest_application_documents(session, application_id, user_id)
 
     issues: list[QualityCheckIssue] = []
     requirements = load_application_requirements(
@@ -2670,14 +2668,7 @@ def pack_review(
             "issues": [item.model_dump() for item in final_check.issues if item.blocks_release],
         })
     application = get_for_user(session, JobApplication, application_id, user_id)
-    generated = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
-    ).all()
-    latest: dict[str, GeneratedDocument] = {}
-    for document in generated:
-        latest.setdefault(document.document_type, document)
+    latest = latest_application_documents(session, application_id, user_id)
     documents = {}
     for document_type in final_check.checked_documents:
         document = latest[document_type]

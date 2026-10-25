@@ -3,7 +3,7 @@ name: Quality gates
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/egress-read-design]
 
 permissions:
   contents: read
@@ -13,12 +13,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  latest-documents-postgres-16:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: egress_fixture
+          POSTGRES_DB: egress_fixture
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U egress_fixture -d egress_fixture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements.txt -c backend/tests/ci-constraints.txt pytest httpx
+      - name: Prove old main fails on live PostgreSQL 16
+        run: python backend/tests/run_latest_postgres.py --port 15432 --baseline
+      - name: Run same assertions on live PostgreSQL 16
+        run: python backend/tests/run_latest_postgres.py --port 15432
   backend-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       PYTHONPATH: backend
-      DATABASE_URL: sqlite:///./ci-test.db
       DEPLOYMENT_MODE: local
     steps:
       - uses: actions/checkout@v6
@@ -28,11 +59,13 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - name: Install backend dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r backend/requirements.txt
+        run: python -m pip install --upgrade pip && python -m pip install -r backend/requirements.txt -c backend/tests/ci-constraints.txt pytest httpx
       - name: Compile backend
         run: python -m compileall -q backend/app backend/tests
       - name: Run full backend and fixed-fixture suite
-        run: python -m unittest discover -s backend/tests -v 2>&1 | tee backend-test-results.txt
+        run: |
+          set -o pipefail
+          python backend/tests/run_offline.py backend/tests -q --tb=short --disable-warnings 2>&1 | tee backend-test-results.txt
       - name: Save backend test evidence
         if: always()
         uses: actions/upload-artifact@v7

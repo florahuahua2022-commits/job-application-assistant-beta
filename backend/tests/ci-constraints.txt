@@ -1,0 +1,4 @@
+# Reproduce the locally verified database/type behavior in the test jobs.
+sqlmodel==0.0.39
+SQLAlchemy==2.0.52
+pydantic==2.13.4
