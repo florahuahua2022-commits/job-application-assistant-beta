@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .models import as_utc
+
 
 OUTCOME_SCHEMA_VERSION = "1.0"
 EVENT_TYPES = {"submitted", "interview", "progressed", "rejected", "offer", "withdrawn", "no_response", "unknown"}
@@ -96,7 +98,7 @@ def normalized_market(value: str | None) -> str | None:
 
 def build_submission_snapshot(application: Any, documents: list[Any], ckb: list[dict], market: str | None, sources: list[Any], submitted_at: datetime, required_document_types: tuple[str, ...] = ("tailored_resume", "cover_letter", "selection_criteria")) -> dict | None:
     latest = {}
-    for document in sorted(documents, key=lambda item: (item.created_at, item.id or 0), reverse=True):
+    for document in sorted(documents, key=lambda item: (as_utc(item.created_at), item.id or 0), reverse=True):
         latest.setdefault(document.document_type, document)
     if "tailored_resume" not in latest:
         return None

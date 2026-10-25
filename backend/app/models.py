@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Literal
 from uuid import UUID, uuid4
-from pydantic import ConfigDict
+from pydantic import AwareDatetime, ConfigDict, field_validator
 from sqlmodel import Field, SQLModel
 
 
@@ -14,6 +14,11 @@ class ApplicationStatus(str, Enum):
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def as_utc(value: datetime) -> datetime:
+    # Only for known UTC database dates: legacy SQLite reads may lose tzinfo.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def utc_month_start() -> date:
@@ -336,7 +341,12 @@ class ApplicationDecisionConfirmation(SQLModel):
 
 class JobApplicationSubmissionUpdate(SQLModel):
     submission_reference: str | None = None
-    submitted_at: datetime | None = None
+    submitted_at: AwareDatetime | None = None
+
+    @field_validator("submitted_at")
+    @classmethod
+    def submitted_at_utc(cls, value: datetime | None) -> datetime | None:
+        return value.astimezone(timezone.utc) if value is not None else None
 
 
 class JobApplicationStatusUpdate(SQLModel):

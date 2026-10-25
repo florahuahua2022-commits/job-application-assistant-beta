@@ -1,27 +1,42 @@
 """Offline regression contracts for the production timezone incident."""
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.auth import get_current_user
 from app.database import get_session
 from app.main import app
 from app.models import ApplicantProfile, JobApplication, JobApplicationSubmissionUpdate
+from app.outcome_learning import build_submission_snapshot
+
+
+def utc_instant(value):
+    # Old SQLModel/SQLite drops the offset of known UTC database values.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 @pytest.fixture
-def incident_client():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+def incident_client(request):
+    port = request.config.getoption("incident_pg16_port", default=None)
+    if port:
+        from run_pg16 import create_test_engine
+        engine = create_test_engine(port, request.config.getoption("incident_timezone"))
+    else:
+        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(engine)
     user_id = uuid4()
     instant = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with Session(engine) as session:
+        if port:
+            session.execute(text("INSERT INTO auth.users (id) VALUES (:id)"), {"id": user_id})
         profile = ApplicantProfile(user_id=user_id, first_name="Synthetic", last_name="Applicant",
                                    phone="000", email="synthetic@example.invalid",
                                    created_at=instant, updated_at=instant)
@@ -54,11 +69,12 @@ def test_update_existing_profile_persists_and_returns_aware_timestamp(incident_c
     response = client.put("/profile", json={"first_name": "Changed", "last_name": "Applicant",
                                           "phone": "000", "email": "synthetic@example.invalid"})
     assert response.status_code == 200
-    assert datetime.fromisoformat(response.json()["updated_at"]).utcoffset() is not None
+    response_time = utc_instant(datetime.fromisoformat(response.json()["updated_at"]))
     with Session(engine) as session:
         profile = session.get(ApplicantProfile, response.json()["id"])
         assert profile.first_name == "Changed"
-        assert profile.updated_at.utcoffset() is not None
+        assert utc_instant(profile.updated_at) == response_time
+        assert response_time > datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def test_submission_rejects_naive_datetime_without_mutation(incident_client):
@@ -89,9 +105,9 @@ def test_submission_accepts_aware_datetime_and_preserves_instant(incident_client
     response = client.patch(f"/applications/{application_id}/submission", json={"submitted_at": timestamp})
     assert response.status_code == 200
     expected = datetime(2026, 1, 2, 1, tzinfo=timezone.utc)
-    assert datetime.fromisoformat(response.json()["submitted_at"]) == expected
+    assert utc_instant(datetime.fromisoformat(response.json()["submitted_at"])) == expected
     with Session(engine) as session:
-        assert session.get(JobApplication, application_id).submitted_at == expected
+        assert utc_instant(session.get(JobApplication, application_id).submitted_at) == expected
 
 
 def test_mark_applied_without_client_timestamp(incident_client):
@@ -99,7 +115,28 @@ def test_mark_applied_without_client_timestamp(incident_client):
     response = client.patch(f"/applications/{application_id}/submission", json={"submission_reference": "synthetic"})
     assert response.status_code == 200
     assert response.json()["status"] == "applied"
-    assert datetime.fromisoformat(response.json()["submitted_at"]).utcoffset() is not None
+    assert utc_instant(datetime.fromisoformat(response.json()["submitted_at"])) > datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_submission_snapshot_compares_legacy_utc_and_aware_dates():
+    documents = [SimpleNamespace(created_at=datetime(2026, 1, 1), id=1, document_type="tailored_resume",
+                                 structured_content_json="{}", used_experiences_json="[]", run_id=None, content="old"),
+                 SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc), id=2,
+                                 document_type="tailored_resume", structured_content_json="{}",
+                                 used_experiences_json="[]", run_id=None, content="new")]
+    application = JobApplication(position_title="Role", company="Company", job_description="Synthetic")
+    snapshot = build_submission_snapshot(application, documents, [], "Australia", [],
+                                         datetime(2026, 1, 3, tzinfo=timezone.utc))
+    assert snapshot["documents"]["tailored_resume"]["document_id"] == 2
+
+
+def test_document_listing_compares_legacy_utc_and_aware_dates(monkeypatch):
+    import app.main as main
+    documents = {"a": SimpleNamespace(created_at=datetime(2026, 1, 1), id=1),
+                 "b": SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc), id=2)}
+    monkeypatch.setattr(main, "get_for_user", lambda *args: object())
+    monkeypatch.setattr(main, "current_required_documents", lambda *args: documents)
+    assert [d.id for d in main.list_generated_documents(1, None, None)] == [2, 1]
 
 
 def test_frontend_mark_applied_sends_reference_without_timestamp():

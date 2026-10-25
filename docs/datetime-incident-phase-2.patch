@@ -1,0 +1,812 @@
+diff --git a/.github/workflows/quality-gates.yml b/.github/workflows/quality-gates.yml
+index 60941ad..5f91f27 100644
+--- a/.github/workflows/quality-gates.yml
++++ b/.github/workflows/quality-gates.yml
+@@ -16,6 +16,31 @@ jobs:
+   backend-tests:
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - dependencies: production
++            sqlmodel: "0.0.48"
++            sqlalchemy: "2.1.6"
++            pydantic: "2.14.1"
++          - dependencies: legacy
++            sqlmodel: "0.0.39"
++            sqlalchemy: "2.0.52"
++            pydantic: "2.13.4"
++    services:
++      postgres:
++        image: postgres:16
++        env:
++          POSTGRES_HOST_AUTH_METHOD: trust
++          POSTGRES_DB: jaa_datetime_test
++        ports:
++          - 55439:5432
++        options: >-
++          --health-cmd "pg_isready -U postgres -d jaa_datetime_test"
++          --health-interval 5s
++          --health-timeout 5s
++          --health-retries 10
+     env:
+       PYTHONPATH: backend
+       DATABASE_URL: sqlite:///./ci-test.db
+@@ -24,21 +49,32 @@ jobs:
+       - uses: actions/checkout@v6
+       - uses: actions/setup-python@v6
+         with:
+-          python-version: "3.12"
++          python-version: "3.13"
+           cache: pip
+           cache-dependency-path: backend/requirements.txt
+       - name: Install backend dependencies
+-        run: python -m pip install --upgrade pip && python -m pip install -r backend/requirements.txt
++        run: >-
++          python -m pip install -r backend/requirements.txt pytest
++          "sqlmodel==${{ matrix.sqlmodel }}"
++          "SQLAlchemy==${{ matrix.sqlalchemy }}"
++          "pydantic==${{ matrix.pydantic }}"
+       - name: Compile backend
+         run: python -m compileall -q backend/app backend/tests
+       - name: Run full backend and fixed-fixture suite
+-        run: python -m unittest discover -s backend/tests -v 2>&1 | tee backend-test-results.txt
++        run: python backend/tests/run_offline.py -q --tb=short 2>&1 | tee backend-test-results.txt
++      - name: Run isolated PostgreSQL 16 incident acceptance
++        run: |
++          for zone in UTC Australia/Perth; do
++            python backend/tests/run_pg16.py --incident-pg16-port 55439 --incident-timezone "$zone" backend/tests/test_datetime_incident.py backend/tests/test_datetime_pg16.py backend/tests/test_pack_credits.py::PostgreSQLPackCreditContractTests -q --tb=short 2>&1 | tee -a backend-pg16-results.txt
++          done
+       - name: Save backend test evidence
+         if: always()
+         uses: actions/upload-artifact@v7
+         with:
+-          name: backend-test-results-${{ github.run_id }}
+-          path: backend-test-results.txt
++          name: backend-test-results-${{ matrix.dependencies }}-${{ github.run_id }}
++          path: |
++            backend-test-results.txt
++            backend-pg16-results.txt
+           retention-days: 30
+ 
+   frontend-build:
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 519e0ef..0adf01d 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -34,7 +34,7 @@ from .feature_flags import GENERATION_FEATURES, generation_feature_status
+ from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
+ from .job_model import build_job_model, validate_job_model
+ from .job_sources import build_job_sources
+-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
++from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, as_utc, utc_now
+ from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
+ from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
+ from .quality import find_writing_quality_issues
+@@ -473,7 +473,7 @@ def rebuild_source_aware_models(application: JobApplication, sources: list[JobSo
+         application.selection_plan_json = "{}"
+         application.selection_confirmations_json = "[]"
+         require_current_generation_contract(application)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+ 
+ 
+ def semantic_source_state(sources: list[JobSource]) -> tuple:
+@@ -1196,7 +1196,7 @@ def save_profile(
+     if profile:
+         for key, value in profile_values.items():
+             setattr(profile, key, value)
+-        profile.updated_at = datetime.utcnow()
++        profile.updated_at = utc_now()
+     else:
+         profile = ApplicantProfile.model_validate(profile_values)
+         profile.user_id = user_id
+@@ -1277,7 +1277,7 @@ async def upload_resume(
+         current.experiences_json = experiences_json
+         current.ckb_json = ckb_json
+         current.experience_exclusions_json = exclusions_json
+-        current.updated_at = datetime.utcnow()
++        current.updated_at = utc_now()
+         resume = current
+     else:
+         resume = Resume(
+@@ -1643,7 +1643,7 @@ async def upload_application_source(
+     target.extraction_status = "not_applicable" if duplicate else extracted["extraction_status"]
+     target.extracted_text = "" if duplicate else extracted["extracted_text"]
+     target.warnings_json = json.dumps([f"Duplicate content of source {duplicate.source_id}; extraction was not duplicated."]) if duplicate else extracted["warnings_json"]
+-    target.updated_at = datetime.utcnow()
++    target.updated_at = utc_now()
+     if target not in sources:
+         sources.append(target)
+     if previous_source_state != semantic_source_state(sources):
+@@ -1836,9 +1836,9 @@ def update_application(
+             source_text = "\n".join(filter(None, (application.job_description, application.selection_criteria)))
+             primary.extracted_text = source_text
+             primary.content_sha256 = sha256(source_text.encode()).hexdigest()
+-            primary.updated_at = datetime.utcnow()
++            primary.updated_at = utc_now()
+             session.add(primary)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+     session.add(application)
+     session.commit()
+     session.refresh(application)
+@@ -1862,8 +1862,8 @@ def record_application_submission(
+     reference = (payload.submission_reference or "").strip() or None
+     application.status = "applied"
+     application.submission_reference = reference
+-    application.submitted_at = payload.submitted_at or datetime.utcnow()
+-    application.updated_at = datetime.utcnow()
++    application.submitted_at = payload.submitted_at or utc_now()
++    application.updated_at = utc_now()
+     if first_submission and not had_submission:
+         capture_first_submission(session, application, user_id)
+     session.add(application)
+@@ -1896,8 +1896,8 @@ def update_application_status(
+     had_submission = application.submitted_at is not None
+     application.status = payload.status
+     if payload.status == "applied" and not application.submitted_at:
+-        application.submitted_at = datetime.utcnow()
+-    application.updated_at = datetime.utcnow()
++        application.submitted_at = utc_now()
++    application.updated_at = utc_now()
+     if first_submission and not had_submission:
+         capture_first_submission(session, application, user_id)
+     session.add(application)
+@@ -1916,8 +1916,8 @@ def update_application_archive(
+     application = get_for_user(session, JobApplication, application_id, user_id)
+     if not application:
+         raise HTTPException(404, "Application not found.")
+-    application.archived_at = datetime.utcnow() if payload.action == "archive" else None
+-    application.updated_at = datetime.utcnow()
++    application.archived_at = utc_now() if payload.action == "archive" else None
++    application.updated_at = utc_now()
+     session.add(application)
+     session.commit()
+     session.refresh(application)
+@@ -1988,7 +1988,7 @@ def add_application_outcome_event(
+     event = outcome_event(**payload.model_dump())
+     outcome = set_events(outcome, [*outcome["events"], event])
+     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+     session.add(application); session.commit()
+     return outcome
+ 
+@@ -2009,7 +2009,7 @@ def correct_application_outcome_event(
+     events[index] = outcome_event(**payload.model_dump(), event_id=event_id)
+     outcome = set_events(outcome, events)
+     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+     session.add(application); session.commit()
+     return outcome
+ 
+@@ -2028,7 +2028,7 @@ def remove_application_outcome_event(
+         raise HTTPException(404, "Outcome event not found.")
+     outcome = set_events(outcome, events)
+     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+     session.add(application); session.commit()
+     return outcome
+ 
+@@ -2047,7 +2047,7 @@ def set_application_outcome_exclusion(
+     if errors:
+         raise HTTPException(409, errors[0])
+     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+     session.add(application); session.commit()
+     return outcome
+ 
+@@ -2079,7 +2079,7 @@ def list_generated_documents(
+     if not application:
+         raise HTTPException(404, "Application not found.")
+     current = current_required_documents(session, application, user_id)
+-    return sorted(current.values(), key=lambda document: document.created_at, reverse=True)
++    return sorted(current.values(), key=lambda document: as_utc(document.created_at), reverse=True)
+ 
+ 
+ @app.get("/applications/{application_id}/document-history")
+@@ -2756,7 +2756,7 @@ def update_generated_document(
+         if not application:
+             raise HTTPException(404, "Application not found.")
+         application.selection_confirmations_json = "[]"
+-        application.updated_at = datetime.utcnow()
++        application.updated_at = utc_now()
+         session.add(application)
+     session.commit(); session.refresh(document)
+     return document
+@@ -3566,7 +3566,7 @@ def save_selection_confirmations(
+     review_required = criteria_requiring_confirmation(plan)
+     confirmed = sorted(set(payload.criteria_ids) & review_required)
+     application.selection_confirmations_json = json.dumps(confirmed)
+-    application.updated_at = datetime.utcnow()
++    application.updated_at = utc_now()
+     session.add(application)
+     session.commit()
+     session.refresh(application)
+diff --git a/backend/app/models.py b/backend/app/models.py
+index 04f0c6c..33bf171 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
+ from enum import Enum
+ from typing import Literal
+ from uuid import UUID, uuid4
+-from pydantic import ConfigDict
++from pydantic import AwareDatetime, ConfigDict, field_validator
+ from sqlmodel import Field, SQLModel
+ 
+ 
+@@ -16,6 +16,11 @@ def utc_now() -> datetime:
+     return datetime.now(timezone.utc)
+ 
+ 
++def as_utc(value: datetime) -> datetime:
++    # Only for known UTC database dates: legacy SQLite reads may lose tzinfo.
++    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
++
++
+ def utc_month_start() -> date:
+     now = utc_now()
+     return date(now.year, now.month, 1)
+@@ -336,7 +341,12 @@ class ApplicationDecisionConfirmation(SQLModel):
+ 
+ class JobApplicationSubmissionUpdate(SQLModel):
+     submission_reference: str | None = None
+-    submitted_at: datetime | None = None
++    submitted_at: AwareDatetime | None = None
++
++    @field_validator("submitted_at")
++    @classmethod
++    def submitted_at_utc(cls, value: datetime | None) -> datetime | None:
++        return value.astimezone(timezone.utc) if value is not None else None
+ 
+ 
+ class JobApplicationStatusUpdate(SQLModel):
+diff --git a/backend/app/outcome_learning.py b/backend/app/outcome_learning.py
+index 02c2810..d0811f8 100644
+--- a/backend/app/outcome_learning.py
++++ b/backend/app/outcome_learning.py
+@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
+ from typing import Any
+ from uuid import uuid4
+ 
++from .models import as_utc
++
+ 
+ OUTCOME_SCHEMA_VERSION = "1.0"
+ EVENT_TYPES = {"submitted", "interview", "progressed", "rejected", "offer", "withdrawn", "no_response", "unknown"}
+@@ -96,7 +98,7 @@ def normalized_market(value: str | None) -> str | None:
+ 
+ def build_submission_snapshot(application: Any, documents: list[Any], ckb: list[dict], market: str | None, sources: list[Any], submitted_at: datetime, required_document_types: tuple[str, ...] = ("tailored_resume", "cover_letter", "selection_criteria")) -> dict | None:
+     latest = {}
+-    for document in sorted(documents, key=lambda item: (item.created_at, item.id or 0), reverse=True):
++    for document in sorted(documents, key=lambda item: (as_utc(item.created_at), item.id or 0), reverse=True):
+         latest.setdefault(document.document_type, document)
+     if "tailored_resume" not in latest:
+         return None
+diff --git a/backend/app/source_acquisition.py b/backend/app/source_acquisition.py
+index 5d6af40..ce59dbe 100644
+--- a/backend/app/source_acquisition.py
++++ b/backend/app/source_acquisition.py
+@@ -1,7 +1,7 @@
+ import hashlib
+ import json
+ import re
+-from datetime import datetime
++from .models import utc_now
+ from urllib.error import HTTPError
+ from urllib.request import Request, build_opener
+ 
+@@ -133,4 +133,4 @@ def acquire_sources(sources: list, opener_factory=build_opener) -> None:
+             source.extracted_text = ""
+             source.warnings_json = json.dumps([f"The attachment could not be processed: {error}"])
+         finally:
+-            source.updated_at = datetime.utcnow()
++            source.updated_at = utc_now()
+diff --git a/backend/tests/run_pg16.py b/backend/tests/run_pg16.py
+new file mode 100644
+index 0000000..885dab5
+--- /dev/null
++++ b/backend/tests/run_pg16.py
+@@ -0,0 +1,101 @@
++"""Explicit local PG16 incident acceptance; never reads dotenv or credentials."""
++import os
++from pathlib import Path
++import socket
++import sys
++from unittest.mock import patch
++
++
++def create_test_engine(port, zone):
++    from sqlalchemy import URL
++    from sqlmodel import create_engine
++    engine = create_engine(URL.create("postgresql+psycopg", username="postgres", host="127.0.0.1",
++                                     port=int(port), database="jaa_datetime_test"),
++                           connect_args={"options": f"-c timezone={zone}"})
++    with engine.begin() as connection:
++        assert connection.exec_driver_sql("SHOW server_version_num").scalar_one().startswith("16")
++        assert connection.exec_driver_sql("SELECT current_database()").scalar_one() == "jaa_datetime_test"
++        connection.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
++        connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
++        connection.exec_driver_sql("CREATE SCHEMA public; CREATE SCHEMA auth")
++        connection.exec_driver_sql("CREATE TABLE auth.users (id uuid PRIMARY KEY)")
++        connection.exec_driver_sql("CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid'")
++        connection.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='anon') THEN CREATE ROLE anon NOLOGIN; END IF; IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF; END $$")
++        root = Path(__file__).resolve().parents[2] / "supabase/migrations"
++        for migration in sorted(root.glob("*.sql")):
++            if migration.name == "20261002_pack_credit_ledger.sql":
++                # The repository startup upgrade supplies this pre-ledger column.
++                connection.exec_driver_sql("ALTER TABLE public.generationusage ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP")
++            # No parameter mapping: PL/pgSQL %ROWTYPE is SQL syntax, not a bind.
++            connection.connection.driver_connection.execute(migration.read_text(encoding="utf-8"))
++    from app import database
++    with patch.object(database, "engine", engine):
++        database.create_db_and_tables()
++    return engine
++
++
++class Options:
++    def pytest_addoption(self, parser):
++        parser.addoption("--incident-pg16-port", type=int)
++        parser.addoption("--incident-timezone", choices=["UTC", "Australia/Perth"], default="UTC")
++
++
++def main():
++    if sys.version_info[:2] != (3, 13):
++        raise RuntimeError("Incident acceptance requires Python 3.13")
++    allowed = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT"}
++    clean = {k: v for k, v in os.environ.items() if k.upper() in allowed}
++    os.environ.clear()
++    os.environ.update(clean, DATABASE_URL="sqlite:" + "//", DEPLOYMENT_MODE="local",
++                      PACK_CREDIT_TEST_DATABASE_URL="isolated-pg16-fixture")
++    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++    port = int(sys.argv[sys.argv.index("--incident-pg16-port") + 1])
++    if not 49152 <= port <= 65535:
++        raise RuntimeError("Use a dedicated ephemeral local PostgreSQL port")
++    zone = sys.argv[sys.argv.index("--incident-timezone") + 1] if "--incident-timezone" in sys.argv else "UTC"
++    if zone not in {"UTC", "Australia/Perth"}:
++        raise RuntimeError("Unsupported fixture time zone")
++    from pydantic_settings import BaseSettings
++    from sqlalchemy import event
++    from sqlalchemy.engine import Engine
++    import psycopg
++    original_settings, original_connect = BaseSettings.__init__, psycopg.connect
++    original_socket = socket.socket.connect
++
++    def no_dotenv(self, *args, **kwargs):
++        original_settings(self, *args, **{**kwargs, "_env_file": None})
++
++    def local_connect(conninfo="", **kwargs):
++        # Existing PG contracts receive an opaque fixture marker, never a URL.
++        if conninfo == "isolated-pg16-fixture" and not kwargs:
++            conninfo = ""
++            kwargs = {"host": "127.0.0.1", "port": port, "dbname": "jaa_datetime_test",
++                      "user": "postgres", "options": f"-c timezone={zone}"}
++        if conninfo or set(kwargs) - {"host", "port", "dbname", "user", "options", "context"} or kwargs.get("host") != "127.0.0.1" or int(kwargs.get("port", 0)) != port or kwargs.get("dbname") != "jaa_datetime_test":
++            raise AssertionError("Only the explicit isolated PG16 fixture is permitted")
++        return original_connect(**kwargs)
++
++    def socket_connect(self, address):
++        fallback = getattr(socket, "_fallback_socketpair", None)
++        if fallback and sys._getframe(1).f_code is fallback.__code__:
++            return original_socket(self, address)
++        raise AssertionError("External connections are disabled")
++
++    def guard(dialect, record, args, kwargs):
++        if dialect.name != "postgresql":
++            raise AssertionError("PG16 acceptance requires PostgreSQL")
++
++    def denied(*args, **kwargs):
++        raise AssertionError("External connections are disabled")
++
++    with patch.object(BaseSettings, "__init__", no_dotenv), patch.object(psycopg, "connect", local_connect), patch.object(socket.socket, "connect", socket_connect), patch.object(socket.socket, "connect_ex", denied), patch.object(socket, "create_connection", denied):
++        event.listen(Engine, "do_connect", guard)
++        try:
++            import pytest
++            return pytest.main(["-p", "no:cacheprovider", *sys.argv[1:]], plugins=[Options()])
++        finally:
++            event.remove(Engine, "do_connect", guard)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/backend/tests/test_datetime_incident.py b/backend/tests/test_datetime_incident.py
+index 1048c2e..0a5a993 100644
+--- a/backend/tests/test_datetime_incident.py
++++ b/backend/tests/test_datetime_incident.py
+@@ -1,27 +1,42 @@
+ """Offline regression contracts for the production timezone incident."""
+ from datetime import datetime, timezone
+ from pathlib import Path
++from types import SimpleNamespace
+ from uuid import uuid4
+ 
+ import pytest
+ from pydantic import ValidationError
+ from fastapi.testclient import TestClient
+ from sqlalchemy.pool import StaticPool
++from sqlalchemy import text
+ from sqlmodel import Session, SQLModel, create_engine
+ 
+ from app.auth import get_current_user
+ from app.database import get_session
+ from app.main import app
+ from app.models import ApplicantProfile, JobApplication, JobApplicationSubmissionUpdate
++from app.outcome_learning import build_submission_snapshot
++
++
++def utc_instant(value):
++    # Old SQLModel/SQLite drops the offset of known UTC database values.
++    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+ 
+ 
+ @pytest.fixture
+-def incident_client():
+-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
++def incident_client(request):
++    port = request.config.getoption("incident_pg16_port", default=None)
++    if port:
++        from run_pg16 import create_test_engine
++        engine = create_test_engine(port, request.config.getoption("incident_timezone"))
++    else:
++        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+     SQLModel.metadata.create_all(engine)
+     user_id = uuid4()
+     instant = datetime(2026, 1, 1, tzinfo=timezone.utc)
+     with Session(engine) as session:
++        if port:
++            session.execute(text("INSERT INTO auth.users (id) VALUES (:id)"), {"id": user_id})
+         profile = ApplicantProfile(user_id=user_id, first_name="Synthetic", last_name="Applicant",
+                                    phone="000", email="synthetic@example.invalid",
+                                    created_at=instant, updated_at=instant)
+@@ -54,11 +69,12 @@ def test_update_existing_profile_persists_and_returns_aware_timestamp(incident_c
+     response = client.put("/profile", json={"first_name": "Changed", "last_name": "Applicant",
+                                           "phone": "000", "email": "synthetic@example.invalid"})
+     assert response.status_code == 200
+-    assert datetime.fromisoformat(response.json()["updated_at"]).utcoffset() is not None
++    response_time = utc_instant(datetime.fromisoformat(response.json()["updated_at"]))
+     with Session(engine) as session:
+         profile = session.get(ApplicantProfile, response.json()["id"])
+         assert profile.first_name == "Changed"
+-        assert profile.updated_at.utcoffset() is not None
++        assert utc_instant(profile.updated_at) == response_time
++        assert response_time > datetime(2026, 1, 1, tzinfo=timezone.utc)
+ 
+ 
+ def test_submission_rejects_naive_datetime_without_mutation(incident_client):
+@@ -89,9 +105,9 @@ def test_submission_accepts_aware_datetime_and_preserves_instant(incident_client
+     response = client.patch(f"/applications/{application_id}/submission", json={"submitted_at": timestamp})
+     assert response.status_code == 200
+     expected = datetime(2026, 1, 2, 1, tzinfo=timezone.utc)
+-    assert datetime.fromisoformat(response.json()["submitted_at"]) == expected
++    assert utc_instant(datetime.fromisoformat(response.json()["submitted_at"])) == expected
+     with Session(engine) as session:
+-        assert session.get(JobApplication, application_id).submitted_at == expected
++        assert utc_instant(session.get(JobApplication, application_id).submitted_at) == expected
+ 
+ 
+ def test_mark_applied_without_client_timestamp(incident_client):
+@@ -99,7 +115,28 @@ def test_mark_applied_without_client_timestamp(incident_client):
+     response = client.patch(f"/applications/{application_id}/submission", json={"submission_reference": "synthetic"})
+     assert response.status_code == 200
+     assert response.json()["status"] == "applied"
+-    assert datetime.fromisoformat(response.json()["submitted_at"]).utcoffset() is not None
++    assert utc_instant(datetime.fromisoformat(response.json()["submitted_at"])) > datetime(2026, 1, 1, tzinfo=timezone.utc)
++
++
++def test_submission_snapshot_compares_legacy_utc_and_aware_dates():
++    documents = [SimpleNamespace(created_at=datetime(2026, 1, 1), id=1, document_type="tailored_resume",
++                                 structured_content_json="{}", used_experiences_json="[]", run_id=None, content="old"),
++                 SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc), id=2,
++                                 document_type="tailored_resume", structured_content_json="{}",
++                                 used_experiences_json="[]", run_id=None, content="new")]
++    application = JobApplication(position_title="Role", company="Company", job_description="Synthetic")
++    snapshot = build_submission_snapshot(application, documents, [], "Australia", [],
++                                         datetime(2026, 1, 3, tzinfo=timezone.utc))
++    assert snapshot["documents"]["tailored_resume"]["document_id"] == 2
++
++
++def test_document_listing_compares_legacy_utc_and_aware_dates(monkeypatch):
++    import app.main as main
++    documents = {"a": SimpleNamespace(created_at=datetime(2026, 1, 1), id=1),
++                 "b": SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc), id=2)}
++    monkeypatch.setattr(main, "get_for_user", lambda *args: object())
++    monkeypatch.setattr(main, "current_required_documents", lambda *args: documents)
++    assert [d.id for d in main.list_generated_documents(1, None, None)] == [2, 1]
+ 
+ 
+ def test_frontend_mark_applied_sends_reference_without_timestamp():
+diff --git a/backend/tests/test_datetime_pg16.py b/backend/tests/test_datetime_pg16.py
+new file mode 100644
+index 0000000..9566d37
+--- /dev/null
++++ b/backend/tests/test_datetime_pg16.py
+@@ -0,0 +1,165 @@
++"""Critical write paths against repository DDL and real PG16 credit functions."""
++import json
++import sys
++from datetime import datetime, timezone
++from uuid import uuid4
++
++import pytest
++from sqlalchemy import text
++from sqlmodel import Session, select
++
++from test_datetime_incident import incident_client, utc_instant
++from app.models import GeneratedDocument, JobApplication, JobSource, Resume, PackCreditLedger, GenerationUsage
++from app.pack_credits import reserve_pack_credits, complete_pack_credits, release_pack_credits, pack_credit_balance
++
++pytestmark = pytest.mark.skipif("--incident-pg16-port" not in sys.argv, reason="explicit isolated PG16 runner required")
++
++
++def test_pg16_create_edit_sources_and_resume_replacement(incident_client, monkeypatch):
++    client, _, engine = incident_client
++    created = client.post("/applications", json={"company": "Synthetic", "position_title": "Officer",
++                                               "job_description": "Coordinate reports."})
++    assert created.status_code == 200
++    app_id = created.json()["id"]
++    edited = client.patch(f"/applications/{app_id}", json={"company": "Changed", "position_title": "Senior Officer",
++                                                         "job_description": "Coordinate reports and registers."})
++    assert edited.status_code == 200
++    assert edited.json()["company"] == "Changed"
++    uploaded = client.post(f"/applications/{app_id}/sources/upload", data={"expected_source_type": "job_description_attachment"},
++                           files={"file": ("synthetic.txt", b"Coordinate reports and registers with project teams.", "text/plain")})
++    assert uploaded.status_code == 200
++    import app.main as main
++    monkeypatch.setattr(main, "extract_resume_text", lambda *args: "Synthetic Applicant\nProject officer\nPrepared reports.")
++    for title in ["First synthetic resume", "Replacement synthetic resume"]:
++        response = client.post("/resumes/upload", data={"title": title}, files={"file": ("resume.txt", b"synthetic", "text/plain")})
++        assert response.status_code == 200
++    with Session(engine) as session:
++        resumes = session.exec(select(Resume)).all()
++        assert len(resumes) == 1
++        assert resumes[0].title == "Replacement synthetic resume"
++        assert resumes[0].updated_at.utcoffset() is not None
++
++
++def test_pg16_submission_status_archive_restore_and_outcomes(incident_client):
++    client, app_id, engine = incident_client
++    base = f"/applications/{app_id}"
++    for path, payload in [("/status", {"status": "applied"}), ("/archive", {"action": "archive"}),
++                          ("/archive", {"action": "restore"})]:
++        response = client.patch(base + path, json=payload)
++        assert response.status_code == 200
++    assert response.json()["status"] == "applied"
++    assert response.json()["archived_at"] is None
++    created = client.post(base + "/outcome/events", json={"event_type": "interview", "effective_date": "2026-01-02"})
++    assert created.status_code == 200
++    event_id = created.json()["events"][-1]["event_id"]
++    corrected = client.put(base + f"/outcome/events/{event_id}", json={"event_type": "offer", "effective_date": "2026-01-03"})
++    assert corrected.status_code == 200
++    assert corrected.json()["current_outcome"] == "offer"
++    assert client.patch(base + "/outcome/exclusion", json={"excluded_from_learning": True}).status_code == 200
++    assert client.delete(base + f"/outcome/events/{event_id}").status_code == 200
++    with Session(engine) as session:
++        assert session.get(JobApplication, app_id).submitted_at.utcoffset() is not None
++
++
++def test_pg16_selection_document_edit_and_confirmation(incident_client):
++    from app.application_requirements import empty_application_requirements
++    client, app_id, engine = incident_client
++    with Session(engine) as session:
++        application = session.get(JobApplication, app_id)
++        requirements = empty_application_requirements("Synthetic", source="user_supplied")
++        requirements["documents"]["selection_criteria"].update(requirement="required", format="standalone")
++        application.application_requirements_json = json.dumps(requirements)
++        application.selection_plan_json = json.dumps({"items": [{"criteria_id": "SC1", "evidence_status": "weak"}]})
++        document = GeneratedDocument(user_id=application.user_id, application_id=app_id,
++                                     document_type="selection_criteria", content="Original synthetic response")
++        session.add(document)
++        session.add(application)
++        session.commit()
++        session.refresh(document)
++        document_id = document.id
++    edited = client.patch(f"/documents/{document_id}", json={"content": "Edited synthetic response"})
++    assert edited.status_code == 200
++    confirmed = client.post(f"/applications/{app_id}/selection-confirmations", json={"criteria_ids": ["SC1"]})
++    assert confirmed.status_code == 200
++    assert json.loads(confirmed.json()["selection_confirmations_json"]) == ["SC1"]
++    assert datetime.fromisoformat(confirmed.json()["updated_at"]).utcoffset() is not None
++
++
++def test_pg16_acquired_source_timestamp_persists(incident_client, monkeypatch):
++    from app import source_acquisition
++    client, app_id, engine = incident_client
++    with Session(engine) as session:
++        application = session.get(JobApplication, app_id)
++        source = JobSource(user_id=application.user_id, application_id=app_id, source_id="synthetic-attachment",
++                           title="Synthetic attachment", label="Synthetic", extraction_status="not_attempted",
++                           source_type="job_description_attachment", source_url="https://example.invalid/synthetic.txt",
++                           acquisition_status="discovered", classification_confidence="high")
++        monkeypatch.setattr(source_acquisition, "_fetch", lambda *args: (b"Synthetic project duties", {"Content-Type": "text/plain"}, source.source_url))
++        source_acquisition.acquire_sources([source])
++        session.add(source)
++        session.commit()
++        session.refresh(source)
++        assert source.updated_at.utcoffset() is not None
++
++
++def test_pg16_credit_reserve_complete_release_and_retry_idempotency(incident_client):
++    _, app_id, engine = incident_client
++    with Session(engine) as session:
++        user = session.get(JobApplication, app_id).user_id
++        completed_pack, failed_pack = uuid4(), uuid4()
++        assert reserve_pack_credits(session, user, completed_pack, 1).status == "reserved"
++        assert reserve_pack_credits(session, user, completed_pack, 1).status == "existing"
++        assert complete_pack_credits(session, user, completed_pack) is True
++        assert complete_pack_credits(session, user, completed_pack) is False
++        assert release_pack_credits(session, user, completed_pack) is False
++        assert reserve_pack_credits(session, user, failed_pack, 1).status == "reserved"
++        assert release_pack_credits(session, user, failed_pack) is True
++        assert release_pack_credits(session, user, failed_pack) is False
++        assert complete_pack_credits(session, user, failed_pack) is False
++        assert reserve_pack_credits(session, user, failed_pack, 1).status == "existing"
++        session.commit()
++    with Session(engine) as session:
++        assert pack_credit_balance(session, user) == 1
++        assert sorted(u.status for u in session.exec(select(GenerationUsage)).all()) == ["completed", "released"]
++        ledger = session.exec(select(PackCreditLedger)).all()
++        assert sum(item.entry_type == "debit_generation" for item in ledger) == 2
++        assert sum(item.entry_type == "release" for item in ledger) == 1
++        counters = session.execute(text("SELECT reserved_count, completed_count FROM public.globalmonthlyusage")).one()
++        assert tuple(counters) == (0, 1)
++
++
++@pytest.mark.parametrize("method", [
++    "test_successful_complete_pack_completes_one_credit_reservation",
++    "test_pack_completes_only_after_every_document_in_this_pack_succeeds",
++    "test_failed_generation_releases_reserved_credits",
++    "test_released_pack_id_cannot_restart_generation_without_a_new_reservation",
++])
++def test_pg16_real_generation_credit_orchestration(incident_client, monkeypatch, method):
++    import test_pack_credits as contracts
++    _, _, engine = incident_client
++
++    def synthetic_id():
++        value = uuid4()
++        with engine.begin() as connection:
++            connection.execute(text("INSERT INTO auth.users (id) VALUES (:id)"), {"id": value})
++        return value
++
++    monkeypatch.setattr(contracts, "uuid4", synthetic_id)
++    case = contracts.PackCreditEngineTests("runTest")
++    case.engine = engine
++    # Reuse the existing orchestration contracts. Synthetic draft generation is
++    # stubbed there; credit reservation/completion/release and PG functions are real.
++    getattr(case, method)()
++
++
++def test_pg16_legacy_timestamp_without_timezone_readback(incident_client):
++    client, app_id, engine = incident_client
++    with engine.begin() as connection:
++        connection.exec_driver_sql("ALTER TABLE public.applicantprofile ALTER COLUMN updated_at TYPE timestamp without time zone USING updated_at AT TIME ZONE 'UTC'")
++    response = client.get("/profile")
++    assert response.status_code == 200
++    with Session(engine) as session:
++        raw = session.execute(text("SELECT updated_at FROM public.applicantprofile")).scalar_one()
++        # A legacy timestamp column has no offset; compare known UTC values only.
++        assert utc_instant(raw) == utc_instant(datetime.fromisoformat(response.json()["updated_at"]))
++        assert utc_instant(raw) == datetime(2026, 1, 1, tzinfo=timezone.utc)
+diff --git a/docs/datetime-incident-19-writes.md b/docs/datetime-incident-19-writes.md
+new file mode 100644
+index 0000000..bc80aff
+--- /dev/null
++++ b/docs/datetime-incident-19-writes.md
+@@ -0,0 +1,27 @@
++# 19 处日期列赋值对照
++
++基线：阶段一提交 `8d78b6d`。AST 扫描确认 main.py 18 处、source_acquisition.py 1 处，无遗漏。只替换时钟来源，不改授权、状态判断、提交顺序或事务。
++
++| # | 文件:旧行号 / 函数 | 原写法 → 新写法 |
++| --- | --- | --- |
++| 1 | `backend/app/main.py:476` / `rebuild_source_aware_models` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 2 | `backend/app/main.py:1199` / `save_profile` | `profile.updated_at = datetime.utcnow()` → `profile.updated_at = utc_now()` |
++| 3 | `backend/app/main.py:1280` / `upload_resume` | `current.updated_at = datetime.utcnow()` → `current.updated_at = utc_now()` |
++| 4 | `backend/app/main.py:1646` / `upload_application_source` | `target.updated_at = datetime.utcnow()` → `target.updated_at = utc_now()` |
++| 5 | `backend/app/main.py:1839` / `update_application` | `primary.updated_at = datetime.utcnow()` → `primary.updated_at = utc_now()` |
++| 6 | `backend/app/main.py:1841` / `update_application` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 7 | `backend/app/main.py:1865` / `record_application_submission` | `application.submitted_at = payload.submitted_at or datetime.utcnow()` → `application.submitted_at = payload.submitted_at or utc_now()` |
++| 8 | `backend/app/main.py:1866` / `record_application_submission` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 9 | `backend/app/main.py:1899` / `update_application_status` | `application.submitted_at = datetime.utcnow()` → `application.submitted_at = utc_now()` |
++| 10 | `backend/app/main.py:1900` / `update_application_status` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 11 | `backend/app/main.py:1919` / `update_application_archive` | `application.archived_at = datetime.utcnow() if payload.action == "archive" else None` → `application.archived_at = utc_now() if payload.action == "archive" else None` |
++| 12 | `backend/app/main.py:1920` / `update_application_archive` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 13 | `backend/app/main.py:1991` / `add_application_outcome_event` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 14 | `backend/app/main.py:2012` / `correct_application_outcome_event` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 15 | `backend/app/main.py:2031` / `remove_application_outcome_event` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 16 | `backend/app/main.py:2050` / `set_application_outcome_exclusion` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 17 | `backend/app/main.py:2759` / `update_generated_document` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 18 | `backend/app/main.py:3569` / `save_selection_confirmations` | `application.updated_at = datetime.utcnow()` → `application.updated_at = utc_now()` |
++| 19 | `backend/app/source_acquisition.py:136` / `acquire_sources` | `source.updated_at = datetime.utcnow()` → `source.updated_at = utc_now()` |
++
++另外的七处 datetime.utcnow() 用于 JSON、导出或辅助日期，不属于本次列赋值范围，保持原样。
+diff --git a/docs/datetime-incident-phase-2.md b/docs/datetime-incident-phase-2.md
+new file mode 100644
+index 0000000..ded8a8f
+--- /dev/null
++++ b/docs/datetime-incident-phase-2.md
+@@ -0,0 +1,78 @@
++# 日期时区事故：阶段二
++
++阶段二基线为 `8d78b6d`，分支 `codex/production-datetime-incident`。只处理批准的日期写入、输入和读回兼容，以及相应验收基础设施；阶段三、四未开始。
++
++## 进入前的三项核对
++
++1. `test_datetime_incident.py` 不再要求数据库读回对象必须保留 tzinfo。测试把已知 UTC 的历史数据库值统一为 UTC，再与响应中的同一时刻比较；Z/offset 输入也比较同一 UTC 时刻。旧 SQLModel/SQLite 会丢失 tzinfo，这是驱动行为差异，不能误判为业务失败。这个兼容规则不用于客户端输入。
++2. `rg -n timedelta backend/tests/test_outcome_learning.py`：无输出、退出码 1。当前导入为 `from datetime import datetime, timezone`，没有残留使用。
++3. `run_offline.py` 与流量优化分支内容一致（忽略 Git 换行转换）；本阶段没有改它。事故分支 AGENTS.md 比流量优化分支多出已批准的禁止 amend 已推送提交、禁止强推规则，本阶段同样未改。维护责任由事故分支承担，批准合并后以 main 为准；恢复流量优化 PR 时同步 main 的这两个文件，不把旧规则覆盖回来。本轮没有修改流量优化分支。
++
++## 实现边界
++
++- main.py 的 18 处及 source_acquisition.py 的 1 处列赋值，全部从 `datetime.utcnow()` 改为现有 `utc_now()`。逐项原写法 → 新写法及旧行号见 [19 处对照清单](datetime-incident-19-writes.md)。AST 核对数量为 19，无遗漏。
++- 不改用户过滤、权限、事务边界、发布门禁、质量检查、积分算法或状态流转。
++- `JobApplicationSubmissionUpdate.submitted_at` 使用 `AwareDatetime | None`：拒绝无时区日期，接受 Z/offset；校验后先转成 UTC 再写入。省略字段或 null 仍由服务端生成投递时间。
++- 旧组回归曾证明 offset 输入直接写入 SQLite 会保留墙钟钟点、丢掉 offset，造成时刻偏移；UTC 归一化修复了这个真实的 RED 失败，不是放宽测试。
++- `as_utc` 仅用于两处已知 UTC 数据库日期的排序边界：结果快照选取和文档列表。历史 naive 值按旧 UTC 约定解释，aware 值转换为 UTC；不删除已有时区，不将任意客户端 naive 值当作 UTC。
++- 另外七处 `datetime.utcnow()` 属于 JSON、导出或辅助日期，不属于本次列赋值范围，保持原样。main.py 的新增行保持 CRLF。
++- requirements.txt、前端和生产配置未改；阶段三错误反馈、阶段四生产依赖固定仍待单独批准执行。
++
++## RED → GREEN
++
++补齐读回断言后，在未改实现的生产现用组上：**8 failed, 3 passed**，包含新增的两处混合 naive/aware 排序失败。
++
++修复后新增断言 **11 passed**。旧组完整回归随后暴露 offset 输入丢失时刻的问题（1 failed），增加输入 UTC 归一化后同一断言转绿；没有 xfail 或按版本跳过断言。
++
++## Python 3.13 双依赖组完整回归
++
++本地实际 Python **3.13.2**，两个独立临时虚拟环境；仅三项依赖版本不同，其余均从同一份 backend/requirements.txt 安装。
++
++| 依赖组 | SQLModel / SQLAlchemy / Pydantic | 完整离线回归 |
++| --- | --- | --- |
++| 生产现用组 | 0.0.48 / 2.1.6 / 2.14.1 | 630 passed，12 skipped，182 subtests passed |
++| 旧组 | 0.0.39 / 2.0.52 / 2.13.4 | 630 passed，12 skipped，182 subtests passed |
++
++12 项跳过不是未验收：10 项是新 PG 专属清单，2 项是原有真实 PG 合约；它们在下面的隔离 PG16 运行中全部执行且无跳过。离线运行器继续禁用 dotenv、清空继承凭据、阻断外部连接。
++
++## 隔离 PostgreSQL 16 清单
++
++本地实际 PostgreSQL **16.15**，全新临时集群，仅监听本机独立端口，专用测试库。PG runner 不读取 dotenv 或生产配置，只接受固定本机测试目标；原有 PG 合约通过不含连接信息的 opaque 标记接入，不能传入任意连接字符串。
++
++临时库执行仓库迁移及明确绑定到临时引擎的建表/升级函数，补齐仓库启动升级所提供的 completed_at 前置列；不执行应用 lifespan。生产数据库、控制台、服务配置均未访问。
++
++| 依赖组 | 会话时区 | 结果 |
++| --- | --- | --- |
++| 生产现用组 | UTC | 24 passed，0 skipped |
++| 生产现用组 | Australia/Perth | 24 passed，0 skipped |
++| 旧组 | UTC | 24 passed，0 skipped |
++| 旧组 | Australia/Perth | 24 passed，0 skipped |
++
++验收包括：
++
++- 更新已有资料，读回同一时刻；新建/编辑职位、上传职位附件、更新来源模型及替换已有简历。
++- naive 投递输入 422 且不改状态，Z/offset 输入保持时刻，不传 submitted_at 的标记投递仍有效；状态变更、归档、恢复。
++- 结果事件新增、纠正、排除、删除；SC 文档编辑和真实确认存储。
++- timestamptz 读回及已知 UTC 的历史 timestamp without time zone 读回；混合历史日期的两处排序。
++- 真实 `public.reserve_pack_credits` / `complete_pack_credits` / `release_pack_credits`：预留、重复预留、完结、重复完结、失败释放、重复释放、已关闭 pack 重试幂等；检查余额、usage、ledger 和月度计数。
++- 复用现有真实生成积分编排断言，确认完整 CV + Cover Letter 才完结、失败释放、关闭 pack 不可重新扣费。仅合成草稿生成被替换，编排、数据库访问及服务端积分函数均真实执行。
++- 原有 PG 自定义充值幂等合约及并发竞争最后一个积分/全局名额合约，均实际执行。
++
++同一批命令由两个依赖环境分别运行：
++
++```text
++python backend/tests/run_offline.py -q --tb=short
++python backend/tests/run_pg16.py --incident-pg16-port 55439 --incident-timezone UTC backend/tests/test_datetime_incident.py backend/tests/test_datetime_pg16.py backend/tests/test_pack_credits.py::PostgreSQLPackCreditContractTests -q --tb=short
++python backend/tests/run_pg16.py --incident-pg16-port 55439 --incident-timezone Australia/Perth backend/tests/test_datetime_incident.py backend/tests/test_datetime_pg16.py backend/tests/test_pack_credits.py::PostgreSQLPackCreditContractTests -q --tb=short
++```
++
++## CI 与交付
++
++- 既有 backend job 改为生产/旧组矩阵，运行同一份测试；Python 由 3.12 改为 3.13，与用户提供的生产 Python 次版本一致，不声称补丁版本完全相同。
++- 每个矩阵实例使用独立 PG16 服务，两种会话时区都执行；保留并上传离线及 PG16 证据。触发块逐项核对不变：pull_request，push 仅 main。创建草稿 PR 通过既有 pull_request 事件触发 CI。
++- 依赖固定仍留在阶段四；本阶段未新增 CI 专用约束文件。CI 结果以草稿 PR 的本次提交检查为准，本地结果如上。
++- 已完成只读整体审阅和 PG 合约入口增量复核，未发现阻断问题。CRLF 感知差异检查及 YAML 解析通过。
++- 差异文件 `datetime-incident-phase-2.patch` 以阶段一为基线，包含本阶段代码、测试、CI、说明及19处对照，不含它自身、阶段一 patch 或既有流量优化 patch。
++- 本阶段后暂停；不合并 main，不部署，不改生产配置，不动流量优化和支付分支，不 amend/强推。
++
++后续独立事项仍为：全部后端依赖的完整锁定方案；本次不实施。
