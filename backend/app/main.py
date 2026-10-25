@@ -3155,10 +3155,13 @@ def run_generation_request(payload, user_id, key, bind):
 
 @app.get("/applications/{application_id}/generation-requests/{pack_id}/{document_type}")
 def generation_request_status(application_id: int, pack_id: UUID, document_type: str, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
-    application = get_for_user(session, JobApplication, application_id, user_id)
-    if not application:
+    statement = select(JobApplication.release_state_json).where(JobApplication.id == application_id)
+    if user_id is not None:
+        statement = statement.where(JobApplication.user_id == user_id)
+    row = session.execute(statement).first()
+    if row is None:
         raise HTTPException(404, "Application not found.")
-    state = load_release_state(application.release_state_json).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
+    state = load_release_state(row[0]).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
     if not state:
         raise HTTPException(404, "Generation request not found.")
     result = dict(state)

@@ -14,4 +14,10 @@
 
 ## #5：生成状态窄列查询
 
-待按批准顺序完成。此占位不是完成声明，也不是生产访问事实。
+- 测试前以 AST 比较，确认状态 handler 与 `dbce8ca` 旧 main 完全一致。新增状态测试得到 **13 failed, 2 passed**（pytest 将失败子测试单列）：失败点为整实体列仍被读取，以及非 owner 查询仍实际返回一行。没有把别的错误当作 RED。
+- 实现只修改 GET status：SQL 只投影 `release_state_json`，WHERE 限定申请与在线 owner；通过结果行存在性区分未找到和空状态。保留任意已有 document_id 的返回契约，包括 failed/running 状态的已保存草稿；不改提交、CAS、worker、轮询间隔或积分。
+- 64/256 KiB 两种 padding 下，连续十次新 Session 的 running poll 实际返回 10 行、每行 1 列，字节数不随无关 JSON 增长；非 owner 返回 0 行且不读文档。completed/failed saved draft、无草稿、未知请求、坏 JSON、本地无 user 过滤均有覆盖。只读和不调用积分操作的断言通过。
+- 定向回归：**101 passed, 2 skipped, 23 subtests passed**。
+- 完整后端回归：**627 passed, 2 skipped, 192 subtests passed**，原有弃用警告 127 条；可选 PostgreSQL 两项仍跳过，没有运行任何 PostgreSQL/生产连接。
+- 独立静态复核：未发现 #4/#5 可操作问题；复核者没有执行应用、测试或网络访问。
+- 执行完成后停止业务实现。#1 与 PostgreSQL 16 CI 尚未实现/执行；用户补充的要求及支付分支同步说明见 `2026-10-25-egress-read-handoff.md`。
