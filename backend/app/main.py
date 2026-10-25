@@ -1532,7 +1532,10 @@ def parse_application_ad(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    previous_companies = [item.company for item in session.exec(select_for_user(JobApplication, user_id)).all()]
+    companies = select(JobApplication.company)
+    if user_id is not None:
+        companies = companies.where(JobApplication.user_id == user_id)
+    previous_companies = session.exec(companies).all()
     try:
         parsed = parse_job_ad_text(payload.raw_text, previous_companies)
         parsed["application_requirements"] = parse_application_requirements(payload.raw_text)
@@ -2321,16 +2324,17 @@ def quality_check(
         "\n".join((master_resume.source_text, master_resume.ckb_json or "[]"))
         if master_resume else ""
     )
-    other_applications = session.exec(
-        select_for_user(JobApplication, user_id).where(JobApplication.id != application_id)
-    ).all()
+    identities = select(JobApplication.company, JobApplication.position_title).where(JobApplication.id != application_id)
+    if user_id is not None:
+        identities = identities.where(JobApplication.user_id == user_id)
+    other_applications = session.exec(identities).all()
     for document_type in ("cover_letter", "selection_criteria"):
         content = content_to_check.get(document_type, "")
         if not content:
             continue
-        for other_application in other_applications:
-            other_company = (other_application.company or "").strip()
-            other_title = (other_application.position_title or "").split(" - ", 1)[0].strip()
+        for company, position_title in other_applications:
+            other_company = (company or "").strip()
+            other_title = (position_title or "").split(" - ", 1)[0].strip()
             if (
                 not other_company
                 or not other_title
