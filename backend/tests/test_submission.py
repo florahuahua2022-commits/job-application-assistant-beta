@@ -1,6 +1,6 @@
 import json
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -354,7 +354,7 @@ class SubmissionRecordTests(unittest.TestCase):
         with Session(self.engine) as session:
             application = session.get(JobApplication, self.application_id)
             application.status = "applied"
-            application.archived_at = datetime.utcnow()
+            application.archived_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
             session.add(GeneratedDocument(application_id=self.application_id, document_type="cover_letter", content="Draft"))
             session.commit()
 
