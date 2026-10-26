@@ -1,5 +1,6 @@
 """Critical write paths against repository DDL and real PG16 credit functions."""
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -13,6 +14,23 @@ from app.models import GeneratedDocument, JobApplication, JobSource, Resume, Pac
 from app.pack_credits import reserve_pack_credits, complete_pack_credits, release_pack_credits, pack_credit_balance
 
 pytestmark = pytest.mark.skipif("--incident-pg16-port" not in sys.argv, reason="explicit isolated PG16 runner required")
+
+
+@pytest.mark.parametrize("timestamp", [None, "2026-01-02T01:00:00Z", "2026-01-02T09:00:00+08:00"])
+def test_pg16_submission_response_json_contains_timezone(incident_client, timestamp):
+    client, app_id, _ = incident_client
+    payload = {"submission_reference": "synthetic"}
+    if timestamp is not None:
+        payload["submitted_at"] = timestamp
+    response = client.patch(f"/applications/{app_id}/submission", json=payload)
+    assert response.status_code == 200
+    value = response.json()["submitted_at"]
+    # Inspect the API value directly: no utc_instant() or timezone replacement.
+    assert re.search(r"(?:Z|[+-]\d{2}:\d{2})$", value), value
+    parsed = datetime.fromisoformat(value)
+    assert parsed.utcoffset() is not None
+    if timestamp is not None:
+        assert parsed == datetime(2026, 1, 2, 1, tzinfo=timezone.utc)
 
 
 def test_pg16_create_edit_sources_and_resume_replacement(incident_client, monkeypatch):
