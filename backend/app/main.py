@@ -34,7 +34,7 @@ from .feature_flags import GENERATION_FEATURES, generation_feature_status
 from .ingest import MAX_UPLOAD_BYTES, expand_abbreviated_company, experience_candidate_id, extract_resume_experiences, extract_resume_text, find_uncovered_experience_candidates, import_job_url, mark_resume_experience_risks, normalise_resume_experiences, parse_job_ad_text, reconcile_experience_exclusions
 from .job_model import build_job_model, validate_job_model
 from .job_sources import build_job_sources
-from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, utc_now
+from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, as_utc, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
 from .quality import find_writing_quality_issues
@@ -478,7 +478,7 @@ def rebuild_source_aware_models(application: JobApplication, sources: list[JobSo
         application.selection_plan_json = "{}"
         application.selection_confirmations_json = "[]"
         require_current_generation_contract(application)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
 
 
 def semantic_source_state(sources: list[JobSource]) -> tuple:
@@ -1201,7 +1201,7 @@ def save_profile(
     if profile:
         for key, value in profile_values.items():
             setattr(profile, key, value)
-        profile.updated_at = datetime.utcnow()
+        profile.updated_at = utc_now()
     else:
         profile = ApplicantProfile.model_validate(profile_values)
         profile.user_id = user_id
@@ -1282,7 +1282,7 @@ async def upload_resume(
         current.experiences_json = experiences_json
         current.ckb_json = ckb_json
         current.experience_exclusions_json = exclusions_json
-        current.updated_at = datetime.utcnow()
+        current.updated_at = utc_now()
         resume = current
     else:
         resume = Resume(
@@ -1651,7 +1651,7 @@ async def upload_application_source(
     target.extraction_status = "not_applicable" if duplicate else extracted["extraction_status"]
     target.extracted_text = "" if duplicate else extracted["extracted_text"]
     target.warnings_json = json.dumps([f"Duplicate content of source {duplicate.source_id}; extraction was not duplicated."]) if duplicate else extracted["warnings_json"]
-    target.updated_at = datetime.utcnow()
+    target.updated_at = utc_now()
     if target not in sources:
         sources.append(target)
     if previous_source_state != semantic_source_state(sources):
@@ -1844,9 +1844,9 @@ def update_application(
             source_text = "\n".join(filter(None, (application.job_description, application.selection_criteria)))
             primary.extracted_text = source_text
             primary.content_sha256 = sha256(source_text.encode()).hexdigest()
-            primary.updated_at = datetime.utcnow()
+            primary.updated_at = utc_now()
             session.add(primary)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application)
     session.commit()
     session.refresh(application)
@@ -1870,8 +1870,8 @@ def record_application_submission(
     reference = (payload.submission_reference or "").strip() or None
     application.status = "applied"
     application.submission_reference = reference
-    application.submitted_at = payload.submitted_at or datetime.utcnow()
-    application.updated_at = datetime.utcnow()
+    application.submitted_at = payload.submitted_at or utc_now()
+    application.updated_at = utc_now()
     if first_submission and not had_submission:
         capture_first_submission(session, application, user_id)
     session.add(application)
@@ -1904,8 +1904,8 @@ def update_application_status(
     had_submission = application.submitted_at is not None
     application.status = payload.status
     if payload.status == "applied" and not application.submitted_at:
-        application.submitted_at = datetime.utcnow()
-    application.updated_at = datetime.utcnow()
+        application.submitted_at = utc_now()
+    application.updated_at = utc_now()
     if first_submission and not had_submission:
         capture_first_submission(session, application, user_id)
     session.add(application)
@@ -1924,8 +1924,8 @@ def update_application_archive(
     application = get_for_user(session, JobApplication, application_id, user_id)
     if not application:
         raise HTTPException(404, "Application not found.")
-    application.archived_at = datetime.utcnow() if payload.action == "archive" else None
-    application.updated_at = datetime.utcnow()
+    application.archived_at = utc_now() if payload.action == "archive" else None
+    application.updated_at = utc_now()
     session.add(application)
     session.commit()
     session.refresh(application)
@@ -1996,7 +1996,7 @@ def add_application_outcome_event(
     event = outcome_event(**payload.model_dump())
     outcome = set_events(outcome, [*outcome["events"], event])
     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application); session.commit()
     return outcome
 
@@ -2017,7 +2017,7 @@ def correct_application_outcome_event(
     events[index] = outcome_event(**payload.model_dump(), event_id=event_id)
     outcome = set_events(outcome, events)
     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application); session.commit()
     return outcome
 
@@ -2036,7 +2036,7 @@ def remove_application_outcome_event(
         raise HTTPException(404, "Outcome event not found.")
     outcome = set_events(outcome, events)
     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application); session.commit()
     return outcome
 
@@ -2055,7 +2055,7 @@ def set_application_outcome_exclusion(
     if errors:
         raise HTTPException(409, errors[0])
     application.outcome_json = json.dumps(outcome, ensure_ascii=False)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application); session.commit()
     return outcome
 
@@ -2087,7 +2087,7 @@ def list_generated_documents(
     if not application:
         raise HTTPException(404, "Application not found.")
     current = current_required_documents(session, application, user_id)
-    return sorted(current.values(), key=lambda document: document.created_at, reverse=True)
+    return sorted(current.values(), key=lambda document: as_utc(document.created_at), reverse=True)
 
 
 @app.get("/applications/{application_id}/document-history")
@@ -2751,7 +2751,7 @@ def update_generated_document(
         if not application:
             raise HTTPException(404, "Application not found.")
         application.selection_confirmations_json = "[]"
-        application.updated_at = datetime.utcnow()
+        application.updated_at = utc_now()
         session.add(application)
     session.commit(); session.refresh(document)
     return document
@@ -3564,7 +3564,7 @@ def save_selection_confirmations(
     review_required = criteria_requiring_confirmation(plan)
     confirmed = sorted(set(payload.criteria_ids) & review_required)
     application.selection_confirmations_json = json.dumps(confirmed)
-    application.updated_at = datetime.utcnow()
+    application.updated_at = utc_now()
     session.add(application)
     session.commit()
     session.refresh(application)

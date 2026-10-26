@@ -1,0 +1,729 @@
+diff --git a/.github/workflows/quality-gates.yml b/.github/workflows/quality-gates.yml
+index 48f6a79..9f7ec3b 100644
+--- a/.github/workflows/quality-gates.yml
++++ b/.github/workflows/quality-gates.yml
+@@ -13,6 +13,55 @@ concurrency:
+   cancel-in-progress: true
+ 
+ jobs:
++  latest-documents-postgres-16:
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    services:
++      postgres:
++        image: postgres:16
++        env:
++          POSTGRES_USER: egress_fixture
++          POSTGRES_DB: egress_fixture
++          POSTGRES_HOST_AUTH_METHOD: trust
++        ports:
++          - 15432:5432
++        options: >-
++          --health-cmd "pg_isready -U egress_fixture -d egress_fixture"
++          --health-interval 5s
++          --health-timeout 5s
++          --health-retries 10
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          fetch-depth: 0
++      - uses: actions/setup-python@v6
++        with:
++          python-version: "3.13"
++          cache: pip
++          cache-dependency-path: backend/requirements.txt
++      - name: Install test dependencies
++        run: |
++          python - <<'PY'
++          import importlib.metadata as metadata
++          import re
++          import subprocess
++          import sys
++          from pathlib import Path
++          assert sys.version_info[:2] == (3, 13)
++          for args in (["install", "-r", "backend/requirements.txt", "pytest"], ["check"]):
++              result = subprocess.run([sys.executable, "-m", "pip", *args], capture_output=True, text=True)
++              if result.returncode:
++                  raise SystemExit("Dependency command failed; raw output withheld")
++          requirements = Path("backend/requirements.txt").read_text(encoding="utf-8")
++          for name in ("sqlmodel", "SQLAlchemy", "pydantic"):
++              expected = re.search(r"(?mi)^" + name + r"==([^\s]+)$", requirements).group(1)
++              assert metadata.version(name) == expected
++              print(name + "==" + expected)
++          PY
++      - name: Prove old main fails on live PostgreSQL 16
++        run: python backend/tests/run_latest_postgres.py --port 15432 --baseline
++      - name: Run same assertions on live PostgreSQL 16
++        run: python backend/tests/run_latest_postgres.py --port 15432
+   backend-tests:
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 0adf01d..7500fa8 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -112,15 +112,20 @@ def select_for_user(model, user_id: UUID | None):
+ 
+ 
+ def latest_application_documents(session: Session, application_id: int, user_id: UUID | None) -> dict[str, GeneratedDocument]:
++    ranked = select(
++        GeneratedDocument.id,
++        func.row_number().over(
++            partition_by=GeneratedDocument.document_type,
++            order_by=(GeneratedDocument.created_at.desc(), GeneratedDocument.id.desc()),
++        ).label("rank"),
++    ).where(GeneratedDocument.application_id == application_id)
++    if user_id is not None:
++        ranked = ranked.where(GeneratedDocument.user_id == user_id)
++    ranked = ranked.subquery()
+     documents = session.exec(
+-        select_for_user(GeneratedDocument, user_id)
+-        .where(GeneratedDocument.application_id == application_id)
+-        .order_by(GeneratedDocument.created_at.desc())
++        select(GeneratedDocument).join(ranked, GeneratedDocument.id == ranked.c.id).where(ranked.c.rank == 1)
+     ).all()
+-    latest: dict[str, GeneratedDocument] = {}
+-    for document in documents:
+-        latest.setdefault(document.document_type, document)
+-    return latest
++    return {document.document_type: document for document in documents}
+ 
+ 
+ def resume_snapshot(resume: Resume, ckb_json: str | None = None) -> dict:
+@@ -1532,7 +1537,10 @@ def parse_application_ad(
+     session: Session = Depends(get_session),
+     user_id: UUID | None = Depends(get_current_user),
+ ):
+-    previous_companies = [item.company for item in session.exec(select_for_user(JobApplication, user_id)).all()]
++    companies = select(JobApplication.company)
++    if user_id is not None:
++        companies = companies.where(JobApplication.user_id == user_id)
++    previous_companies = session.exec(companies).all()
+     try:
+         parsed = parse_job_ad_text(payload.raw_text, previous_companies)
+         parsed["application_requirements"] = parse_application_requirements(payload.raw_text)
+@@ -2110,14 +2118,7 @@ def quality_check(
+         raise HTTPException(404, "Application not found.")
+     application_master_resume(session, application, user_id, auto_update_pristine=True)
+     require_current_resume_snapshot(session, application, user_id)
+-    documents = session.exec(
+-        select_for_user(GeneratedDocument, user_id)
+-        .where(GeneratedDocument.application_id == application_id)
+-        .order_by(GeneratedDocument.created_at.desc())
+-    ).all()
+-    latest: dict[str, GeneratedDocument] = {}
+-    for document in documents:
+-        latest.setdefault(document.document_type, document)
++    latest = latest_application_documents(session, application_id, user_id)
+ 
+     issues: list[QualityCheckIssue] = []
+     requirements = load_application_requirements(
+@@ -2321,16 +2322,17 @@ def quality_check(
+         "\n".join((master_resume.source_text, master_resume.ckb_json or "[]"))
+         if master_resume else ""
+     )
+-    other_applications = session.exec(
+-        select_for_user(JobApplication, user_id).where(JobApplication.id != application_id)
+-    ).all()
++    identities = select(JobApplication.company, JobApplication.position_title).where(JobApplication.id != application_id)
++    if user_id is not None:
++        identities = identities.where(JobApplication.user_id == user_id)
++    other_applications = session.exec(identities).all()
+     for document_type in ("cover_letter", "selection_criteria"):
+         content = content_to_check.get(document_type, "")
+         if not content:
+             continue
+-        for other_application in other_applications:
+-            other_company = (other_application.company or "").strip()
+-            other_title = (other_application.position_title or "").split(" - ", 1)[0].strip()
++        for company, position_title in other_applications:
++            other_company = (company or "").strip()
++            other_title = (position_title or "").split(" - ", 1)[0].strip()
+             if (
+                 not other_company
+                 or not other_title
+@@ -2666,14 +2668,7 @@ def pack_review(
+             "issues": [item.model_dump() for item in final_check.issues if item.blocks_release],
+         })
+     application = get_for_user(session, JobApplication, application_id, user_id)
+-    generated = session.exec(
+-        select_for_user(GeneratedDocument, user_id)
+-        .where(GeneratedDocument.application_id == application_id)
+-        .order_by(GeneratedDocument.created_at.desc())
+-    ).all()
+-    latest: dict[str, GeneratedDocument] = {}
+-    for document in generated:
+-        latest.setdefault(document.document_type, document)
++    latest = latest_application_documents(session, application_id, user_id)
+     documents = {}
+     for document_type in final_check.checked_documents:
+         document = latest[document_type]
+@@ -3151,10 +3146,13 @@ def run_generation_request(payload, user_id, key, bind):
+ 
+ @app.get("/applications/{application_id}/generation-requests/{pack_id}/{document_type}")
+ def generation_request_status(application_id: int, pack_id: UUID, document_type: str, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
+-    application = get_for_user(session, JobApplication, application_id, user_id)
+-    if not application:
++    statement = select(JobApplication.release_state_json).where(JobApplication.id == application_id)
++    if user_id is not None:
++        statement = statement.where(JobApplication.user_id == user_id)
++    row = session.execute(statement).first()
++    if row is None:
+         raise HTTPException(404, "Application not found.")
+-    state = load_release_state(application.release_state_json).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
++    state = load_release_state(row[0]).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
+     if not state:
+         raise HTTPException(404, "Generation request not found.")
+     result = dict(state)
+diff --git a/backend/tests/egress_probe.py b/backend/tests/egress_probe.py
+new file mode 100644
+index 0000000..d3d06c9
+--- /dev/null
++++ b/backend/tests/egress_probe.py
+@@ -0,0 +1,46 @@
++"""Count actual SQLite result rows/bytes, not ORM objects or HTTP bytes."""
++import sqlite3
++
++from sqlalchemy.pool import StaticPool
++from sqlmodel import create_engine
++
++
++def measured_engine(records):
++    class Cursor(sqlite3.Cursor):
++        def execute(self, sql, parameters=()):
++            result = super().execute(sql, parameters)
++            self.record = {"sql": sql, "columns": tuple(c[0] for c in self.description or ()), "rows": 0, "bytes": 0}
++            records.append(self.record)
++            return result
++
++        def count(self, rows):
++            for row in rows:
++                self.record["rows"] += 1
++                self.record["bytes"] += sum(
++                    len(value) if isinstance(value, bytes) else len(str(value).encode("utf-8"))
++                    for value in row if value is not None
++                )
++
++        def fetchone(self):
++            row = super().fetchone()
++            self.count([] if row is None else [row])
++            return row
++
++        def fetchmany(self, size=None):
++            rows = super().fetchmany() if size is None else super().fetchmany(size)
++            self.count(rows)
++            return rows
++
++        def fetchall(self):
++            rows = super().fetchall()
++            self.count(rows)
++            return rows
++
++    class Connection(sqlite3.Connection):
++        def cursor(self, factory=Cursor):
++            return super().cursor(factory)
++
++    return create_engine(
++        "sqlite:" + "//", poolclass=StaticPool,
++        creator=lambda: sqlite3.connect(":memory:", factory=Connection, check_same_thread=False),
++    )
+diff --git a/backend/tests/run_latest_postgres.py b/backend/tests/run_latest_postgres.py
+new file mode 100644
+index 0000000..7adf980
+--- /dev/null
++++ b/backend/tests/run_latest_postgres.py
+@@ -0,0 +1,123 @@
++"""Execute the same latest-document tests on a disposable PostgreSQL 16 service."""
++import argparse
++import ast
++import os
++from pathlib import Path
++import socket
++import subprocess
++import sys
++import unittest
++from unittest.mock import patch
++from uuid import uuid4
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--port", type=int, required=True)
++    parser.add_argument("--baseline", action="store_true")
++    arguments = parser.parse_args()
++    if not 1024 <= arguments.port <= 65535:
++        raise SystemExit("A dedicated unprivileged fixture port is required")
++    allowed = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT"}
++    environment = {k: v for k, v in os.environ.items() if k.upper() in allowed}
++    environment.update(DATABASE_URL="sqlite:" + "//", DEPLOYMENT_MODE="local")
++    os.environ.clear()
++    os.environ.update(environment)
++    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++    from pydantic_settings import BaseSettings
++    original_init, original_connect = BaseSettings.__init__, socket.socket.connect
++
++    def without_dotenv(self, *args, **kwargs):
++        kwargs["_env_file"] = None
++        original_init(self, *args, **kwargs)
++
++    def connect(self, address):
++        if address != ("127.0.0.1", arguments.port):
++            raise AssertionError("Only the disposable PostgreSQL fixture is allowed")
++        return original_connect(self, address)
++
++    def denied(*args, **kwargs):
++        raise AssertionError("External connections are disabled")
++
++    with patch.object(BaseSettings, "__init__", without_dotenv), patch.object(socket.socket, "connect", connect), patch.object(socket.socket, "connect_ex", denied), patch.object(socket, "create_connection", denied):
++        import psycopg
++        from psycopg import sql
++        from sqlalchemy import event
++        from sqlalchemy.engine import Engine, URL
++        from sqlmodel import create_engine
++        import test_latest_document_reads as tests
++
++        fixture = dict(host="127.0.0.1", port=arguments.port, user="egress_fixture", dbname="egress_fixture")
++        with psycopg.connect(**fixture, autocommit=True) as connection:
++            assert connection.info.server_version // 10000 == 16, "PostgreSQL 16 is mandatory"
++        print("PostgreSQL 16 live fixture verified; credentials/dotenv are not inherited.")
++
++        def fixture_only(dialect, record, args, kwargs):
++            if dialect.name == "sqlite" and args and args[0] == ":memory:":
++                return
++            if dialect.name != "postgresql" or any(str(kwargs.get(k)) != str(v) for k, v in fixture.items()):
++                raise AssertionError("Database target is not the disposable fixture")
++
++        schemas = []
++
++        def engine_factory(records):
++            class Cursor(psycopg.Cursor):
++                def execute(self, query, params=None, **kwargs):
++                    result = super().execute(query, params, **kwargs)
++                    self.record = {"sql": str(query), "columns": tuple(c.name for c in self.description or ()), "rows": 0, "bytes": 0}
++                    records.append(self.record)
++                    return result
++
++                def count(self, rows):
++                    for row in rows:
++                        self.record["rows"] += 1
++                        self.record["bytes"] += sum(len(v) if isinstance(v, bytes) else len(str(v).encode("utf-8")) for v in row if v is not None)
++
++                def fetchone(self):
++                    row = super().fetchone()
++                    self.count([] if row is None else [row])
++                    return row
++
++                def fetchmany(self, size=0):
++                    rows = super().fetchmany(size)
++                    self.count(rows)
++                    return rows
++
++                def fetchall(self):
++                    rows = super().fetchall()
++                    self.count(rows)
++                    return rows
++
++            schema = "egress_" + uuid4().hex
++            with psycopg.connect(**fixture, autocommit=True) as connection:
++                connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
++            schemas.append(schema)
++            target = URL.create("postgresql+psycopg", host=fixture["host"], port=fixture["port"], username=fixture["user"], database=fixture["dbname"])
++            return create_engine(target, hide_parameters=True, connect_args={"cursor_factory": Cursor, "options": "-c search_path=" + schema})
++
++        tests.LatestDocumentReadTests.engine_factory = staticmethod(engine_factory)
++        if arguments.baseline:
++            # Re-execute only these three functions from the immutable old main.
++            source = subprocess.check_output(["git", "show", "dbce8ca:backend/app/main.py"], text=True, encoding="utf-8")
++            names = {"latest_application_documents", "quality_check", "pack_review"}
++            definitions = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name in names]
++            assert len(definitions) == len(names)
++            exec(compile(ast.Module(body=definitions, type_ignores=[]), "old-main-query-baseline", "exec"), tests.main.__dict__)
++        event.listen(Engine, "do_connect", fixture_only)
++        try:
++            result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(tests.LatestDocumentReadTests))
++        finally:
++            event.remove(Engine, "do_connect", fixture_only)
++            with psycopg.connect(**fixture, autocommit=True) as connection:
++                for schema in schemas:
++                    connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
++        if arguments.baseline:
++            if result.errors or not result.failures:
++                return 1
++            print("RED verified: old-main assertions failed, with no fixture/runtime errors.")
++            return 0
++        return 0 if result.wasSuccessful() else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/backend/tests/test_egress_reads.py b/backend/tests/test_egress_reads.py
+new file mode 100644
+index 0000000..e881d94
+--- /dev/null
++++ b/backend/tests/test_egress_reads.py
+@@ -0,0 +1,195 @@
++import json
++import unittest
++from collections import Counter
++from datetime import datetime, timezone
++from unittest.mock import patch
++from uuid import uuid4
++
++from fastapi import HTTPException
++from sqlmodel import Session, SQLModel, select
++
++from app import main
++from app.models import GeneratedDocument, JobAdParseRequest, JobApplication
++from egress_probe import measured_engine
++
++
++class IdentityReadTests(unittest.TestCase):
++    def setUp(self):
++        self.records = []
++        self.engine = measured_engine(self.records)
++        SQLModel.metadata.create_all(self.engine)
++        self.owner = uuid4()
++        self.companies = ["Current Department"] + ["North Rail"] * 2 + [f"Agency {i}" for i in range(18)]
++        with Session(self.engine) as session:
++            for index, company in enumerate(self.companies):
++                session.add(JobApplication(
++                    user_id=self.owner, company=company, position_title="Transport Planner",
++                    job_description="Coordinate projects.",
++                    archived_at=datetime(2026, 1, 1, tzinfo=timezone.utc) if index == 1 else None,
++                ))
++            session.add(JobApplication(user_id=uuid4(), company="Foreign Owner", position_title="Private", job_description="Private"))
++            session.commit()
++            self.application_id = session.exec(select(JobApplication.id).where(JobApplication.user_id == self.owner).order_by(JobApplication.id)).first()
++            for kind, content in [("tailored_resume", "Current Department Transport Planner"), ("cover_letter", "Current Department Transport Planner. North Rail Transport Planner.")]:
++                session.add(GeneratedDocument(user_id=self.owner, application_id=self.application_id, document_type=kind, content=content))
++            session.commit()
++
++    def tearDown(self):
++        self.engine.dispose()
++
++    def padding(self, size):
++        with Session(self.engine) as session:
++            for application in session.exec(select(JobApplication)).all():
++                for name in ("resume_snapshot_json", "evidence_matches_json", "job_model_json"):
++                    setattr(application, name, json.dumps({"padding": "x" * size}))
++                session.add(application)
++            session.commit()
++        self.records.clear()
++
++    def test_parse_ad_reads_only_company_preserving_scope_duplicates_and_archive(self):
++        totals = []
++        for size in (65536, 262144):
++            self.padding(size)
++            with Session(self.engine) as session, patch("app.main.parse_job_ad_text", wraps=main.parse_job_ad_text) as parser:
++                result = main.parse_application_ad(JobAdParseRequest(raw_text=(
++                    "Project Officer\nCurrent Department\nCoordinate projects, maintain registers, "
++                    "prepare reports and support stakeholders. Submit your CV and a cover letter."
++                )), session, self.owner)
++                self.assertTrue(result.application_requirements)
++                self.assertEqual(Counter(parser.call_args.args[1]), Counter(self.companies))
++            reads = [r for r in self.records if "FROM jobapplication" in r["sql"]]
++            self.assertEqual(len(reads), 1)
++            self.assertEqual(reads[0]["rows"], len(self.companies))
++            self.assertEqual(reads[0]["columns"], ("company",))
++            totals.append(reads[0]["bytes"])
++        self.assertEqual(totals[0], totals[1])
++
++    def test_cross_application_reads_only_identity_preserving_leak_detection(self):
++        totals = []
++        for size in (65536, 262144):
++            self.padding(size)
++            with Session(self.engine) as session:
++                result = main.quality_check(self.application_id, session, self.owner)
++            self.assertIn("cross_application_content_leak", [issue.code for issue in result.issues])
++            reads = [r for r in self.records if "jobapplication.id !=" in r["sql"]]
++            self.assertEqual(len(reads), 1)
++            self.assertEqual(reads[0]["rows"], len(self.companies) - 1)
++            self.assertEqual(reads[0]["columns"], ("company", "position_title"))
++            totals.append(reads[0]["bytes"])
++        self.assertEqual(totals[0], totals[1])
++
++    def test_probe_counts_actual_fetches(self):
++        self.records.clear()
++        with self.engine.connect() as connection:
++            result = connection.exec_driver_sql("SELECT 1 AS first, 2 AS second UNION ALL SELECT 3, 4 UNION ALL SELECT 5, 6")
++            self.assertEqual(result.fetchone(), (1, 2))
++            self.assertEqual(result.fetchmany(1), [(3, 4)])
++            self.assertEqual(result.fetchall(), [(5, 6)])
++        self.assertEqual(self.records[-1]["rows"], 3)
++        self.assertEqual(self.records[-1]["columns"], ("first", "second"))
++        self.assertEqual(self.records[-1]["bytes"], 6)
++
++
++class GenerationStatusReadTests(unittest.TestCase):
++    def setUp(self):
++        self.records = []
++        self.engine = measured_engine(self.records)
++        SQLModel.metadata.create_all(self.engine)
++        self.owner, self.pack = uuid4(), uuid4()
++        self.key = f"{self.pack}:tailored_resume"
++        with Session(self.engine) as session:
++            application = JobApplication(user_id=self.owner, company="Agency", position_title="Officer", job_description="JD")
++            session.add(application)
++            session.commit()
++            self.application_id = application.id
++            document = GeneratedDocument(user_id=self.owner, application_id=application.id, document_type="tailored_resume", content="Saved draft")
++            session.add(document)
++            session.commit()
++            self.document_id = document.id
++
++    def tearDown(self):
++        self.engine.dispose()
++
++    def state(self, value, size=65536):
++        with Session(self.engine) as session:
++            application = session.get(JobApplication, self.application_id)
++            application.release_state_json = value if isinstance(value, str) else json.dumps({"generation_requests": {self.key: value}})
++            for name in ("resume_snapshot_json", "evidence_matches_json", "job_model_json"):
++                setattr(application, name, json.dumps({"padding": "x" * size}))
++            session.commit()
++        self.records.clear()
++
++    def poll(self, owner=None, application_id=None, pack=None, document_type="tailored_resume"):
++        with Session(self.engine) as session:
++            return main.generation_request_status(
++                self.application_id if application_id is None else application_id,
++                self.pack if pack is None else pack, document_type, session,
++                self.owner if owner is None else owner,
++            )
++
++    def application_reads(self):
++        return [r for r in self.records if "FROM jobapplication" in r["sql"]]
++
++    def assert_read_only(self):
++        self.assertFalse(any(r["sql"].lstrip().split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} for r in self.records))
++
++    def test_running_polls_fetch_only_state_and_ignore_large_padding(self):
++        totals = []
++        for size in (65536, 262144):
++            self.state({"status": "running"}, size)
++            for _ in range(10):
++                self.assertEqual(self.poll(), {"status": "running"})
++            reads = self.application_reads()
++            self.assertEqual(len(reads), 10)
++            self.assertEqual(sum(r["rows"] for r in reads), 10)
++            self.assertTrue(all(r["columns"] == ("release_state_json",) for r in reads))
++            self.assertFalse(any("FROM generateddocument" in r["sql"] for r in self.records))
++            self.assert_read_only()
++            totals.append(sum(r["bytes"] for r in reads))
++        self.assertEqual(totals[0], totals[1])
++
++    def test_status_variants_preserve_saved_document_and_never_change_credits(self):
++        for status, has_document in [("completed", True), ("failed", True), ("failed", False), ("running", True)]:
++            with self.subTest(status=status, has_document=has_document):
++                value = {"status": status, "message": "Saved status", "detail": {"code": "example"}}
++                if has_document:
++                    value["document_id"] = self.document_id
++                self.state(value)
++                with patch("app.main.reserve_pack_credits") as reserve, patch("app.main.complete_pack_credits") as complete, patch("app.main.release_pack_credits") as release:
++                    result = self.poll()
++                for operation in (reserve, complete, release):
++                    operation.assert_not_called()
++                self.assertEqual({k: v for k, v in result.items() if k != "document"}, value)
++                documents = [r for r in self.records if "FROM generateddocument" in r["sql"]]
++                self.assertEqual(sum(r["rows"] for r in documents), int(has_document))
++                if has_document:
++                    self.assertEqual(result["document"].content, "Saved draft")
++                else:
++                    self.assertNotIn("document", result)
++                self.assertEqual(self.application_reads()[0]["columns"], ("release_state_json",))
++                self.assert_read_only()
++
++    def test_unauthorized_poll_returns_no_application_rows(self):
++        self.state({"status": "running"})
++        with self.assertRaises(HTTPException) as error:
++            self.poll(owner=uuid4())
++        self.assertEqual(error.exception.status_code, 404)
++        self.assertEqual(sum(r["rows"] for r in self.application_reads()), 0)
++        self.assertFalse(any("FROM generateddocument" in r["sql"] for r in self.records))
++        self.assert_read_only()
++
++    def test_missing_application_request_and_bad_json_remain_404(self):
++        for kwargs, value in [({"application_id": -1}, {"status": "running"}), ({"pack": uuid4()}, {"status": "running"}), ({"document_type": "cover_letter"}, {"status": "running"}), ({}, "{}"), ({}, "[]"), ({}, "invalid")]:
++            with self.subTest(kwargs=kwargs, value=value):
++                self.state(value)
++                with self.assertRaises(HTTPException) as error:
++                    self.poll(**kwargs)
++                self.assertEqual(error.exception.status_code, 404)
++                self.assertTrue(all(r["columns"] == ("release_state_json",) for r in self.application_reads()))
++                self.assert_read_only()
++
++    def test_local_mode_without_user_filter_still_reads_state(self):
++        self.state({"status": "running"})
++        with Session(self.engine) as session:
++            self.assertEqual(main.generation_request_status(self.application_id, self.pack, "tailored_resume", session, None), {"status": "running"})
++        self.assertEqual(self.application_reads()[0]["columns"], ("release_state_json",))
+diff --git a/backend/tests/test_latest_document_reads.py b/backend/tests/test_latest_document_reads.py
+new file mode 100644
+index 0000000..4a86a07
+--- /dev/null
++++ b/backend/tests/test_latest_document_reads.py
+@@ -0,0 +1,164 @@
++import json
++import unittest
++from datetime import datetime, timedelta, timezone
++from unittest.mock import patch
++from uuid import uuid4
++
++from sqlalchemy import event
++from sqlalchemy.sql import visitors
++from sqlalchemy.sql.selectable import Select
++from sqlmodel import Session, SQLModel, delete, select
++
++from app import main
++from app.application_requirements import empty_application_requirements
++from app.models import ApplicantProfile, GeneratedDocument, GenerateRequest, JobApplication, QualityCheckResponse, Resume
++from app.release_state import generation_inputs_fingerprint
++from egress_probe import measured_engine
++
++
++class LatestDocumentReadTests(unittest.TestCase):
++    engine_factory = staticmethod(measured_engine)
++
++    def setUp(self):
++        self.records, self.statements = [], []
++        self.engine = self.engine_factory(self.records)
++        SQLModel.metadata.create_all(self.engine)
++        self.owner, self.pack = uuid4(), uuid4()
++        requirements = empty_application_requirements("Coordinate projects.", source="user_supplied")
++        requirements["review_status"] = "confirmed"
++        for kind, document in requirements["documents"].items():
++            document.update(requirement="required" if kind in {"resume", "cover_letter"} else "not_required", format="standalone" if kind in {"resume", "cover_letter"} else "not_applicable")
++        with Session(self.engine) as session:
++            application = JobApplication(user_id=self.owner, company="Current Department", position_title="Officer", job_description="Coordinate projects.", application_requirements_json=json.dumps(requirements))
++            session.add(application)
++            session.commit()
++            self.application_id = application.id
++        event.listen(self.engine, "before_execute", self.capture)
++        self.seed(30)
++
++    def capture(self, connection, clause, multiparams, params, options):
++        if isinstance(clause, Select):
++            self.statements.append(clause)
++
++    def tearDown(self):
++        event.remove(self.engine, "before_execute", self.capture)
++        SQLModel.metadata.drop_all(self.engine)
++        self.engine.dispose()
++
++    def clear(self):
++        self.records.clear()
++        self.statements.clear()
++
++    def seed(self, versions):
++        self.latest, self.previous = {}, {}
++        self.history_count = 3 * versions + 1
++        with Session(self.engine) as session:
++            session.exec(delete(GeneratedDocument))
++            for kind in ("tailored_resume", "cover_letter", "selection_criteria"):
++                for version in range(versions):
++                    # The final two versions deliberately share a timestamp.
++                    created = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=min(version, versions - 2))
++                    document = GeneratedDocument(
++                        user_id=self.owner, application_id=self.application_id, document_type=kind,
++                        content="Current Department Officer. " + "x" * 8192,
++                        trace_json=json.dumps({"padding": "x" * 65536}), created_at=created,
++                    )
++                    session.add(document)
++                    session.flush()
++                    self.previous[kind] = self.latest.get(kind)
++                    self.latest[kind] = document.id
++            unknown = GeneratedDocument(user_id=self.owner, application_id=self.application_id, document_type="legacy_note", content="Keep unknown types")
++            session.add(unknown)
++            session.flush()
++            self.latest[unknown.document_type] = unknown.id
++            session.add(GeneratedDocument(user_id=uuid4(), application_id=self.application_id, document_type="tailored_resume", content="Other owner", created_at=datetime(2030, 1, 1, tzinfo=timezone.utc)))
++            other = JobApplication(user_id=self.owner, company="Other Department", position_title="Other", job_description="Other")
++            session.add(other)
++            session.flush()
++            session.add(GeneratedDocument(user_id=self.owner, application_id=other.id, document_type="tailored_resume", content="Other application", created_at=datetime(2030, 1, 1, tzinfo=timezone.utc)))
++            session.commit()
++        self.clear()
++
++    def document_reads(self):
++        return [r for r in self.records if "from generateddocument" in r["sql"].lower()]
++
++    def test_latest_query_limits_rows_and_bytes_as_history_grows(self):
++        sizes = []
++        for versions in (30, 100):
++            self.seed(versions)
++            with Session(self.engine) as session:
++                result = main.latest_application_documents(session, self.application_id, self.owner)
++            reads = self.document_reads()
++            self.assertEqual(len(reads), 1)
++            self.assertEqual(reads[0]["rows"], len(self.latest))
++            self.assertEqual({k: v.id for k, v in result.items()}, self.latest)
++            sizes.append(reads[0]["bytes"])
++            nested = [n for n in visitors.iterate(self.statements[-1]) if isinstance(n, Select) and n is not self.statements[-1]]
++            self.assertTrue(nested, "Ranking must happen in SQL, not in Python")
++            for query in nested:
++                self.assertLessEqual({c.key for c in query.selected_columns}, {"id", "document_type", "rank"})
++        # IDs/timestamps can differ in length; large history fields must not scale output.
++        self.assertLess(abs(sizes[1] - sizes[0]), 100)
++
++    def test_current_filter_never_falls_back_to_older_passing_document(self):
++        resume = Resume(source_text="Alex", ckb_json="[]")
++        profile = ApplicantProfile(first_name="Alex", last_name="Example", email="a@example.com", phone="0400000000")
++        with Session(self.engine) as session:
++            application = session.get(JobApplication, self.application_id)
++            application.release_state_json = '{"generation_contract_required":true}'
++            current = generation_inputs_fingerprint(application, resume, profile)
++            old = session.get(GeneratedDocument, self.previous["tailored_resume"])
++            old.trace_json, old.reviewer_json = json.dumps({"input_fingerprint": current}), '{"status":"pass"}'
++            latest = session.get(GeneratedDocument, self.latest["tailored_resume"])
++            latest.trace_json, latest.reviewer_json = '{"input_fingerprint":"stale"}', '{"status":"fail"}'
++            session.commit()
++        self.clear()
++        with Session(self.engine) as session:
++            application = session.get(JobApplication, self.application_id)
++            result = main.current_required_documents(session, application, self.owner, resume, profile)
++            self.assertNotIn("tailored_resume", set(result))
++        self.assertEqual(sum(r["rows"] for r in self.document_reads()), len(self.latest))
++
++    def test_quality_release_and_pack_review_do_not_fetch_history(self):
++        for operation, maximum in [("quality", 2), ("release", 3), ("pack", 1)]:
++            with self.subTest(operation=operation):
++                self.clear()
++                with Session(self.engine) as session:
++                    if operation == "quality":
++                        main.quality_check(self.application_id, session, self.owner)
++                    elif operation == "release":
++                        main.release_checklist(self.application_id, "docx", "classic", session, self.owner)
++                    else:
++                        final = QualityCheckResponse(ready=True, issues=[], checked_documents=["tailored_resume", "cover_letter"])
++                        with patch("app.main.quality_check", return_value=final), patch("app.main.review_application_pack", return_value={"status": "pass", "blocks_release": False}):
++                            main.pack_review(self.application_id, session, self.owner)
++                reads = self.document_reads()
++                self.assertEqual(len(reads), maximum)
++                self.assertTrue(all(r["rows"] == len(self.latest) for r in reads))
++
++    def test_pack_completion_preserves_required_and_current_contract(self):
++        payload = GenerateRequest(application_id=self.application_id, document_type="cover_letter", pack_id=self.pack)
++        cases = [({}, False, False), ({"tailored_resume": {"status": "completed"}}, False, True), ({"tailored_resume": {"status": "completed"}}, True, False)]
++        for requests, require_contract, completes in cases:
++            with self.subTest(require_contract=require_contract, completes=completes):
++                with Session(self.engine) as session:
++                    application = session.get(JobApplication, self.application_id)
++                    application.release_state_json = json.dumps({"generation_contract_required": require_contract, "generation_requests": {f"{self.pack}:{k}": v for k, v in requests.items()}})
++                    session.commit()
++                self.clear()
++                with Session(self.engine) as session, patch.object(main.settings, "deployment_mode", "online"), patch("app.main.complete_pack_credits") as complete:
++                    main.complete_generation_pack_if_ready(session, payload, self.owner)
++                    self.assertEqual(complete.call_count, int(completes))
++                self.assertTrue(all(r["rows"] == len(self.latest) for r in self.document_reads()))
++
++    def test_history_endpoint_still_returns_all_versions(self):
++        with Session(self.engine) as session:
++            history = main.document_history(self.application_id, session, self.owner)
++        self.assertEqual(len(history), self.history_count)
++        self.assertEqual(sum(r["rows"] for r in self.document_reads()), self.history_count)
++
++    def test_empty_scope_and_local_user_filter_contract(self):
++        with Session(self.engine) as session:
++            self.assertEqual(main.latest_application_documents(session, -1, self.owner), {})
++            local = main.latest_application_documents(session, self.application_id, None)
++            self.assertEqual(local["tailored_resume"].content, "Other owner")

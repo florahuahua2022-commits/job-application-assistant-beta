@@ -1,7 +1,7 @@
 import json
 import unittest
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -25,7 +25,7 @@ class IdentityReadTests(unittest.TestCase):
                 session.add(JobApplication(
                     user_id=self.owner, company=company, position_title="Transport Planner",
                     job_description="Coordinate projects.",
-                    archived_at=datetime(2026, 1, 1) if index == 1 else None,
+                    archived_at=datetime(2026, 1, 1, tzinfo=timezone.utc) if index == 1 else None,
                 ))
             session.add(JobApplication(user_id=uuid4(), company="Foreign Owner", position_title="Private", job_description="Private"))
             session.commit()

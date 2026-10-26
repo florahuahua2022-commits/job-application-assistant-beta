@@ -1,5 +1,7 @@
 # Production access
 
+- Without the user's explicit approval, never amend an already-pushed commit and never force push, including --force-with-lease. Use new commits and ordinary fast-forward pushes instead.
+
 - Never print, paste, or expose connection strings, passwords, or tokens in output, chat, or any log. Do not include them in commands or exception reports.
 - Production writes, migrations, deployments, and environment-variable changes each require the user's explicit approval for that specific action. Read access approval never authorizes them.
 - The sole authoritative production access log is `D:/Users/Administrator/Documents/job-application-assistant-audit/prod-access-log.md`, outside every repository checkout and Codex worktree. All branches and working directories must append only there. Repository copies of docs/prod-access-log.md are rule/pointer documents, never writable access ledgers. Relocation requires explicit approval and a recorded handover; Git operations must never overwrite the external ledger.
