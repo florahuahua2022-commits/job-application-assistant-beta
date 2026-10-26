@@ -1,0 +1,200 @@
+diff --git a/.github/workflows/quality-gates.yml b/.github/workflows/quality-gates.yml
+index c512233..48f6a79 100644
+--- a/.github/workflows/quality-gates.yml
++++ b/.github/workflows/quality-gates.yml
+@@ -24,9 +24,6 @@ jobs:
+       matrix:
+         include:
+           - dependencies: production
+-            sqlmodel: "0.0.48"
+-            sqlalchemy: "2.1.6"
+-            pydantic: "2.14.1"
+           - dependencies: legacy
+             sqlmodel: "0.0.39"
+             sqlalchemy: "2.0.52"
+@@ -44,10 +41,6 @@ jobs:
+           --health-interval 5s
+           --health-timeout 5s
+           --health-retries 10
+-    env:
+-      PYTHONPATH: backend
+-      DATABASE_URL: sqlite:///./ci-test.db
+-      DEPLOYMENT_MODE: local
+     steps:
+       - uses: actions/checkout@v6
+       - uses: actions/setup-python@v6
+@@ -56,19 +49,80 @@ jobs:
+           cache: pip
+           cache-dependency-path: backend/requirements.txt
+       - name: Install backend dependencies
+-        run: >-
+-          python -m pip install -r backend/requirements.txt pytest
+-          "sqlmodel==${{ matrix.sqlmodel }}"
+-          "SQLAlchemy==${{ matrix.sqlalchemy }}"
+-          "pydantic==${{ matrix.pydantic }}"
++        run: |
++          python - <<'PY'
++          import json
++          import os
++          import re
++          import subprocess
++          import sys
++          import tempfile
++          from pathlib import Path
++
++          group = "${{ matrix.dependencies }}"
++          source = Path("backend/requirements.txt")
++          text = source.read_text(encoding="utf-8")
++          names = {"sqlmodel", "sqlalchemy", "pydantic"}
++          expected = {}
++          for line in text.splitlines():
++              match = re.fullmatch(r"([A-Za-z0-9_-]+)==([^\s]+)", line)
++              if match and match[1].lower() in names:
++                  expected[match[1].lower()] = match[2]
++          assert set(expected) == names, "Core versions must be exact requirements"
++          assert sys.version_info[:2] == (3, 13), "Acceptance requires Python 3.13"
++          allowed = {"PATH", "HOME", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "LD_LIBRARY_PATH"}
++          clean = {k: v for k, v in os.environ.items() if k.upper() in allowed}
++          clean.update(PIP_CONFIG_FILE=os.devnull, PIP_DISABLE_PIP_VERSION_CHECK="1")
++
++          def run(command):
++              result = subprocess.run(command, env=clean, capture_output=True, text=True)
++              if result.returncode:
++                  raise SystemExit("Dependency command failed; raw output withheld")
++              return result.stdout
++
++          venv = Path(".ci-backend-venv")
++          run([sys.executable, "-m", "venv", str(venv)])
++          python = str(venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
++          version = run([python, "-c", "import platform; print(platform.python_version())"]).strip()
++          assert re.fullmatch(r"3\.13\.\d+", version)
++          Path("backend-python-version.txt").write_text("Python " + version + "\n", encoding="utf-8")
++          print("Python " + version)
++
++          def evidence(label):
++              run([python, "-m", "pip", "check"])
++              actual = json.loads(run([python, "-c", "import importlib.metadata as m, json; print(json.dumps({n: m.version(n) for n in ['sqlmodel', 'sqlalchemy', 'pydantic']}))"]))
++              assert actual == expected, "Installed core versions differ from requirements"
++              frozen = run([python, "-m", "pip", "freeze", "--all"])
++              if any(line and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9.!+_-]*", line) for line in frozen.splitlines()):
++                  raise SystemExit("Freeze contains non-version entries; evidence withheld")
++              Path("backend-" + label + "-pip-freeze.txt").write_text(frozen, encoding="utf-8")
++              for name, value in sorted(actual.items()):
++                  print(name + "==" + value)
++
++          with tempfile.TemporaryDirectory() as scratch:
++              manifest = source
++              if group == "legacy":
++                  legacy = {"sqlmodel": "${{ matrix.sqlmodel }}", "sqlalchemy": "${{ matrix.sqlalchemy }}", "pydantic": "${{ matrix.pydantic }}"}
++                  for name in names:
++                      assert re.fullmatch(r"\d+\.\d+\.\d+", legacy[name])
++                      text, count = re.subn(r"(?im)^" + name + r"==[^\r\n]+$", name + "==" + legacy[name], text)
++                      assert count == 1, "Legacy override must replace exactly one core pin"
++                  expected = legacy
++                  manifest = Path(scratch) / "legacy-requirements.txt"
++                  manifest.write_text(text, encoding="utf-8")
++              run([python, "-m", "pip", "install", "-r", str(manifest)])
++              evidence("runtime")
++              run([python, "-m", "pip", "install", "-r", str(manifest), "pytest"])
++              evidence("test")
++          PY
+       - name: Compile backend
+-        run: python -m compileall -q backend/app backend/tests
++        run: .ci-backend-venv/bin/python -m compileall -q backend/app backend/tests
+       - name: Run full backend and fixed-fixture suite
+-        run: python backend/tests/run_offline.py -q --tb=short 2>&1 | tee backend-test-results.txt
++        run: .ci-backend-venv/bin/python backend/tests/run_offline.py -q --tb=short 2>&1 | tee backend-test-results.txt
+       - name: Run isolated PostgreSQL 16 incident acceptance
+         run: |
+           for zone in UTC Australia/Perth; do
+-            python backend/tests/run_pg16.py --incident-pg16-port 55439 --incident-timezone "$zone" backend/tests/test_datetime_incident.py backend/tests/test_datetime_pg16.py backend/tests/test_pack_credits.py::PostgreSQLPackCreditContractTests -q --tb=short 2>&1 | tee -a backend-pg16-results.txt
++            .ci-backend-venv/bin/python backend/tests/run_pg16.py --incident-pg16-port 55439 --incident-timezone "$zone" backend/tests/test_datetime_incident.py backend/tests/test_datetime_pg16.py backend/tests/test_pack_credits.py::PostgreSQLPackCreditContractTests -q --tb=short 2>&1 | tee -a backend-pg16-results.txt
+           done
+       - name: Save backend test evidence
+         if: always()
+@@ -78,6 +132,9 @@ jobs:
+           path: |
+             backend-test-results.txt
+             backend-pg16-results.txt
++            backend-python-version.txt
++            backend-runtime-pip-freeze.txt
++            backend-test-pip-freeze.txt
+           retention-days: 30
+ 
+   frontend-build:
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index d27e77c..31b6616 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -1,6 +1,8 @@
+ fastapi>=0.115,<1.0
+ uvicorn[standard]>=0.30,<1.0
+-sqlmodel>=0.0.22,<1.0
++sqlmodel==0.0.48
++SQLAlchemy==2.1.6
++pydantic==2.14.1
+ pydantic-settings>=2.6,<3.0
+ openai>=1.0,<2.0
+ python-multipart>=0.0.12,<1.0
+diff --git a/docs/datetime-incident-phase-4.md b/docs/datetime-incident-phase-4.md
+new file mode 100644
+index 0000000..1eb14c1
+--- /dev/null
++++ b/docs/datetime-incident-phase-4.md
+@@ -0,0 +1,56 @@
++# 阶段四：核心后端依赖精确固定
++
++基线：阶段三修订提交 `9db67b6`。仅修改 backend/requirements.txt、CI及本说明/增量差异文件，以一个追加提交交付，不amend、不强推。
++
++## 固定范围
++
++| 依赖 | 精确版本 |
++| --- | --- |
++| SQLModel | 0.0.48 |
++| SQLAlchemy | 2.1.6 |
++| Pydantic | 2.14.1 |
++
++SQLModel的范围改为精确版本，SQLAlchemy和Pydantic作为显式精确要求加入。同组已在阶段二、三的Python3.13完整回归及PG16中验证，生产版本依据为此前用户提供的记录，没有新增生产检查。
++
++其余14项后端依赖的范围逐行保持原样；前端、业务代码、数据库及迁移未改。没有添加 `.python-version` 或其它Python版本文件，没有改Render配置。CI继续使用Python3.13，实际补丁版本由本次证据记录；生产Python的实际版本待用户确认后另行决定。
++
++## 生产组与旧组的同源安装
++
++- CI生产组从正式 backend/requirements.txt 直接安装，不再在工作流重复指定三个生产版本。
++- 保留旧组0.0.39 / 2.0.52 / 2.13.4，运行同一份测试。安装时从正式文件生成临时副本，只替换三个精确版本行；每项必须恰好替换一次。临时文件结束即删除，不维护另一份永久CI约束文件。
++- 两组均创建全新虚拟环境，之后的编译、完整离线回归和PG16验收全部使用该环境，避免检查一个环境却测试另一个环境。
++- 安装前去掉继承的凭据及pip源配置，禁用外部pip配置文件；安装输出只在内存捕获，不打印或上传原始安装日志。
++- 去除backend job中不再需要的环境段。两个已有测试入口本来就清除dotenv/继承环境、设置内存SQLite、配置导入路径；未削弱隔离措施。
++- 每组安装后和加入pytest后均执行pip check，并用实际包元数据核对三个版本。生产预期直接取正式requirements，旧组预期来自兼容矩阵。
++- pull_request / push仅main的触发条件、前端job、旧组兼容测试和原有PG16清单均保持不变。
++
++## 完整证据及安全边界
++
++每个组的既有测试证据artifact新增：
++
++1. `backend-python-version.txt`：实际Python版本。
++2. `backend-runtime-pip-freeze.txt`：安装正式运行依赖后、加入pytest前的完整 `pip freeze --all`。
++3. `backend-test-pip-freeze.txt`：加入测试依赖后的完整 `pip freeze --all`。
++
++使用 `--all` 包含pip等引导工具，完整输出原样保存，不删包、不排序、不把测试环境冒充运行环境。新增控制台输出只包含Python版本和三项包名/版本。
++
++写入前验证每个非空freeze行均为纯 `Name==Version`。若出现直接来源、editable或其它非版本条目，CI立即失败，不输出/保存该份内容；不会删掉危险行后仍宣称“完整freeze”。原始安装/pip错误输出同样不进入日志或artifact，失败仅报告通用提示。不打印环境变量、安装源、凭据或连接信息。
++
++artifact沿用 `backend-test-results-production-运行号`、`backend-test-results-legacy-运行号`，同时含既有离线/PG16日志。只有这三个新增证据文件上传，临时manifest、虚拟环境及原始pip输出不上传。
++
++## 验证
++
++- 实际工作流内嵌脚本的两组展开均通过语法检查。
++- 直接执行实际evidence函数的合成拒绝测试：直接来源、editable及源参数条目均在任何证据写入前被拒绝。
++- 本地以同一内嵌脚本在全新Python3.13.2环境分别安装两组：安装成功，实际版本核对/pip check通过；每组运行freeze64项、测试freeze68项。测试freeze与再次执行完整freeze逐字核对一致，证据只含包名和版本。
++- 两组分别使用新建环境执行完整离线回归：各630 passed、15 PG专属skipped、182 subtests passed。PG专属用例继续由CI的独立PG16步骤执行，不省略验收。
++- 触发块、整个前端job及其余14项requirements逐项比对未变；未添加Python版本文件。只读审阅未发现阻断问题。
++- 最终CI结果和实际artifact链接/运行号由本追加提交对应的PR检查及最终答复给出；不把本地结果称作生产验证。
++
++## Render、回退及后续事项
++
++Render若按这份requirements构建，三个核心包只能安装指定版本或安装失败；其它浮动依赖仍可能变化。本阶段没有读取生产控制台/构建日志，没有核实线上实际Python版本，也没有修改构建命令或触发部署。CI freeze是本次CI安装证据，不是Render实装清单。
++
++若需撤销本阶段源码配置，使用新的revert提交恢复阶段三修订基线的依赖/CI配置，不撤销阶段二时区修复或阶段三前端修复，不amend/强推。涉及main、部署、生产配置或线上回滚，均须另行明确批准。
++
++全部后端依赖完整锁定仍为单独后续事项：本次没有完整锁文件、全量固定或安装产物哈希保障。合并、部署及生产操作均未获本阶段授权，完成后停下供用户审阅。

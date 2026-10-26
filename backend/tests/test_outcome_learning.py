@@ -1,7 +1,7 @@
 import json
 import unittest
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -128,7 +128,7 @@ class OutcomeEndpointTests(unittest.TestCase):
             application = JobApplication(user_id=self.user, company="Agency", position_title="Project Officer", job_description="Role", status="ready_to_apply")
             other = JobApplication(user_id=self.other, company="Other", position_title="Project Officer", job_description="Role")
             session.add_all([application, other]); session.flush()
-            old = GeneratedDocument(user_id=self.user, application_id=application.id, document_type="tailored_resume", content="Old", structured_content_json='{"schema_version":"1.1"}', used_experiences_json='["E1"]', created_at=datetime.utcnow() - timedelta(days=1))
+            old = GeneratedDocument(user_id=self.user, application_id=application.id, document_type="tailored_resume", content="Old", structured_content_json='{"schema_version":"1.1"}', used_experiences_json='["E1"]', created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
             session.add(old); session.commit(); session.refresh(old)
             self.application_id, self.other_id, self.old_id = application.id, other.id, old.id
         self.client = TestClient(app)

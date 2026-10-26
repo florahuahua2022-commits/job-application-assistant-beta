@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from datetime import datetime
+from .models import utc_now
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener
 
@@ -133,4 +133,4 @@ def acquire_sources(sources: list, opener_factory=build_opener) -> None:
             source.extracted_text = ""
             source.warnings_json = json.dumps([f"The attachment could not be processed: {error}"])
         finally:
-            source.updated_at = datetime.utcnow()
+            source.updated_at = utc_now()
