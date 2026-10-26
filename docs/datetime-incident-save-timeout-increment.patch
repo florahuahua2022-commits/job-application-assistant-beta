@@ -1,0 +1,341 @@
+diff --git a/docs/datetime-incident-save-timeout.md b/docs/datetime-incident-save-timeout.md
+new file mode 100644
+index 0000000..4b9df9d
+--- /dev/null
++++ b/docs/datetime-incident-save-timeout.md
+@@ -0,0 +1,24 @@
++# 保存等待期限修订（相对 b7733fd）
++
++## 实施范围
++
++- 只调整现有六个保存入口：主资料表单、申请内资料编辑、识别联系信息、职位新建/编辑共用表单、已保存职位编辑、申请内公司/职位编辑。
++- 共用 saveResponse 默认期限从 30 秒改为 90 秒。一个总期限覆盖请求和 JSON 正文读取，不在收到响应头后重新计时。
++- 点击后相邻状态为“正在保存…”，8 秒后为“正在确认保存，免费服务唤醒可能需要约一分钟，请稍候。”。
++- 成功、失败、超时均清除两个定时器；慢提示回调检查用户、入口/申请键和请求序号。
++- 原有按钮禁用、输入保留、错误持续显示、切换申请保护、确认成功后全局数据更新保持不变。POST 超时仍进入“结果待确认”，不自动解锁或重发；PATCH/PUT 仍可手动重试。
++- 不添加预热请求、读取、轮询、依赖或 CI 触发条件；不修改后端、生产配置和其他分支。
++
++## 验证
++
++- RED：旧实现下共用函数测试 7 项中 3 项失败，两个界面测试均失败。
++- GREEN：Node 24.22.1，完整前端单元测试 68/68；Playwright 两个界面测试 2/2；前端生产构建通过。
++- 假时钟验证 7,999 ms 仍是中性提示、8,000 ms 切换；60 秒响应仍成功；89,999 ms 尚未超时、90 秒后终止；响应头后读正文也共享总期限。
++- 界面时钟先暂停，再显式推进；不实际等待 8/60/90 秒。既有错误、手动重试、POST 结果待确认及跨申请迟到回调测试保留。
++- 复用 PR #39 的现有 CI：前端单元/界面/构建，Python 3.13 两套依赖的完整离线回归及 PostgreSQL 16 清单。提交后的实际 CI 运行链接和结论随交付回复提供。
++
++## 变更文件
++
++frontend/app/saveResponse.ts、frontend/app/page.tsx、frontend/app/saveResponse.test.mjs、frontend/e2e/save-feedback.spec.ts，以及本说明和增量差异文件。
++
++未合并、未部署，未访问生产。
+diff --git a/frontend/app/page.tsx b/frontend/app/page.tsx
+index f579c83..c77ea5a 100644
+--- a/frontend/app/page.tsx
++++ b/frontend/app/page.tsx
+@@ -23,7 +23,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+ const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
+ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+ const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
+-type SaveState = { pending: boolean; error: "" | "retry" | "uncertain"; sequence: number };
++type SaveState = { slow?: boolean; pending: boolean; error: "" | "retry" | "uncertain"; sequence: number };
+ const saveRetryMessage = "未能确认保存，输入已保留，请重试。";
+ const saveUncertainMessage = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
+ type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean; needs_review?: boolean; review_reasons?: string[] };
+@@ -186,6 +186,13 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     return sequence;
+   }
+ 
++  function markSaveSlow(key: string, sequence: number) {
++    const state = saveStateRef.current[key];
++    if (key.startsWith(`${saveUserRef.current}:`) && state?.pending && state.sequence === sequence) {
++      putSaveState(key, { ...state, slow: true });
++    }
++  }
++
+   function finishSave(key: string, sequence: number, result: SaveResult<{ id: number }>, isPost = false) {
+     if (!key.startsWith(`${saveUserRef.current}:`) || saveStateRef.current[key]?.sequence !== sequence) return false;
+     const error = result.ok ? "" : isPost && !(result.kind === "http" && result.status === 422) ? "uncertain" : "retry";
+@@ -200,8 +207,11 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+   }
+ 
+   function saveFeedback(key: string) {
+-    const error = saveStates[key]?.error;
+-    return error ? <p className="requirementsWarnings full" role="alert">{error === "uncertain" ? saveUncertainMessage : saveRetryMessage}</p> : null;
++    const state = saveStates[key];
++    return <>
++      {state?.pending && <p className="helper full" role="status">{state.slow ? "正在确认保存，免费服务唤醒可能需要约一分钟，请稍候。" : "正在保存…"}</p>}
++      {state?.error && <p className="requirementsWarnings full" role="alert">{state.error === "uncertain" ? saveUncertainMessage : saveRetryMessage}</p>}
++    </>;
+   }
+ 
+   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+@@ -406,7 +416,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     };
+     const key = saveKey("profile"), context = saveContext;
+     const sequence = beginSave(key); if (sequence === null) return;
+-    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
++    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }), undefined, () => markSaveSlow(key, sequence));
+     if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+     const current = saveContextRef.current === context;
+@@ -437,7 +447,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     };
+     const key = saveKey("application-profile", selectedApplication), context = saveContext;
+     const sequence = beginSave(key); if (sequence === null) return;
+-    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
++    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }), undefined, () => markSaveSlow(key, sequence));
+     if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+     const current = saveContextRef.current === context;
+@@ -457,7 +467,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     const saved = await saveResponse<Application>((signal) => authenticatedFetch(`${api}/applications/${selected.id}`, {
+       method: "PATCH", headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ company: String(form.get("company") || "").trim(), position_title: String(form.get("position_title") || "").trim() }), signal,
+-    }));
++    }), undefined, () => markSaveSlow(key, sequence));
+     if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+     setApplications((current) => current.map((item) => item.id === result.id ? result : item));
+@@ -488,7 +498,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     };
+     const key = saveKey("detected-contact"), context = saveContext;
+     const sequence = beginSave(key); if (sequence === null) return false;
+-    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
++    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }), undefined, () => markSaveSlow(key, sequence));
+     if (!finishSave(key, sequence, saved) || !saved.ok) return false;
+     if (saveContextRef.current === context) profileFormKey.current = String(sequence);
+     setProfile(saved.data);
+@@ -686,7 +696,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       method: selectedApplication ? "PATCH" : "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(selectedApplication ? updatePayload : payload), signal,
+-    }));
++    }), undefined, () => markSaveSlow(key, sequence));
+     if (!finishSave(key, sequence, saved, selectedApplication === null) || !saved.ok) return;
+     const application = saved.data;
+     const isPost = selectedApplication === null;
+@@ -724,7 +734,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     const saved = await saveResponse<Application>((signal) => authenticatedFetch(`${api}/applications/${applicationId}`, {
+       method: "PATCH", headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(payload), signal,
+-    }));
++    }), undefined, () => markSaveSlow(key, sequence));
+     if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+     setApplications((current) => current.map((application) => application.id === result.id ? result : application));
+@@ -1643,7 +1653,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><a className="secondary pageLink" href="/applications">View all applications</a></div>
+     </section>
+ 
+-      <details className="panel" open={!profile || Boolean(saveStates[saveKey("detected-contact")]?.error)}>
++      <details className="panel" open={!profile || Boolean(saveStates[saveKey("detected-contact")]?.error || saveStates[saveKey("detected-contact")]?.pending)}>
+         <summary><span>0</span><div><strong>Contact check</strong><small>{profile ? "Detected and saved — check once" : "Upload your CV and skip manual entry"}</small></div></summary>
+         {!resumes.length && <form onSubmit={uploadResume} className="formBody quickStartUpload">
+           <div><strong>Start by uploading your existing CV</strong><p className="helper">We will read your name, phone and email from DOCX, PDF or TXT.</p></div>
+@@ -1652,7 +1662,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+           <button disabled={resumeUploadState === "uploading"}>{resumeUploadState === "uploading" ? "Reading…" : "Upload & auto-fill"}</button>
+         </form>}
+         <div className="formBody">
+-          {saveStates[saveKey("detected-contact")]?.error && <div>{saveFeedback(saveKey("detected-contact"))}<button type="button" className="secondary" disabled={saveStates[saveKey("detected-contact")]?.pending} onClick={() => { void saveDetectedContact(contactGuess); }}>重试保存联系信息</button></div>}
++          {(saveStates[saveKey("detected-contact")]?.error || saveStates[saveKey("detected-contact")]?.pending) && <div>{saveFeedback(saveKey("detected-contact"))}{saveStates[saveKey("detected-contact")]?.error && <button type="button" className="secondary" disabled={saveStates[saveKey("detected-contact")]?.pending} onClick={() => { void saveDetectedContact(contactGuess); }}>重试保存联系信息</button>}</div>}
+           {profile && <div className="contactConfirm"><div><small>Name</small><strong>{[profile.first_name, profile.last_name].filter(Boolean).join(" ")}</strong></div><div><small>Phone</small><strong>{profile.phone}</strong></div><div><small>Email</small><strong>{profile.email}</strong></div></div>}
+           <details className="quickProfileEdit" open={!profile}>
+             <summary>{profile ? "Something is wrong? Edit it" : "Check missing details"}</summary>
+diff --git a/frontend/app/saveResponse.test.mjs b/frontend/app/saveResponse.test.mjs
+index e81db1a..f36bfca 100644
+--- a/frontend/app/saveResponse.test.mjs
++++ b/frontend/app/saveResponse.test.mjs
+@@ -34,7 +34,14 @@ test("timeout ends waiting, aborts the request, and ignores a late response", as
+     signal = input;
+     return new Promise((resolve) => { complete = resolve; });
+   });
+-  t.mock.timers.tick(30_001);
++  let settled = false;
++  pending.then(() => { settled = true; });
++  t.mock.timers.tick(89_999);
++  await Promise.resolve();
++  await Promise.resolve();
++  assert.equal(settled, false);
++  assert.equal(signal.aborted, false);
++  t.mock.timers.tick(2);
+   assert.deepEqual(await pending, { ok: false, kind: "timeout", status: null });
+   assert.equal(signal.aborted, true);
+   complete(Response.json({ id: 9 }));
+@@ -43,8 +50,52 @@ test("timeout ends waiting, aborts the request, and ignores a late response", as
+ 
+ test("timeout also covers reading the response body", async (t) => {
+   t.mock.timers.enable({ apis: ["setTimeout"] });
+-  const pending = saveResponse(async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) }));
++  let headers;
++  const pending = saveResponse(() => new Promise((resolve) => { headers = resolve; }));
++  let settled = false;
++  pending.then(() => { settled = true; });
++  t.mock.timers.tick(60_000);
++  headers({ ok: true, status: 200, json: () => new Promise(() => {}) });
++  await Promise.resolve();
++  await Promise.resolve();
++  t.mock.timers.tick(29_999);
+   await Promise.resolve();
+-  t.mock.timers.tick(30_001);
++  assert.equal(settled, false);
++  t.mock.timers.tick(2);
+   assert.deepEqual(await pending, { ok: false, kind: "timeout", status: 200 });
+ });
++
++test("slow notice starts at eight seconds and a sixty-second response still succeeds", async (t) => {
++  t.mock.timers.enable({ apis: ["setTimeout"] });
++  let complete, signal, slowCalls = 0;
++  const pending = saveResponse((input) => {
++    signal = input;
++    return new Promise((resolve) => { complete = resolve; });
++  }, undefined, () => { slowCalls++; });
++  t.mock.timers.tick(7_999);
++  assert.equal(slowCalls, 0);
++  t.mock.timers.tick(1);
++  assert.equal(slowCalls, 1);
++  t.mock.timers.tick(52_000);
++  assert.equal(signal.aborted, false);
++  complete(Response.json({ id: 3 }));
++  assert.deepEqual(await pending, { ok: true, data: { id: 3 } });
++  t.mock.timers.tick(90_001);
++  assert.equal(signal.aborted, false);
++  assert.equal(slowCalls, 1);
++});
++
++test("fast success and failure cancel both notice and timeout timers", async (t) => {
++  t.mock.timers.enable({ apis: ["setTimeout"] });
++  for (const status of [200, 422, 500]) {
++    let slowCalls = 0, signal;
++    const result = await saveResponse(async (input) => {
++      signal = input;
++      return Response.json({ id: 4 }, { status });
++    }, undefined, () => { slowCalls++; });
++    assert.equal(result.ok, status === 200);
++    t.mock.timers.tick(90_001);
++    assert.equal(slowCalls, 0);
++    assert.equal(signal.aborted, false);
++  }
++});
+diff --git a/frontend/app/saveResponse.ts b/frontend/app/saveResponse.ts
+index c4c48cb..af2b815 100644
+--- a/frontend/app/saveResponse.ts
++++ b/frontend/app/saveResponse.ts
+@@ -2,11 +2,12 @@ export type SaveFailure = { ok: false; kind: "http" | "network" | "timeout" | "i
+ export type SaveResult<T> = { ok: true; data: T } | SaveFailure;
+ 
+ export async function saveResponse<T extends { id: number }>(
+-  request: (signal: AbortSignal) => Promise<Response>, timeoutMs = 30_000,
++  request: (signal: AbortSignal) => Promise<Response>, timeoutMs = 90_000, onSlow?: () => void,
+ ): Promise<SaveResult<T>> {
+   const controller = new AbortController();
+   let status: number | null = null;
+   let timer: ReturnType<typeof setTimeout> | undefined;
++  const slowTimer = onSlow ? setTimeout(onSlow, 8_000) : undefined;
+   try {
+     return await Promise.race([
+       (async (): Promise<SaveResult<T>> => {
+@@ -30,5 +31,6 @@ export async function saveResponse<T extends { id: number }>(
+     return { ok: false, kind: status === null ? "network" : "invalid_response", status };
+   } finally {
+     clearTimeout(timer);
++    clearTimeout(slowTimer);
+   }
+ }
+diff --git a/frontend/e2e/save-feedback.spec.ts b/frontend/e2e/save-feedback.spec.ts
+index 8a699f1..d2ae548 100644
+--- a/frontend/e2e/save-feedback.spec.ts
++++ b/frontend/e2e/save-feedback.spec.ts
+@@ -2,6 +2,8 @@ import { expect, test, type Page, type Route } from "@playwright/test";
+ 
+ const retry = "未能确认保存，输入已保留，请重试。";
+ const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
++const waiting = "正在保存…";
++const waking = "正在确认保存，免费服务唤醒可能需要约一分钟，请稍候。";
+ 
+ async function fixtures(page: Page) {
+   const state = { mode: "success", held: null as Route | null, posts: 0, writes: 0, lists: 0,
+@@ -53,6 +55,7 @@ async function fixtures(page: Page) {
+     return route.fulfill({ status: 404, json: { detail: "Offline fixture unavailable" } });
+   });
+   await page.clock.install();
++  await page.clock.pauseAt(new Date(Date.now() + 1_000));
+   return state;
+ }
+ 
+@@ -73,6 +76,11 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
+   await button.click();
+   await expect(button).toBeDisabled();
+   await expect.poll(() => state.held).not.toBeNull();
++  await expect(form.getByRole("status")).toHaveText(waiting);
++  await page.clock.fastForward(7_999);
++  await expect(form.getByRole("status")).toHaveText(waiting);
++  await page.clock.fastForward(1);
++  await expect(form.getByRole("status")).toHaveText(waking);
+   await form.evaluate((element) => element.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+   expect(state.writes).toBe(1);
+   await state.held!.fulfill({ status: 422, json: { detail: "PRIVATE_SERVER_DETAIL" } });
+@@ -84,16 +92,22 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
+     await button.click();
+     if (mode === "timeout") {
+       await expect.poll(() => state.held).not.toBeNull();
+-      await page.clock.fastForward(30_001);
++      await page.clock.fastForward(90_001);
+     }
+     await expect(button).toBeEnabled();
+     await expect(form.getByRole("alert")).toHaveText(retry);
+     await expect(form.locator('[name="full_name"]')).toHaveValue("Changed Synthetic");
+     await expect(page.getByText("PRIVATE_SERVER_DETAIL", { exact: true })).toHaveCount(0);
+   }
+-  state.mode = "success";
++  state.mode = "hold"; state.held = null;
+   await button.click();
++  await expect.poll(() => state.held).not.toBeNull();
++  await page.clock.fastForward(60_000);
++  await expect(button).toBeDisabled();
++  await expect(form.getByRole("status")).toHaveText(waking);
++  await state.held!.fulfill({ json: { ...state.profile(), first_name: "Changed", last_name: "Synthetic", updated_at: "2026-01-02T00:00:00Z" } });
+   await expect(form.getByRole("alert")).toHaveCount(0);
++  await expect(form.getByRole("status")).toHaveCount(0);
+   await expect(page.getByText("Contact details confirmed. You will not need to enter them again.", { exact: true })).toBeVisible();
+   expect(state.profile().work_rights).toBe("permanent_resident");
+   expect(state.profile().availability_notice).toBe("one_month");
+@@ -157,6 +171,11 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
+   await save.click();
+   await expect(save).toBeDisabled();
+   await expect.poll(() => state.held).not.toBeNull();
++  await expect(create.getByRole("status")).toHaveText(waiting);
++  await page.clock.fastForward(7_999);
++  await expect(create.getByRole("status")).toHaveText(waiting);
++  await page.clock.fastForward(1);
++  await expect(create.getByRole("status")).toHaveText(waking);
+   await state.held!.fulfill({ status: 422, json: { detail: "PRIVATE_SERVER_DETAIL" } });
+   await expect(create.getByRole("alert")).toHaveText(retry);
+   await expect(save).toBeEnabled();
+@@ -166,7 +185,7 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
+     await save.click();
+     if (mode === "timeout") {
+       await expect.poll(() => state.held).not.toBeNull();
+-      await page.clock.fastForward(30_001);
++      await page.clock.fastForward(90_001);
+     }
+     await expect(create.getByRole("alert")).toHaveText(uncertain);
+     await expect(save).toBeDisabled();
+@@ -186,9 +205,17 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
+     await expect(create.getByRole("alert")).toHaveText(retry);
+   }
+   await fillJob();
+-  state.mode = "success";
++  state.mode = "hold"; state.held = null;
+   await save.click();
++  await expect.poll(() => state.held).not.toBeNull();
++  await page.clock.fastForward(60_000);
++  await expect(save).toBeDisabled();
++  await expect(create.getByRole("status")).toHaveText(waking);
++  const slowCreated = { ...state.applications()[0], id: 3, company: "New Synthetic Company", position_title: "New Synthetic Role" };
++  state.applications().push(slowCreated);
++  await state.held!.fulfill({ json: slowCreated });
+   await expect(page.locator(".selectedJob")).toContainText("New Synthetic Role");
++  await expect(create.getByRole("status")).toHaveCount(0);
+   await expect(create.locator('[name="company"]')).toHaveValue("");
+   const edit = page.locator("form").filter({ has: page.locator('[name="submission_reference"]') });
+   async function openEdit(id: number) {

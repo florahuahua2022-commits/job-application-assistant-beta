@@ -23,7 +23,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
-type SaveState = { pending: boolean; error: "" | "retry" | "uncertain"; sequence: number };
+type SaveState = { slow?: boolean; pending: boolean; error: "" | "retry" | "uncertain"; sequence: number };
 const saveRetryMessage = "未能确认保存，输入已保留，请重试。";
 const saveUncertainMessage = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
 type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean; needs_review?: boolean; review_reasons?: string[] };
@@ -186,6 +186,13 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     return sequence;
   }
 
+  function markSaveSlow(key: string, sequence: number) {
+    const state = saveStateRef.current[key];
+    if (key.startsWith(`${saveUserRef.current}:`) && state?.pending && state.sequence === sequence) {
+      putSaveState(key, { ...state, slow: true });
+    }
+  }
+
   function finishSave(key: string, sequence: number, result: SaveResult<{ id: number }>, isPost = false) {
     if (!key.startsWith(`${saveUserRef.current}:`) || saveStateRef.current[key]?.sequence !== sequence) return false;
     const error = result.ok ? "" : isPost && !(result.kind === "http" && result.status === 422) ? "uncertain" : "retry";
@@ -200,8 +207,11 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
   }
 
   function saveFeedback(key: string) {
-    const error = saveStates[key]?.error;
-    return error ? <p className="requirementsWarnings full" role="alert">{error === "uncertain" ? saveUncertainMessage : saveRetryMessage}</p> : null;
+    const state = saveStates[key];
+    return <>
+      {state?.pending && <p className="helper full" role="status">{state.slow ? "正在确认保存，免费服务唤醒可能需要约一分钟，请稍候。" : "正在保存…"}</p>}
+      {state?.error && <p className="requirementsWarnings full" role="alert">{state.error === "uncertain" ? saveUncertainMessage : saveRetryMessage}</p>}
+    </>;
   }
 
   async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
@@ -406,7 +416,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     };
     const key = saveKey("profile"), context = saveContext;
     const sequence = beginSave(key); if (sequence === null) return;
-    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
+    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }), undefined, () => markSaveSlow(key, sequence));
     if (!finishSave(key, sequence, saved) || !saved.ok) return;
     const result = saved.data;
     const current = saveContextRef.current === context;
@@ -437,7 +447,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     };
     const key = saveKey("application-profile", selectedApplication), context = saveContext;
     const sequence = beginSave(key); if (sequence === null) return;
-    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
+    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }), undefined, () => markSaveSlow(key, sequence));
     if (!finishSave(key, sequence, saved) || !saved.ok) return;
     const result = saved.data;
     const current = saveContextRef.current === context;
@@ -457,7 +467,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     const saved = await saveResponse<Application>((signal) => authenticatedFetch(`${api}/applications/${selected.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ company: String(form.get("company") || "").trim(), position_title: String(form.get("position_title") || "").trim() }), signal,
-    }));
+    }), undefined, () => markSaveSlow(key, sequence));
     if (!finishSave(key, sequence, saved) || !saved.ok) return;
     const result = saved.data;
     setApplications((current) => current.map((item) => item.id === result.id ? result : item));
@@ -488,7 +498,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     };
     const key = saveKey("detected-contact"), context = saveContext;
     const sequence = beginSave(key); if (sequence === null) return false;
-    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
+    const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }), undefined, () => markSaveSlow(key, sequence));
     if (!finishSave(key, sequence, saved) || !saved.ok) return false;
     if (saveContextRef.current === context) profileFormKey.current = String(sequence);
     setProfile(saved.data);
@@ -686,7 +696,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       method: selectedApplication ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(selectedApplication ? updatePayload : payload), signal,
-    }));
+    }), undefined, () => markSaveSlow(key, sequence));
     if (!finishSave(key, sequence, saved, selectedApplication === null) || !saved.ok) return;
     const application = saved.data;
     const isPost = selectedApplication === null;
@@ -724,7 +734,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
     const saved = await saveResponse<Application>((signal) => authenticatedFetch(`${api}/applications/${applicationId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload), signal,
-    }));
+    }), undefined, () => markSaveSlow(key, sequence));
     if (!finishSave(key, sequence, saved) || !saved.ok) return;
     const result = saved.data;
     setApplications((current) => current.map((application) => application.id === result.id ? result : application));
@@ -1643,7 +1653,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
       <div className="overviewActions"><button type="button" onClick={() => document.getElementById("add-job")?.scrollIntoView({ behavior: "smooth" })}>Add a job</button><a className="secondary pageLink" href="/applications">View all applications</a></div>
     </section>
 
-      <details className="panel" open={!profile || Boolean(saveStates[saveKey("detected-contact")]?.error)}>
+      <details className="panel" open={!profile || Boolean(saveStates[saveKey("detected-contact")]?.error || saveStates[saveKey("detected-contact")]?.pending)}>
         <summary><span>0</span><div><strong>Contact check</strong><small>{profile ? "Detected and saved — check once" : "Upload your CV and skip manual entry"}</small></div></summary>
         {!resumes.length && <form onSubmit={uploadResume} className="formBody quickStartUpload">
           <div><strong>Start by uploading your existing CV</strong><p className="helper">We will read your name, phone and email from DOCX, PDF or TXT.</p></div>
@@ -1652,7 +1662,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
           <button disabled={resumeUploadState === "uploading"}>{resumeUploadState === "uploading" ? "Reading…" : "Upload & auto-fill"}</button>
         </form>}
         <div className="formBody">
-          {saveStates[saveKey("detected-contact")]?.error && <div>{saveFeedback(saveKey("detected-contact"))}<button type="button" className="secondary" disabled={saveStates[saveKey("detected-contact")]?.pending} onClick={() => { void saveDetectedContact(contactGuess); }}>重试保存联系信息</button></div>}
+          {(saveStates[saveKey("detected-contact")]?.error || saveStates[saveKey("detected-contact")]?.pending) && <div>{saveFeedback(saveKey("detected-contact"))}{saveStates[saveKey("detected-contact")]?.error && <button type="button" className="secondary" disabled={saveStates[saveKey("detected-contact")]?.pending} onClick={() => { void saveDetectedContact(contactGuess); }}>重试保存联系信息</button>}</div>}
           {profile && <div className="contactConfirm"><div><small>Name</small><strong>{[profile.first_name, profile.last_name].filter(Boolean).join(" ")}</strong></div><div><small>Phone</small><strong>{profile.phone}</strong></div><div><small>Email</small><strong>{profile.email}</strong></div></div>}
           <details className="quickProfileEdit" open={!profile}>
             <summary>{profile ? "Something is wrong? Edit it" : "Check missing details"}</summary>

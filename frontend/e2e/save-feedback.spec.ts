@@ -2,6 +2,8 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const retry = "未能确认保存，输入已保留，请重试。";
 const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
+const waiting = "正在保存…";
+const waking = "正在确认保存，免费服务唤醒可能需要约一分钟，请稍候。";
 
 async function fixtures(page: Page) {
   const state = { mode: "success", held: null as Route | null, posts: 0, writes: 0, lists: 0,
@@ -53,6 +55,7 @@ async function fixtures(page: Page) {
     return route.fulfill({ status: 404, json: { detail: "Offline fixture unavailable" } });
   });
   await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 1_000));
   return state;
 }
 
@@ -73,6 +76,11 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
   await button.click();
   await expect(button).toBeDisabled();
   await expect.poll(() => state.held).not.toBeNull();
+  await expect(form.getByRole("status")).toHaveText(waiting);
+  await page.clock.fastForward(7_999);
+  await expect(form.getByRole("status")).toHaveText(waiting);
+  await page.clock.fastForward(1);
+  await expect(form.getByRole("status")).toHaveText(waking);
   await form.evaluate((element) => element.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(state.writes).toBe(1);
   await state.held!.fulfill({ status: 422, json: { detail: "PRIVATE_SERVER_DETAIL" } });
@@ -84,16 +92,22 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
     await button.click();
     if (mode === "timeout") {
       await expect.poll(() => state.held).not.toBeNull();
-      await page.clock.fastForward(30_001);
+      await page.clock.fastForward(90_001);
     }
     await expect(button).toBeEnabled();
     await expect(form.getByRole("alert")).toHaveText(retry);
     await expect(form.locator('[name="full_name"]')).toHaveValue("Changed Synthetic");
     await expect(page.getByText("PRIVATE_SERVER_DETAIL", { exact: true })).toHaveCount(0);
   }
-  state.mode = "success";
+  state.mode = "hold"; state.held = null;
   await button.click();
+  await expect.poll(() => state.held).not.toBeNull();
+  await page.clock.fastForward(60_000);
+  await expect(button).toBeDisabled();
+  await expect(form.getByRole("status")).toHaveText(waking);
+  await state.held!.fulfill({ json: { ...state.profile(), first_name: "Changed", last_name: "Synthetic", updated_at: "2026-01-02T00:00:00Z" } });
   await expect(form.getByRole("alert")).toHaveCount(0);
+  await expect(form.getByRole("status")).toHaveCount(0);
   await expect(page.getByText("Contact details confirmed. You will not need to enter them again.", { exact: true })).toBeVisible();
   expect(state.profile().work_rights).toBe("permanent_resident");
   expect(state.profile().availability_notice).toBe("one_month");
@@ -157,6 +171,11 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
   await save.click();
   await expect(save).toBeDisabled();
   await expect.poll(() => state.held).not.toBeNull();
+  await expect(create.getByRole("status")).toHaveText(waiting);
+  await page.clock.fastForward(7_999);
+  await expect(create.getByRole("status")).toHaveText(waiting);
+  await page.clock.fastForward(1);
+  await expect(create.getByRole("status")).toHaveText(waking);
   await state.held!.fulfill({ status: 422, json: { detail: "PRIVATE_SERVER_DETAIL" } });
   await expect(create.getByRole("alert")).toHaveText(retry);
   await expect(save).toBeEnabled();
@@ -166,7 +185,7 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
     await save.click();
     if (mode === "timeout") {
       await expect.poll(() => state.held).not.toBeNull();
-      await page.clock.fastForward(30_001);
+      await page.clock.fastForward(90_001);
     }
     await expect(create.getByRole("alert")).toHaveText(uncertain);
     await expect(save).toBeDisabled();
@@ -186,9 +205,17 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
     await expect(create.getByRole("alert")).toHaveText(retry);
   }
   await fillJob();
-  state.mode = "success";
+  state.mode = "hold"; state.held = null;
   await save.click();
+  await expect.poll(() => state.held).not.toBeNull();
+  await page.clock.fastForward(60_000);
+  await expect(save).toBeDisabled();
+  await expect(create.getByRole("status")).toHaveText(waking);
+  const slowCreated = { ...state.applications()[0], id: 3, company: "New Synthetic Company", position_title: "New Synthetic Role" };
+  state.applications().push(slowCreated);
+  await state.held!.fulfill({ json: slowCreated });
   await expect(page.locator(".selectedJob")).toContainText("New Synthetic Role");
+  await expect(create.getByRole("status")).toHaveCount(0);
   await expect(create.locator('[name="company"]')).toHaveValue("");
   const edit = page.locator("form").filter({ has: page.locator('[name="submission_reference"]') });
   async function openEdit(id: number) {

@@ -2,11 +2,12 @@ export type SaveFailure = { ok: false; kind: "http" | "network" | "timeout" | "i
 export type SaveResult<T> = { ok: true; data: T } | SaveFailure;
 
 export async function saveResponse<T extends { id: number }>(
-  request: (signal: AbortSignal) => Promise<Response>, timeoutMs = 30_000,
+  request: (signal: AbortSignal) => Promise<Response>, timeoutMs = 90_000, onSlow?: () => void,
 ): Promise<SaveResult<T>> {
   const controller = new AbortController();
   let status: number | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const slowTimer = onSlow ? setTimeout(onSlow, 8_000) : undefined;
   try {
     return await Promise.race([
       (async (): Promise<SaveResult<T>> => {
@@ -30,5 +31,6 @@ export async function saveResponse<T extends { id: number }>(
     return { ok: false, kind: status === null ? "network" : "invalid_response", status };
   } finally {
     clearTimeout(timer);
+    clearTimeout(slowTimer);
   }
 }
