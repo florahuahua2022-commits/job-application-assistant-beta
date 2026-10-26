@@ -1,0 +1,407 @@
+diff --git a/docs/datetime-incident-phase-3-revision.md b/docs/datetime-incident-phase-3-revision.md
+new file mode 100644
+index 0000000..644fac1
+--- /dev/null
++++ b/docs/datetime-incident-phase-3-revision.md
+@@ -0,0 +1,48 @@
++# 阶段三审阅修订
++
++基线 `ae4c60b`，仍在 `codex/production-datetime-incident`。本说明修订原阶段三说明中的成功更新和待确认出口行为；不推进阶段四。
++
++## 已确认成功：全局数据与当前视图分离
++
++- `finishSave` 保留当前账号及请求序号校验，取消以视图上下文否决已确认成功的判断。
++- `saveProfile`、`saveApplicationProfileDetails`、`saveDetectedContact` 的有效成功响应总是调用 `setProfile`，即使用户已经切换申请。
++- `updateSavedJob`、`saveApplicationJobIdentity` 以及原职位表单的PATCH成功响应，总是更新列表中对应申请；不会因切换视图而丢失已保存数据。
++- POST成功即使已切换视图，也调用原有 `refresh()` 并提示职位已保存；不打开新创建的申请，不清空当前表单。若刷新失败，仍明确保存已确认、列表可另行刷新。
++- 表单重置、`openApplication`、确认/质量检查状态清除、普通通知仍受上下文约束；POST已保存通知按要求是例外。账号及请求序号隔离没有放宽。
++- 资料主表单不再直接用全局 `profile.updated_at` 作重挂载key；仅当前上下文的成功保存更新一个key引用，避免迟到 `setProfile` 导致当前输入被重置。该引用只保存序号，不保存任何输入或草稿。识别结果变化引起的既有表单行为保留。
++- 当前账号首次成功读取资料仍进行一次表单初始化，确保非受控下拉选项采用已保存值；之后的后台更新不重复初始化。初始化标识只保存账号，不保存资料或草稿，退出时清除。测试已先证明无初始化时title错误显示为空，再验证Dr、permanent_resident、one_month、concise_direct四个非默认值及保存后资料不被默认值覆盖。
++- 原“迟到重载不覆盖当前申请文档”及A→B→A期间旧成功回调不重开申请、不覆盖新输入的场景保留。全局记录数据可以更新，当前选中申请不被切换。
++
++## 由用户主动退出待确认
++
++待确认文案现在说明完整下一步：先检查已保存职位，确认没有保存后点击「确认没有保存，重新保存」，再点击 Save Job。
++
++新出口仅在用户点击时清除对应入口的待确认错误并更新请求序号，使Save Job恢复可用；不清空输入，不发POST，不自动重试，不自动判定未保存。再次点击Save Job才发送下一次请求。该操作代表用户主动判断，仍不承诺服务端幂等。
++
++## 联系信息重试的实际验证方式
++
++继续只有资料保存、职位保存两个独立浏览器测试入口，没有新增第三个测试入口。
++
++资料保存场景已实际覆盖：合成简历上传响应提供可识别姓名、电话、邮箱 → 自动联系信息保存返回500 → 显示「重试保存联系信息」 → 点击后挂起PUT `/profile` → 切换申请并编辑当前输入 → 释放成功响应 → 全局联系信息更新、错误清除、当前输入保持。上传响应完全由离线夹具提供，不验证文件解析，也不调用后端。
++
++资料主表单及申请内资料编辑也分别覆盖切换视图后的全局更新。职位场景覆盖两个编辑入口的全局列表更新、后台POST成功后的列表刷新/通知且不打开申请，以及用户主动解除待确认后“先恢复按钮、无POST；再点击保存、才发POST”。
++
++## 「检查已保存职位」复用refresh的完整范围
++
++仍仅调用原有 `refresh()`，没有新的读取接口或轮询。该函数原本会：
++
++1. 在主页（非applicationsPage）执行 POST `/resumes/risk-scan`，取得简历风险扫描结果。
++2. GET `/profile`：刷新全局资料。
++3. GET `/resumes`：刷新简历及其风险提示；沿用原有简历状态联动行为。
++4. GET `/applications`：刷新申请列表。
++5. GET `/pack-credits/access`：刷新积分余额/权限显示。
++6. 仅本地模式（未配置Supabase登录）GET `/backups`；线上模式跳过备份请求。
++
++本次没有拆出单独列表请求，也没有自动重复检查。POST成功后的后台刷新同样复用此函数。
++
++## 验收与范围
++
++- 新测试先在旧实现证明全局资料未更新、待确认流程缺少新文案/出口；修复后转绿。
++- 本地 Node24.22.1：66项Node测试通过，2个浏览器入口通过，前端构建通过。实际CI结果见该追加提交对应的PR检查及最终答复。
++- 后端、依赖、CI触发配置、生产配置、AGENTS.md及流量优化/支付分支均未修改。未连接生产，未合并或部署，无amend/强推。
++- 修订增量以 `ae4c60b` 为基线，仅包含本次代码、测试和说明；差异文件不包含其自身或前几轮patch。
+diff --git a/frontend/app/page.tsx b/frontend/app/page.tsx
+index 9e1292e..f579c83 100644
+--- a/frontend/app/page.tsx
++++ b/frontend/app/page.tsx
+@@ -25,7 +25,7 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
+ const betaSupportContact = process.env.NEXT_PUBLIC_BETA_SUPPORT_CONTACT || "the beta operator who invited you";
+ type SaveState = { pending: boolean; error: "" | "retry" | "uncertain"; sequence: number };
+ const saveRetryMessage = "未能确认保存，输入已保留，请重试。";
+-const saveUncertainMessage = "未能确认保存。职位可能已创建，请先检查已保存职位，避免重复新建。";
++const saveUncertainMessage = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
+ type Experience = { id: string; role_title: string; organization: string; time_period_text?: string; responsibility: string; context: string; result: string; no_result_data: boolean; needs_review?: boolean; review_reasons?: string[] };
+ type CkbEvidence = { evidence_id: string; evidence_type: string; source_section: string; source_text: string };
+ type Resume = { id: number; title: string; source_text: string; experiences_json?: string; ckb_json?: string; updated_at: string };
+@@ -160,6 +160,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+   const [saveStates, setSaveStates] = useState<Record<string, SaveState>>({});
+   const saveStateRef = useRef<Record<string, SaveState>>({});
+   const saveSequence = useRef(0);
++  const profileFormKey = useRef("initial");
++  const profileInitializedFor = useRef<string | null>(null);
+   const applicationViewSequence = useRef(0);
+   const saveUserRef = useRef(session?.user.id || "local");
+   saveUserRef.current = session?.user.id || "local";
+@@ -184,11 +186,17 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     return sequence;
+   }
+ 
+-  function finishSave(key: string, sequence: number, context: string, result: SaveResult<{ id: number }>, isPost = false) {
+-    if (saveStateRef.current[key]?.sequence !== sequence) return false;
++  function finishSave(key: string, sequence: number, result: SaveResult<{ id: number }>, isPost = false) {
++    if (!key.startsWith(`${saveUserRef.current}:`) || saveStateRef.current[key]?.sequence !== sequence) return false;
+     const error = result.ok ? "" : isPost && !(result.kind === "http" && result.status === 422) ? "uncertain" : "retry";
+     putSaveState(key, { pending: false, error, sequence });
+-    return result.ok && saveContextRef.current === context;
++    return result.ok;
++  }
++
++  function allowUncertainRetry(key: string) {
++    const previous = saveStateRef.current[key];
++    if (!previous || previous.pending || previous.error !== "uncertain") return;
++    putSaveState(key, { pending: false, error: "", sequence: ++saveSequence.current });
+   }
+ 
+   function saveFeedback(key: string) {
+@@ -210,6 +218,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+ 
+   function clearAuthenticatedState() {
+     saveStateRef.current = {}; setSaveStates({}); applicationViewSequence.current += 1;
++    profileInitializedFor.current = null; profileFormKey.current = "initial";
+     setProfile(null); setResumes([]); setApplications([]); setDocuments([]);
+     setPackCredits(null);
+     setResumeScanIssues([]);
+@@ -219,6 +228,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+   }
+ 
+   async function refresh() {
++    const user = saveUserRef.current;
+     let scanned: { resume_id: number; experiences: ResumeReviewIssue[]; excluded_experiences?: ResumeReviewIssue[] }[] = [];
+     if (!applicationsPage) {
+       try {
+@@ -233,7 +243,16 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       supabase ? Promise.resolve(null) : authenticatedFetch(`${api}/backups`).catch(() => null),
+       authenticatedFetch(`${api}/pack-credits/access`),
+     ]);
+-    if (profileResponse.ok) setProfile(await profileResponse.json());
++    if (profileResponse.ok) {
++      const loaded = await profileResponse.json();
++      if (saveUserRef.current === user) {
++        if (profileInitializedFor.current !== user) {
++          profileInitializedFor.current = user;
++          profileFormKey.current = `loaded:${user}`;
++        }
++        setProfile(loaded);
++      }
++    }
+     if (resumeResponse.ok) {
+       const loaded = await resumeResponse.json();
+       setResumes(loaded);
+@@ -388,9 +407,12 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     const key = saveKey("profile"), context = saveContext;
+     const sequence = beginSave(key); if (sequence === null) return;
+     const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
+-    if (!finishSave(key, sequence, context, saved) || !saved.ok) return;
++    if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
++    const current = saveContextRef.current === context;
++    if (current) profileFormKey.current = String(sequence);
+     setProfile(result);
++    if (!current) return;
+     setNotice("Contact details confirmed. You will not need to enter them again.");
+   }
+ 
+@@ -416,9 +438,13 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     const key = saveKey("application-profile", selectedApplication), context = saveContext;
+     const sequence = beginSave(key); if (sequence === null) return;
+     const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
+-    if (!finishSave(key, sequence, context, saved) || !saved.ok) return;
++    if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+-    setProfile(result); setConfirmedApplication(null); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
++    const current = saveContextRef.current === context;
++    if (current) profileFormKey.current = String(sequence);
++    setProfile(result);
++    if (!current) return;
++    setConfirmedApplication(null); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+     setNotice("Applicant details updated. Confirm them before applying.");
+   }
+ 
+@@ -432,9 +458,10 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       method: "PATCH", headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ company: String(form.get("company") || "").trim(), position_title: String(form.get("position_title") || "").trim() }), signal,
+     }));
+-    if (!finishSave(key, sequence, context, saved) || !saved.ok) return;
++    if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+     setApplications((current) => current.map((item) => item.id === result.id ? result : item));
++    if (saveContextRef.current !== context) return;
+     setConfirmedApplication(null); setQualityResult(null); setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+     setNotice("Job details updated. Regenerate older documents before applying.");
+   }
+@@ -462,7 +489,8 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+     const key = saveKey("detected-contact"), context = saveContext;
+     const sequence = beginSave(key); if (sequence === null) return false;
+     const saved = await saveResponse<Profile>((signal) => authenticatedFetch(`${api}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal }));
+-    if (!finishSave(key, sequence, context, saved) || !saved.ok) return false;
++    if (!finishSave(key, sequence, saved) || !saved.ok) return false;
++    if (saveContextRef.current === context) profileFormKey.current = String(sequence);
+     setProfile(saved.data);
+     return true;
+   }
+@@ -534,6 +562,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+ 
+   async function uploadResume(event: FormEvent<HTMLFormElement>) {
+     event.preventDefault();
++    const context = saveContext;
+     setResumeUploadState("uploading");
+     try {
+       const response = await authenticatedFetch(`${api}/resumes/upload`, { method: "POST", body: new FormData(event.currentTarget) });
+@@ -559,7 +588,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       const unresolvedCount = Number(result.unresolved_experience_count || 0);
+       const experienceMessage = (extractedExperienceCount ? ` We also created ${extractedExperienceCount} work experience ${extractedExperienceCount === 1 ? "record" : "records"} for you to review.` : " We kept the full CV text; add structured experience only if you want to strengthen the generated evidence.")
+         + (unresolvedCount ? ` ${unresolvedCount} work ${unresolvedCount === 1 ? "experience still needs" : "experiences still need"} your decision before documents can be generated.` : "");
+-      setNotice((contactSaved ? "CV uploaded. We found and saved your name, phone and email — please check them once." : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.") + experienceMessage);
++      if (saveContextRef.current === context) setNotice((contactSaved ? "CV uploaded. We found and saved your name, phone and email — please check them once." : "CV uploaded. Check the missing contact detail below; the rest has already been filled in.") + experienceMessage);
+       setResumeUploadState("saved");
+     } catch (error) {
+       setResumeUploadState(uploadFailureState());
+@@ -658,15 +687,23 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(selectedApplication ? updatePayload : payload), signal,
+     }));
+-    if (!finishSave(key, sequence, context, saved, selectedApplication === null) || !saved.ok) return;
++    if (!finishSave(key, sequence, saved, selectedApplication === null) || !saved.ok) return;
+     const application = saved.data;
+-    formElement.reset();
+-    resetJobInput();
+-    setNotice("Job saved. Diagnose the application, resolve any material questions, then generate the application pack.");
++    const isPost = selectedApplication === null;
++    const current = saveContextRef.current === context;
++    if (!isPost) setApplications((items) => items.map((item) => item.id === application.id ? application : item));
++    if (current) {
++      formElement.reset();
++      resetJobInput();
++    }
++    if (!isPost && !current) return;
++    const message = "Job saved. Diagnose the application, resolve any material questions, then generate the application pack.";
++    setNotice(message);
+     try {
+       await refresh();
+       if (saveContextRef.current === context) await openApplication(application.id);
+-    } catch { if (saveContextRef.current === context) setNotice("Job saved. Reload the application list to see the saved record."); }
++      if (isPost && key.startsWith(`${saveUserRef.current}:`)) setNotice(message);
++    } catch { if ((isPost && key.startsWith(`${saveUserRef.current}:`)) || saveContextRef.current === context) setNotice("Job saved. Reload the application list to see the saved record."); }
+   }
+ 
+   async function updateSavedJob(event: FormEvent<HTMLFormElement>) {
+@@ -688,9 +725,10 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+       method: "PATCH", headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(payload), signal,
+     }));
+-    if (!finishSave(key, sequence, context, saved) || !saved.ok) return;
++    if (!finishSave(key, sequence, saved) || !saved.ok) return;
+     const result = saved.data;
+     setApplications((current) => current.map((application) => application.id === result.id ? result : application));
++    if (saveContextRef.current !== context) return;
+     setConfirmedApplication(null);
+     setQualityResult(null);
+     setReleaseChecklist(null); setPackReviewResult(null); setAtsResult(null);
+@@ -1618,7 +1656,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+           {profile && <div className="contactConfirm"><div><small>Name</small><strong>{[profile.first_name, profile.last_name].filter(Boolean).join(" ")}</strong></div><div><small>Phone</small><strong>{profile.phone}</strong></div><div><small>Email</small><strong>{profile.email}</strong></div></div>}
+           <details className="quickProfileEdit" open={!profile}>
+             <summary>{profile ? "Something is wrong? Edit it" : "Check missing details"}</summary>
+-            <form key={`${profile?.updated_at || "new"}-${contactGuess.email}`} onSubmit={saveProfile} className="compactForm">
++            <form key={`${profileFormKey.current}-${contactGuess.email}`} onSubmit={saveProfile} className="compactForm">
+               <label>Title <em>optional</em><select name="title" defaultValue={profile?.title || ""}><option value="">No title</option><option value="Mr">Mr</option><option value="Ms">Ms</option><option value="Mrs">Mrs</option><option value="Miss">Miss</option><option value="Dr">Dr</option></select></label>
+               <label>Preferred name <em>optional</em><input name="preferred_name" defaultValue={profile?.preferred_name || ""} /></label>
+               <label className="full">Full name<input name="full_name" defaultValue={profile ? [profile.first_name, profile.last_name].filter(Boolean).join(" ") : contactGuess.full_name} required /></label>
+@@ -1723,7 +1761,7 @@ export function Workspace({ applicationsPage = false }: { applicationsPage?: boo
+           <label className="full">Selection criteria or short guidance <em>optional</em><textarea name="selection_criteria" rows={4} value={jobFields.selection_criteria} onChange={(event) => setJobFields({ ...jobFields, selection_criteria: event.target.value })} placeholder="Paste the full criteria, or add a short instruction such as: Focus on stakeholder engagement and government reporting." /><small>Short guidance will be expanded using explicit JD requirements and your saved CV evidence.</small></label>
+           <button className="full" disabled={saveStates[saveKey("job-form", selectedApplication)]?.pending || saveStates[saveKey("job-form", selectedApplication)]?.error === "uncertain"} aria-busy={Boolean(saveStates[saveKey("job-form", selectedApplication)]?.pending)}>Save Job</button>
+           {saveFeedback(saveKey("job-form", selectedApplication))}
+-          {saveStates[saveKey("job-form", selectedApplication)]?.error === "uncertain" && <button type="button" className="secondary" onClick={() => { void refresh().catch(() => undefined); }}>检查已保存职位</button>}
++          {saveStates[saveKey("job-form", selectedApplication)]?.error === "uncertain" && <><button type="button" className="secondary" onClick={() => { void refresh().catch(() => undefined); }}>检查已保存职位</button><button type="button" className="secondary" onClick={() => allowUncertainRetry(saveKey("job-form", selectedApplication))}>确认没有保存，重新保存</button></>}
+         </form>
+       </section>
+     </>
+diff --git a/frontend/e2e/save-feedback.spec.ts b/frontend/e2e/save-feedback.spec.ts
+index f2f8185..8a699f1 100644
+--- a/frontend/e2e/save-feedback.spec.ts
++++ b/frontend/e2e/save-feedback.spec.ts
+@@ -1,13 +1,14 @@
+ import { expect, test, type Page, type Route } from "@playwright/test";
+ 
+ const retry = "未能确认保存，输入已保留，请重试。";
+-const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位，避免重复新建。";
++const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
+ 
+ async function fixtures(page: Page) {
+   const state = { mode: "success", held: null as Route | null, posts: 0, writes: 0, lists: 0,
+-    holdReload: false, reloadHeld: null as Route | null, completedViews: 0 };
++    holdReload: false, reloadHeld: null as Route | null, completedViews: 0,
++    profile: () => profile, applications: () => applications };
+   let profile = { id: 1, first_name: "Synthetic", last_name: "Applicant", phone: "0400000000", email: "synthetic@example.invalid",
+-    country: "Australia", state: "WA", work_rights: "permanent_resident", availability_notice: "not_specified", referees: [],
++    country: "Australia", state: "WA", title: "Dr", work_rights: "permanent_resident", availability_notice: "one_month", writing_tone: "concise_direct", referees: [],
+     updated_at: "2026-01-01T00:00:00Z" };
+   const applications = [1, 2].map((id) => ({ id, company: `Company ${id}`, position_title: `Role ${id}`, job_description: "Synthetic duties",
+     status: "draft", selection_criteria: "", selection_plan_json: "{}", selection_confirmations_json: "[]", archived_at: null }));
+@@ -16,6 +17,10 @@ async function fixtures(page: Page) {
+     if (url.origin !== "http://127.0.0.1:3100") return route.abort();
+     if (!url.pathname.startsWith("/__test_api")) return route.continue();
+     const path = url.pathname.slice("/__test_api".length), method = request.method();
++    if (path === "/resumes/upload" && method === "POST") return route.fulfill({ json: {
++      id: 10, title: "Synthetic resume", source_text: "Detected Person\n0400000000\ndetected@example.invalid",
++      experiences_json: "[]", updated_at: "2026-01-01T00:00:00Z",
++    } });
+     if ((path === "/profile" && method === "PUT") || (path === "/applications" && method === "POST") || (/^\/applications\/\d+$/.test(path) && method === "PATCH")) {
+       state.writes++;
+       if (method === "POST") state.posts++;
+@@ -59,6 +64,10 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
+   await page.getByText("Something is wrong? Edit it", { exact: true }).click();
+   const form = page.locator("form").filter({ has: page.locator('input[name="full_name"]') }).first();
+   const button = form.getByRole("button", { name: "Confirm details", exact: true });
++  await expect(form.locator('[name="title"]')).toHaveValue("Dr");
++  await expect(form.locator('[name="work_rights"]')).toHaveValue("permanent_resident");
++  await expect(form.locator('[name="availability_notice"]')).toHaveValue("one_month");
++  await expect(form.locator('[name="writing_tone"]')).toHaveValue("concise_direct");
+   await form.locator('[name="full_name"]').fill("Changed Synthetic");
+   state.mode = "hold";
+   await button.click();
+@@ -86,6 +95,51 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
+   await button.click();
+   await expect(form.getByRole("alert")).toHaveCount(0);
+   await expect(page.getByText("Contact details confirmed. You will not need to enter them again.", { exact: true })).toBeVisible();
++  expect(state.profile().work_rights).toBe("permanent_resident");
++  expect(state.profile().availability_notice).toBe("one_month");
++  // Confirmed global profile data must update even after the view changes.
++  for (const entry of ["main", "application"]) {
++    if (entry === "application") {
++      await page.getByText("Edit applicant details, availability, position & organisation", { exact: true }).click();
++    }
++    const entryForm = entry === "main" ? form : page.locator("form").filter({ has: page.getByRole("button", { name: "Save applicant details", exact: true }) });
++    state.mode = "hold"; state.held = null;
++    await entryForm.getByRole("button", { name: entry === "main" ? "Confirm details" : "Save applicant details", exact: true }).click();
++    await expect.poll(() => state.held).not.toBeNull();
++    const before = state.completedViews;
++    await page.locator(".jobList").getByRole("button", { name: entry === "main" ? /Role 2/ : /Role 1/ }).click();
++    await expect.poll(() => state.completedViews).toBeGreaterThan(before);
++    await form.locator('[name="full_name"]').fill(`Current unsaved ${entry}`);
++    const returned = { ...state.profile(), first_name: "Global", last_name: entry, updated_at: `2026-01-0${entry === "main" ? 3 : 4}T00:00:00Z` };
++    const received = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/__test_api/profile"));
++    await state.held!.fulfill({ json: returned });
++    await received;
++    await page.clock.runFor(250);
++    await expect(page.locator(".contactConfirm")).toContainText(`Global ${entry}`);
++    await expect(form.locator('[name="full_name"]')).toHaveValue(`Current unsaved ${entry}`);
++    await expect(page.locator(".selectedJob")).toContainText(entry === "main" ? "Role 2" : "Role 1");
++  }
++  // The detected-contact retry is exercised inside the same profile entry test.
++  state.mode = "500";
++  const upload = page.locator("form.quickStartUpload");
++  await upload.locator('input[type="file"]').setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic") });
++  await upload.getByRole("button", { name: "Upload & auto-fill", exact: true }).click();
++  const contactRetry = page.getByRole("button", { name: "重试保存联系信息", exact: true });
++  await expect(contactRetry).toBeVisible();
++  state.mode = "hold"; state.held = null;
++  await contactRetry.click();
++  await expect.poll(() => state.held).not.toBeNull();
++  const before = state.completedViews;
++  await page.locator(".jobList").getByRole("button", { name: /Role 2/ }).click();
++  await expect.poll(() => state.completedViews).toBeGreaterThan(before);
++  await form.locator('[name="full_name"]').fill("Keep this unsaved input");
++  const received = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/__test_api/profile"));
++  await state.held!.fulfill({ json: { ...state.profile(), first_name: "Detected", last_name: "Person", updated_at: "2026-01-05T00:00:00Z" } });
++  await received;
++  await page.clock.runFor(250);
++  await expect(page.locator(".contactConfirm")).toContainText("Detected Person");
++  await expect(form.locator('[name="full_name"]')).toHaveValue("Keep this unsaved input");
++  await expect(contactRetry).toHaveCount(0);
+ });
+ 
+ test("job save: uncertain POST is not repeated; PATCH retries and errors stay with their application", async ({ page }) => {
+@@ -123,6 +177,13 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
+     expect(state.posts).toBe(posts);
+     await expect(create.locator('[name="company"]')).toHaveValue("New Synthetic Company");
+     await expect(create.getByRole("alert")).toHaveText(uncertain);
++    state.mode = "422";
++    await create.getByRole("button", { name: "确认没有保存，重新保存", exact: true }).click();
++    await expect(save).toBeEnabled();
++    expect(state.posts).toBe(posts);
++    await save.click();
++    await expect.poll(() => state.posts).toBe(posts + 1);
++    await expect(create.getByRole("alert")).toHaveText(retry);
+   }
+   await fillJob();
+   state.mode = "success";
+@@ -179,4 +240,37 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
+   await page.clock.runFor(250);
+   expect(state.completedViews).toBe(beforeLateSave);
+   await expect(edit.locator('[name="company"]')).toHaveValue("New unsaved input after returning");
++  await expect(page.locator(".jobList").getByRole("button", { name: /Role 1/ })).toContainText("Old saved input");
++  await page.getByText("Edit applicant details, availability, position & organisation", { exact: true }).click();
++  const identity = page.locator("form").filter({ has: page.getByRole("button", { name: "Save job details", exact: true }) });
++  state.mode = "hold"; state.held = null;
++  await identity.getByRole("button", { name: "Save job details", exact: true }).click();
++  await expect.poll(() => state.held).not.toBeNull();
++  await openEdit(2);
++  const identityResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().endsWith("/__test_api/applications/1"));
++  const changedIdentity = { ...state.applications()[0], position_title: "Updated Identity A" };
++  Object.assign(state.applications()[0], changedIdentity);
++  await state.held!.fulfill({ json: changedIdentity });
++  await identityResponse;
++  await page.clock.runFor(250);
++  await expect(page.locator(".jobList").getByRole("button", { name: /Updated Identity A/ })).toBeVisible();
++  await expect(page.locator(".selectedJob")).toContainText("Role 2");
++  // A successful POST must refresh the list and announce success without opening it.
++  await fillJob();
++  state.mode = "hold"; state.held = null;
++  await save.click();
++  await expect.poll(() => state.held).not.toBeNull();
++  await page.locator(".jobList").getByRole("button", { name: /Role 2/ }).click();
++  await create.locator('[name="company"]').fill("Current form input");
++  const backgroundCreated = { ...state.applications()[0], id: 4, company: "Background company", position_title: "Background created role" };
++  state.applications().push(backgroundCreated);
++  const beforeLists = state.lists;
++  const createdResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/__test_api/applications"));
++  await state.held!.fulfill({ json: backgroundCreated });
++  await createdResponse;
++  await expect.poll(() => state.lists).toBeGreaterThan(beforeLists);
++  await expect(page.locator(".jobList").getByRole("button", { name: /Background created role/ })).toBeVisible();
++  await expect(page.locator(".selectedJob")).toContainText("Role 2");
++  await expect(create.locator('[name="company"]')).toHaveValue("Current form input");
++  await expect(page.getByText("Job saved. Diagnose the application, resolve any material questions, then generate the application pack.", { exact: true })).toBeVisible();
+ });

@@ -1,13 +1,14 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const retry = "未能确认保存，输入已保留，请重试。";
-const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位，避免重复新建。";
+const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
 
 async function fixtures(page: Page) {
   const state = { mode: "success", held: null as Route | null, posts: 0, writes: 0, lists: 0,
-    holdReload: false, reloadHeld: null as Route | null, completedViews: 0 };
+    holdReload: false, reloadHeld: null as Route | null, completedViews: 0,
+    profile: () => profile, applications: () => applications };
   let profile = { id: 1, first_name: "Synthetic", last_name: "Applicant", phone: "0400000000", email: "synthetic@example.invalid",
-    country: "Australia", state: "WA", work_rights: "permanent_resident", availability_notice: "not_specified", referees: [],
+    country: "Australia", state: "WA", title: "Dr", work_rights: "permanent_resident", availability_notice: "one_month", writing_tone: "concise_direct", referees: [],
     updated_at: "2026-01-01T00:00:00Z" };
   const applications = [1, 2].map((id) => ({ id, company: `Company ${id}`, position_title: `Role ${id}`, job_description: "Synthetic duties",
     status: "draft", selection_criteria: "", selection_plan_json: "{}", selection_confirmations_json: "[]", archived_at: null }));
@@ -16,6 +17,10 @@ async function fixtures(page: Page) {
     if (url.origin !== "http://127.0.0.1:3100") return route.abort();
     if (!url.pathname.startsWith("/__test_api")) return route.continue();
     const path = url.pathname.slice("/__test_api".length), method = request.method();
+    if (path === "/resumes/upload" && method === "POST") return route.fulfill({ json: {
+      id: 10, title: "Synthetic resume", source_text: "Detected Person\n0400000000\ndetected@example.invalid",
+      experiences_json: "[]", updated_at: "2026-01-01T00:00:00Z",
+    } });
     if ((path === "/profile" && method === "PUT") || (path === "/applications" && method === "POST") || (/^\/applications\/\d+$/.test(path) && method === "PATCH")) {
       state.writes++;
       if (method === "POST") state.posts++;
@@ -59,6 +64,10 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
   await page.getByText("Something is wrong? Edit it", { exact: true }).click();
   const form = page.locator("form").filter({ has: page.locator('input[name="full_name"]') }).first();
   const button = form.getByRole("button", { name: "Confirm details", exact: true });
+  await expect(form.locator('[name="title"]')).toHaveValue("Dr");
+  await expect(form.locator('[name="work_rights"]')).toHaveValue("permanent_resident");
+  await expect(form.locator('[name="availability_notice"]')).toHaveValue("one_month");
+  await expect(form.locator('[name="writing_tone"]')).toHaveValue("concise_direct");
   await form.locator('[name="full_name"]').fill("Changed Synthetic");
   state.mode = "hold";
   await button.click();
@@ -86,6 +95,51 @@ test("profile save: persistent adjacent error, retained input, timeout and succe
   await button.click();
   await expect(form.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("Contact details confirmed. You will not need to enter them again.", { exact: true })).toBeVisible();
+  expect(state.profile().work_rights).toBe("permanent_resident");
+  expect(state.profile().availability_notice).toBe("one_month");
+  // Confirmed global profile data must update even after the view changes.
+  for (const entry of ["main", "application"]) {
+    if (entry === "application") {
+      await page.getByText("Edit applicant details, availability, position & organisation", { exact: true }).click();
+    }
+    const entryForm = entry === "main" ? form : page.locator("form").filter({ has: page.getByRole("button", { name: "Save applicant details", exact: true }) });
+    state.mode = "hold"; state.held = null;
+    await entryForm.getByRole("button", { name: entry === "main" ? "Confirm details" : "Save applicant details", exact: true }).click();
+    await expect.poll(() => state.held).not.toBeNull();
+    const before = state.completedViews;
+    await page.locator(".jobList").getByRole("button", { name: entry === "main" ? /Role 2/ : /Role 1/ }).click();
+    await expect.poll(() => state.completedViews).toBeGreaterThan(before);
+    await form.locator('[name="full_name"]').fill(`Current unsaved ${entry}`);
+    const returned = { ...state.profile(), first_name: "Global", last_name: entry, updated_at: `2026-01-0${entry === "main" ? 3 : 4}T00:00:00Z` };
+    const received = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/__test_api/profile"));
+    await state.held!.fulfill({ json: returned });
+    await received;
+    await page.clock.runFor(250);
+    await expect(page.locator(".contactConfirm")).toContainText(`Global ${entry}`);
+    await expect(form.locator('[name="full_name"]')).toHaveValue(`Current unsaved ${entry}`);
+    await expect(page.locator(".selectedJob")).toContainText(entry === "main" ? "Role 2" : "Role 1");
+  }
+  // The detected-contact retry is exercised inside the same profile entry test.
+  state.mode = "500";
+  const upload = page.locator("form.quickStartUpload");
+  await upload.locator('input[type="file"]').setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic") });
+  await upload.getByRole("button", { name: "Upload & auto-fill", exact: true }).click();
+  const contactRetry = page.getByRole("button", { name: "重试保存联系信息", exact: true });
+  await expect(contactRetry).toBeVisible();
+  state.mode = "hold"; state.held = null;
+  await contactRetry.click();
+  await expect.poll(() => state.held).not.toBeNull();
+  const before = state.completedViews;
+  await page.locator(".jobList").getByRole("button", { name: /Role 2/ }).click();
+  await expect.poll(() => state.completedViews).toBeGreaterThan(before);
+  await form.locator('[name="full_name"]').fill("Keep this unsaved input");
+  const received = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/__test_api/profile"));
+  await state.held!.fulfill({ json: { ...state.profile(), first_name: "Detected", last_name: "Person", updated_at: "2026-01-05T00:00:00Z" } });
+  await received;
+  await page.clock.runFor(250);
+  await expect(page.locator(".contactConfirm")).toContainText("Detected Person");
+  await expect(form.locator('[name="full_name"]')).toHaveValue("Keep this unsaved input");
+  await expect(contactRetry).toHaveCount(0);
 });
 
 test("job save: uncertain POST is not repeated; PATCH retries and errors stay with their application", async ({ page }) => {
@@ -123,6 +177,13 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
     expect(state.posts).toBe(posts);
     await expect(create.locator('[name="company"]')).toHaveValue("New Synthetic Company");
     await expect(create.getByRole("alert")).toHaveText(uncertain);
+    state.mode = "422";
+    await create.getByRole("button", { name: "确认没有保存，重新保存", exact: true }).click();
+    await expect(save).toBeEnabled();
+    expect(state.posts).toBe(posts);
+    await save.click();
+    await expect.poll(() => state.posts).toBe(posts + 1);
+    await expect(create.getByRole("alert")).toHaveText(retry);
   }
   await fillJob();
   state.mode = "success";
@@ -179,4 +240,37 @@ test("job save: uncertain POST is not repeated; PATCH retries and errors stay wi
   await page.clock.runFor(250);
   expect(state.completedViews).toBe(beforeLateSave);
   await expect(edit.locator('[name="company"]')).toHaveValue("New unsaved input after returning");
+  await expect(page.locator(".jobList").getByRole("button", { name: /Role 1/ })).toContainText("Old saved input");
+  await page.getByText("Edit applicant details, availability, position & organisation", { exact: true }).click();
+  const identity = page.locator("form").filter({ has: page.getByRole("button", { name: "Save job details", exact: true }) });
+  state.mode = "hold"; state.held = null;
+  await identity.getByRole("button", { name: "Save job details", exact: true }).click();
+  await expect.poll(() => state.held).not.toBeNull();
+  await openEdit(2);
+  const identityResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().endsWith("/__test_api/applications/1"));
+  const changedIdentity = { ...state.applications()[0], position_title: "Updated Identity A" };
+  Object.assign(state.applications()[0], changedIdentity);
+  await state.held!.fulfill({ json: changedIdentity });
+  await identityResponse;
+  await page.clock.runFor(250);
+  await expect(page.locator(".jobList").getByRole("button", { name: /Updated Identity A/ })).toBeVisible();
+  await expect(page.locator(".selectedJob")).toContainText("Role 2");
+  // A successful POST must refresh the list and announce success without opening it.
+  await fillJob();
+  state.mode = "hold"; state.held = null;
+  await save.click();
+  await expect.poll(() => state.held).not.toBeNull();
+  await page.locator(".jobList").getByRole("button", { name: /Role 2/ }).click();
+  await create.locator('[name="company"]').fill("Current form input");
+  const backgroundCreated = { ...state.applications()[0], id: 4, company: "Background company", position_title: "Background created role" };
+  state.applications().push(backgroundCreated);
+  const beforeLists = state.lists;
+  const createdResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/__test_api/applications"));
+  await state.held!.fulfill({ json: backgroundCreated });
+  await createdResponse;
+  await expect.poll(() => state.lists).toBeGreaterThan(beforeLists);
+  await expect(page.locator(".jobList").getByRole("button", { name: /Background created role/ })).toBeVisible();
+  await expect(page.locator(".selectedJob")).toContainText("Role 2");
+  await expect(create.locator('[name="company"]')).toHaveValue("Current form input");
+  await expect(page.getByText("Job saved. Diagnose the application, resolve any material questions, then generate the application pack.", { exact: true })).toBeVisible();
 });
