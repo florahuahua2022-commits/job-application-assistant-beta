@@ -112,15 +112,20 @@ def select_for_user(model, user_id: UUID | None):
 
 
 def latest_application_documents(session: Session, application_id: int, user_id: UUID | None) -> dict[str, GeneratedDocument]:
+    ranked = select(
+        GeneratedDocument.id,
+        func.row_number().over(
+            partition_by=GeneratedDocument.document_type,
+            order_by=(GeneratedDocument.created_at.desc(), GeneratedDocument.id.desc()),
+        ).label("rank"),
+    ).where(GeneratedDocument.application_id == application_id)
+    if user_id is not None:
+        ranked = ranked.where(GeneratedDocument.user_id == user_id)
+    ranked = ranked.subquery()
     documents = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
+        select(GeneratedDocument).join(ranked, GeneratedDocument.id == ranked.c.id).where(ranked.c.rank == 1)
     ).all()
-    latest: dict[str, GeneratedDocument] = {}
-    for document in documents:
-        latest.setdefault(document.document_type, document)
-    return latest
+    return {document.document_type: document for document in documents}
 
 
 def resume_snapshot(resume: Resume, ckb_json: str | None = None) -> dict:
@@ -1532,7 +1537,10 @@ def parse_application_ad(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
-    previous_companies = [item.company for item in session.exec(select_for_user(JobApplication, user_id)).all()]
+    companies = select(JobApplication.company)
+    if user_id is not None:
+        companies = companies.where(JobApplication.user_id == user_id)
+    previous_companies = session.exec(companies).all()
     try:
         parsed = parse_job_ad_text(payload.raw_text, previous_companies)
         parsed["application_requirements"] = parse_application_requirements(payload.raw_text)
@@ -2110,14 +2118,7 @@ def quality_check(
         raise HTTPException(404, "Application not found.")
     application_master_resume(session, application, user_id, auto_update_pristine=True)
     require_current_resume_snapshot(session, application, user_id)
-    documents = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
-    ).all()
-    latest: dict[str, GeneratedDocument] = {}
-    for document in documents:
-        latest.setdefault(document.document_type, document)
+    latest = latest_application_documents(session, application_id, user_id)
 
     issues: list[QualityCheckIssue] = []
     requirements = load_application_requirements(
@@ -2321,16 +2322,17 @@ def quality_check(
         "\n".join((master_resume.source_text, master_resume.ckb_json or "[]"))
         if master_resume else ""
     )
-    other_applications = session.exec(
-        select_for_user(JobApplication, user_id).where(JobApplication.id != application_id)
-    ).all()
+    identities = select(JobApplication.company, JobApplication.position_title).where(JobApplication.id != application_id)
+    if user_id is not None:
+        identities = identities.where(JobApplication.user_id == user_id)
+    other_applications = session.exec(identities).all()
     for document_type in ("cover_letter", "selection_criteria"):
         content = content_to_check.get(document_type, "")
         if not content:
             continue
-        for other_application in other_applications:
-            other_company = (other_application.company or "").strip()
-            other_title = (other_application.position_title or "").split(" - ", 1)[0].strip()
+        for company, position_title in other_applications:
+            other_company = (company or "").strip()
+            other_title = (position_title or "").split(" - ", 1)[0].strip()
             if (
                 not other_company
                 or not other_title
@@ -2666,14 +2668,7 @@ def pack_review(
             "issues": [item.model_dump() for item in final_check.issues if item.blocks_release],
         })
     application = get_for_user(session, JobApplication, application_id, user_id)
-    generated = session.exec(
-        select_for_user(GeneratedDocument, user_id)
-        .where(GeneratedDocument.application_id == application_id)
-        .order_by(GeneratedDocument.created_at.desc())
-    ).all()
-    latest: dict[str, GeneratedDocument] = {}
-    for document in generated:
-        latest.setdefault(document.document_type, document)
+    latest = latest_application_documents(session, application_id, user_id)
     documents = {}
     for document_type in final_check.checked_documents:
         document = latest[document_type]
@@ -3151,10 +3146,13 @@ def run_generation_request(payload, user_id, key, bind):
 
 @app.get("/applications/{application_id}/generation-requests/{pack_id}/{document_type}")
 def generation_request_status(application_id: int, pack_id: UUID, document_type: str, session: Session = Depends(get_session), user_id: UUID | None = Depends(get_current_user)):
-    application = get_for_user(session, JobApplication, application_id, user_id)
-    if not application:
+    statement = select(JobApplication.release_state_json).where(JobApplication.id == application_id)
+    if user_id is not None:
+        statement = statement.where(JobApplication.user_id == user_id)
+    row = session.execute(statement).first()
+    if row is None:
         raise HTTPException(404, "Application not found.")
-    state = load_release_state(application.release_state_json).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
+    state = load_release_state(row[0]).get("generation_requests", {}).get(f"{pack_id}:{document_type}")
     if not state:
         raise HTTPException(404, "Generation request not found.")
     result = dict(state)

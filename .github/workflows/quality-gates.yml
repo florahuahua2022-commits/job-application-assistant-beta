@@ -13,6 +13,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  latest-documents-postgres-16:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: egress_fixture
+          POSTGRES_DB: egress_fixture
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U egress_fixture -d egress_fixture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install test dependencies
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+          assert sys.version_info[:2] == (3, 13)
+          for args in (["install", "-r", "backend/requirements.txt", "pytest"], ["check"]):
+              result = subprocess.run([sys.executable, "-m", "pip", *args], capture_output=True, text=True)
+              if result.returncode:
+                  raise SystemExit("Dependency command failed; raw output withheld")
+          requirements = Path("backend/requirements.txt").read_text(encoding="utf-8")
+          for name in ("sqlmodel", "SQLAlchemy", "pydantic"):
+              expected = re.search(r"(?mi)^" + name + r"==([^\s]+)$", requirements).group(1)
+              assert metadata.version(name) == expected
+              print(name + "==" + expected)
+          PY
+      - name: Prove old main fails on live PostgreSQL 16
+        run: python backend/tests/run_latest_postgres.py --port 15432 --baseline
+      - name: Run same assertions on live PostgreSQL 16
+        run: python backend/tests/run_latest_postgres.py --port 15432
   backend-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
