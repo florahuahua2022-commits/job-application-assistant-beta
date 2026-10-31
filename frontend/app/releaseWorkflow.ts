@@ -27,3 +27,27 @@ export function artifactMatches(result: AtsResult | null, documentId: number | u
 export function releaseCanProceed(checklist: ReleaseChecklist | null): boolean {
   return checklist?.ready === true;
 }
+
+export type ReviewFinding = {
+  type?: string; code?: string; description?: string; message?: string;
+  severity?: string; display_level?: string; category?: string; blocks_release?: boolean;
+  document_type?: string; document_id?: number; location?: string; evidence?: string;
+  recommended_action?: string;
+};
+
+export function groupReviewFindings(findings: ReviewFinding[]) {
+  const groups: Record<"error" | "warning" | "advisory", (ReviewFinding & { text: string })[]> = { error: [], warning: [], advisory: [] };
+  const seen = new Set<string>();
+  for (const finding of findings) {
+    const text = (finding.description || finding.message || "").trim();
+    if (!text || /^no issues?(?: with (?:the )?content| found)?[.!\s]*$/i.test(text)) continue;
+    const key = [finding.document_type, finding.document_id, finding.type || finding.code, text.toLowerCase().replace(/\s+/g, " "), finding.location, finding.evidence].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const level = finding.display_level === "warning" ? "warning"
+      : finding.blocks_release || ["critical", "major", "error"].includes(finding.severity || "") ? "error"
+      : finding.severity === "advisory" ? "advisory" : "warning";
+    groups[level].push({ ...finding, text });
+  }
+  return groups;
+}

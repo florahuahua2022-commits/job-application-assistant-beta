@@ -419,11 +419,13 @@ class AccountDeletionRequest(SQLModel):
 
 
 class QualityCheckIssue(SQLModel):
-    severity: str  # error | warning
+    severity: str  # error | warning | advisory
     code: str
     message: str
     document_type: str | None = None
     blocks_release: bool = False
+    location: str | None = None
+    evidence: str | None = None
 
 
 class QualityCheckResponse(SQLModel):

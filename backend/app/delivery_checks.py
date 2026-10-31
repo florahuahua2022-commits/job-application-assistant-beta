@@ -100,13 +100,26 @@ def delivery_issues(content, document_type, profile=None, aggregate=None, ckb=No
         name = " ".join(filter(None, [profile.first_name, profile.last_name]))
         if not re.search(r"(?i)(?<!\w)" + re.escape(name) + r"(?!\w)", text):
             add("canonical_name_missing", "Use the confirmed applicant name in this document.")
-        if profile.email.casefold() not in text.casefold():
+        confirmed_email = str(getattr(profile, "email", "") or "").strip().casefold()
+        if not confirmed_email or confirmed_email not in text.casefold():
             add("canonical_email_missing", "Use the confirmed applicant email in this document.")
         digits = re.sub(r"\D", "", profile.phone)
         phones = {digits, "61" + digits[1:] if digits.startswith("0") else digits,
                   "0" + digits[2:] if digits.startswith("61") else digits}
         if not digits or not any(p in re.sub(r"\D", "", text) for p in phones if p):
             add("canonical_phone_missing", "Use the confirmed applicant phone in this document.")
+        # Only applicant header/signature blocks; recruiter/body contacts are unrelated.
+        header = re.split(r"\n\s*\n|\n\s*(?:##|Dear\b|Cover Letter:)", text, maxsplit=1)[0]
+        contact_blocks = [header]
+        if closing:
+            contact_blocks.append(text[closing.end():])
+        for block in contact_blocks:
+            for email in re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]+", block):
+                if confirmed_email and email.casefold() != confirmed_email:
+                    add("canonical_email_conflict", "The applicant contact block uses a different email.", email)
+            for phone in re.findall(r"(?<!\d)(?:\+?61[ -]?|0)[\d ()-]{8,16}\d(?!\d)", block):
+                if re.sub(r"\D", "", phone) not in phones:
+                    add("canonical_phone_conflict", "The applicant contact block uses a different phone number.", phone)
         # Inspect identity positions, not names of referees or hiring managers in the body.
         identity_lines = [text.splitlines()[0].strip(" #*")] if text.strip() else []
         if closing:

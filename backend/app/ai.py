@@ -801,7 +801,7 @@ Use pass with an empty issues array when there is no material issue."""
             raw = _json_object(_selection_provider_response(prompt + (f"\n\nPrevious validation error: {last_error}" if last_error else "")))
             availability_value = profile_availability_from_prompt(applicant_profile)
             raw["issues"] = list(raw.get("issues") or []) + evaluate_resume_quality(content, plan)["issues"] + availability_issues(content, availability_value)
-            result = normalise_document_review(raw, "tailored_resume")
+            result = normalise_document_review(raw, "tailored_resume", content=content, ckb=ckb, plan=plan)
             result = reconcile_review_grounding(result, content)
             result = reconcile_availability_findings(result, confirmed_availability_wording(availability_value))
             result = reconcile_resume_compression_findings(result, plan)

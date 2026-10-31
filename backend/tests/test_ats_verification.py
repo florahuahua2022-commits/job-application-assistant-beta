@@ -236,6 +236,21 @@ class AtsVerificationEndpointTests(unittest.TestCase):
             document = session.get(GeneratedDocument, self.document_id); document.reviewer_json = "{}"; session.commit()
         self.assertEqual(self.client.post(f"/documents/{self.document_id}/ats-check", json={"format": "docx"}).status_code, 409)
 
+    def test_advisory_only_legacy_review_does_not_block_ats_but_factual_error_does(self):
+        for issue, expected in [
+            ({"type": "generation_under_utilized", "description": "Dayforce is repeated in Technical Skills and Work Experience."}, 200),
+            ({"type": "unsupported_claim", "description": "The CV claims Dayforce proficiency without source evidence."}, 409),
+        ]:
+            with self.subTest(expected=expected):
+                with Session(self.engine) as session:
+                    document = session.get(GeneratedDocument, self.document_id)
+                    document.reviewer_json = json.dumps({"status": "fail", "results": [{"status": "fail", "issues": [issue]}]})
+                    session.add(document); session.commit()
+                self.allow_release_prerequisites()
+                with patch("app.main.quality_check", return_value=QualityCheckResponse(ready=True, issues=[], checked_documents=["cover_letter", "tailored_resume"])):
+                    response = self.client.post(f"/documents/{self.document_id}/ats-check", json={"format": "docx"})
+                self.assertEqual(response.status_code, expected)
+
     def test_current_pack_review_is_required_before_ats_verification(self):
         with patch("app.main.quality_check", return_value=QualityCheckResponse(ready=True, issues=[], checked_documents=["cover_letter", "tailored_resume"])):
             response = self.client.post(f"/documents/{self.document_id}/ats-check", json={"format": "docx"})
