@@ -1,6 +1,25 @@
 import re
 
 
+def repair_sentence_spacing(content: str) -> str:
+    """Repair sentence boundaries conservatively; never edit address-like tokens."""
+    def repair_token(match: re.Match) -> str:
+        token = match[0]
+        if "@" in token or "://" in token or token.lower().startswith("www."):
+            return token
+        # Domains, initials and abbreviations are intentionally left unchanged.
+        if re.search(r"(?i)\.(?:com|org|net|edu|gov|au|uk|invalid)\b", token):
+            return token
+        def boundary(part: re.Match) -> str:
+            prefix = token[:part.start() + 1]
+            if part[1] == "." and (re.search(r"(?i)\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|Inc|Ltd|approx)\.$", prefix)
+                                    or re.search(r"(?:\b[A-Za-z]\.)+$", prefix)):
+                return part[0]
+            return part[1] + " "
+        return re.sub(r"([.!?])(?=[A-Z][a-z]+\b|I\b)", boundary, token)
+    return re.sub(r"\S+", repair_token, content)
+
+
 def _line_number(content: str, offset: int) -> int:
     return content.count("\n", 0, offset) + 1
 

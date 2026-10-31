@@ -37,7 +37,9 @@ from .job_sources import build_job_sources
 from .models import AccountDeletionRequest, ApplicantProfile, ApplicantProfilePayload, ApplicantProfileResponse, ApplicationDecisionConfirmation, ApplicationRequirementsResponse, ApplicationRequirementsUpdate, AtsCheckRequest, CreditLedger, ExperienceExclusionUpdate, GeneratedDocument, GeneratedDocumentUpdate, GenerationUsage, GenerateRequest, JobAdParseRequest, JobAdParseResponse, JobApplication, JobApplicationArchiveUpdate, JobApplicationCreate, JobApplicationPermanentDelete, JobApplicationStatusUpdate, JobApplicationSubmissionUpdate, JobApplicationUpdate, JobSource, JobUrlImportRequest, JobUrlImportResponse, OutcomeEventCreate, OutcomeEventUpdate, OutcomeLearningExclusion, PackCreditAccount, PackCreditLedger, QualityCheckIssue, QualityCheckResponse, Referee, Referral, RestoreBackupRequest, Resume, ResumeContentCheckItem, ResumeContentCheckResponse, ResumeCreate, ResumeUpdate, SelectionCriteriaConfirmationRequest, as_utc, utc_now
 from .pack_credits import ManualTopupRequest, ManualTopupResponse, PackCreditAccessResponse, complete_pack_credits, expire_pack_reservations, grant_manual_topup, pack_credit_balance, release_pack_credits, reserve_pack_credits
 from .outcome_learning import build_outcome_signals, build_submission_snapshot, load_outcome, outcome_event, set_events, validate_outcome
-from .quality import find_writing_quality_issues
+from .quality import find_writing_quality_issues, repair_sentence_spacing
+from .reviewer_core import normalise_saved_review
+from copy import copy
 from .pack_quality import build_pack_review_payload, document_evidence_issues, persist_selection_contract, required_generated_documents, selection_criteria_context_required, standalone_selection_criteria_required
 from .resume_plan import build_resume_curation_plan, deduplicate_resume_skills, evaluate_resume_quality, repair_missing_timeline, selected_resume_evidence_ids, validate_resume_content
 from .release_state import ats_is_current, details_fingerprint, document_is_current, fingerprint, generation_inputs_fingerprint, load_release_state, pack_fingerprint, pack_review_is_current
@@ -1129,7 +1131,7 @@ def auto_polish_cover_letter(
         polished = re.sub(rf"(?i)\bposition\s+(?:advertised\s+)?(?:with|by)\s+{name}\s+in\b", "position in", polished)
         polished = re.sub(rf"(?i)\b(?:with|by)\s+{name}\b", "", polished)
 
-    return re.sub(r"\n{3,}", "\n\n", polished).strip()
+    return repair_sentence_spacing(re.sub(r"\n{3,}", "\n\n", polished).strip())
 
 
 def auto_polish_tailored_resume(content: str, include_references: bool = False) -> str:
@@ -1155,7 +1157,7 @@ def auto_polish_tailored_resume(content: str, include_references: bool = False) 
         polished = f"{polished.rstrip()}\n\n## References\nAvailable upon request"
     if not include_references:
         polished = re.sub(r"(?im)^## References\s*\n\s*(?:References?\s+)?Available (?:upon|on) request\.?\s*(?=^## |\Z)", "", polished)
-    polished = deduplicate_resume_skills(polished)
+    polished = deduplicate_resume_skills(repair_sentence_spacing(polished))
     return re.sub(r"\n{3,}", "\n\n", polished).strip()
 
 
@@ -2077,6 +2079,16 @@ def get_application_outcome_learning(
     )
 
 
+def saved_document_review(document: GeneratedDocument) -> dict:
+    review = json.loads(document.reviewer_json or "{}")
+    trace = load_release_state(document.trace_json)
+    inputs = trace.get("inputs") or {}
+    ckb = inputs.get("ckb") if isinstance(inputs, dict) else []
+    return normalise_saved_review(review, content=document.content,
+                                  ckb=ckb if isinstance(ckb, list) else [],
+                                  plan=load_release_state(document.structured_content_json) if document.document_type == "tailored_resume" else {})
+
+
 @app.get("/applications/{application_id}/documents", response_model=list[GeneratedDocument])
 def list_generated_documents(
     application_id: int,
@@ -2087,7 +2099,16 @@ def list_generated_documents(
     if not application:
         raise HTTPException(404, "Application not found.")
     current = current_required_documents(session, application, user_id)
-    return sorted(current.values(), key=lambda document: as_utc(document.created_at), reverse=True)
+    presented = []
+    for document in current.values():
+        try:
+            reviewer = saved_document_review(document)
+        except (ValueError, TypeError, AttributeError):
+            reviewer = {"status": "pending", "results": [], "message": "The saved review could not be read. Retry review."}
+        view = copy(document)
+        view.reviewer_json = json.dumps(reviewer, ensure_ascii=False)
+        presented.append(view)
+    return sorted(presented, key=lambda document: as_utc(document.created_at), reverse=True)
 
 
 @app.get("/applications/{application_id}/document-history")
@@ -2101,7 +2122,10 @@ def document_history(application_id: int, session: Session = Depends(get_session
     documents = session.exec(select_for_user(GeneratedDocument, user_id).where(GeneratedDocument.application_id == application_id).order_by(GeneratedDocument.created_at.desc(), GeneratedDocument.id.desc())).all()
     result = []
     for document in documents:
-        review = load_release_state(document.reviewer_json)
+        try:
+            review = saved_document_review(document)
+        except (ValueError, TypeError, AttributeError):
+            review = {"status": "pending"}
         state = "outdated" if not current_input or not document_is_current(document, current_input, True) else "pending" if review.get("status") not in {"pass", "fail"} else "needs_improvement" if review.get("status") == "fail" else "usable"
         result.append({**document.model_dump(), "quality_state": state})
     return result
@@ -2127,7 +2151,7 @@ def quality_check(
     required = required_generated_documents(requirements)
     if requirements.get("review_status") == "needs_confirmation":
         issues.append(QualityCheckIssue(
-            severity="error", code="application_requirements_confirmation_required",
+            severity="advisory", code="application_requirements_confirmation_required",
             message="Confirm the employer's application requirements before finalising the application pack.",
         ))
     if requirements.get("completeness") == "incomplete":
@@ -2241,8 +2265,8 @@ def quality_check(
                     document_type="tailored_resume",
                 ))
         try:
-            reviewer_status = json.loads(document.reviewer_json or "{}").get("status")
-        except (json.JSONDecodeError, AttributeError):
+            reviewer_status = saved_document_review(document).get("status")
+        except (ValueError, TypeError, AttributeError):
             reviewer_status = None
         if reviewer_status not in {"pass", "fail"}:
             issues.append(QualityCheckIssue(
@@ -2261,10 +2285,15 @@ def quality_check(
         if not reviewed_document or (reviewed_document.reviewer_json or "{}").strip() in {"", "{}"}:
             continue
         try:
-            reviewer = json.loads(reviewed_document.reviewer_json)
-        except json.JSONDecodeError:
-            reviewer = {"status": "fail", "results": []}
-        if reviewer.get("status") == "fail":
+            reviewer = saved_document_review(reviewed_document)
+        except (ValueError, TypeError, AttributeError):
+            reviewer = {"status": "pending", "results": []}
+            issues.append(QualityCheckIssue(
+                severity="error", code="document_review_required",
+                message=f"Review the current {reviewed_type.replace('_', ' ')} before finalising the application pack.",
+                document_type=reviewed_type,
+            ))
+        if reviewer.get("status") in {"pass", "fail"}:
             if reviewed_type in {"tailored_resume", "cover_letter", "selection_criteria"} and reviewer.get("generation_status") == "needs_ckb_update":
                 remaining = reviewer.get("remaining_issues") or []
                 claims = [str(item.get("claim") or "").strip() for item in remaining if item.get("claim")]
@@ -2287,12 +2316,14 @@ def quality_check(
             if reviewer_issues:
                 for issue in reviewer_issues:
                     issues.append(QualityCheckIssue(
-                        severity="error",
+                        severity="advisory" if issue.get("severity") == "advisory" else "warning" if issue.get("display_level") == "warning" else "error",
                         code=f"reviewer_{issue.get('type', 'finding')}",
                         message=str(issue.get("description") or f"The {reviewed_type.replace('_', ' ').title()} Reviewer found a material issue."),
                         document_type=reviewed_type,
+                        blocks_release=bool(issue.get("blocks_release")),
+                        location=issue.get("location"), evidence=issue.get("evidence"),
                     ))
-            else:
+            elif reviewer.get("status") == "fail":
                 issues.append(QualityCheckIssue(
                     severity="error", code="reviewer_failed",
                     message=f"The {reviewed_type.replace('_', ' ').title()} Reviewer did not pass this document. Regenerate or review it manually.",
@@ -2561,10 +2592,16 @@ def quality_check(
                 document_type="tailored_resume",
             ))
 
+    unique_issues = {}
     for issue in issues:
-        issue.blocks_release = issue.severity == "error"
+        issue.blocks_release = issue.blocks_release or issue.severity == "error"
+        key = (issue.document_type, issue.code, " ".join(issue.message.split()).casefold(), issue.location, issue.evidence)
+        previous = unique_issues.get(key)
+        if previous is None or (issue.blocks_release and not previous.blocks_release):
+            unique_issues[key] = issue
+    issues = list(unique_issues.values())
     return QualityCheckResponse(
-        ready=not any(issue.severity == "error" for issue in issues),
+        ready=not any(issue.blocks_release for issue in issues),
         issues=issues,
         checked_documents=sorted(content_to_check),
     )
@@ -2809,6 +2846,8 @@ def review_edited_document(
             review = review_selection_criteria_batch(ckb_json, json.dumps(structured.get("selection_plan") or {}), structured)
             document.structured_content_json = json.dumps(structured, ensure_ascii=False)
         apply_delivery_review(review, delivery_issues(document.content, document.document_type, profile, aggregate, current_ckb))
+        review = normalise_saved_review(review, content=document.content, ckb=current_ckb,
+                                        plan=structured if document.document_type == "tailored_resume" else {})
         document.reviewer_json = json.dumps(review, ensure_ascii=False)
         trace = json.loads(document.trace_json or "{}")
         trace["aggregate_experience"] = aggregate
@@ -2901,7 +2940,7 @@ def ats_check_generated_resume(
         raise HTTPException(409, "The Resume, applicant profile, or parent application is unavailable.")
     try:
         plan = json.loads(document.structured_content_json or "{}")
-        reviewer = json.loads(document.reviewer_json or "{}")
+        reviewer = saved_document_review(document)
         decision = json.loads(application.application_decision_json or "{}")
         job_model = json.loads(application.job_model_json or "{}")
         ckb = json.loads(master_resume.ckb_json or "[]")
@@ -3497,10 +3536,13 @@ def generate_document(
         content = f"{profile.first_name} {profile.last_name}\n{profile.phone} | {profile.email}\n\n{content}"
         selection_bundle["content"] = content
     review_result = selection_review or cover_letter_review or resume_review or {}
+    content = repair_sentence_spacing(content)
     hard_findings = delivery_issues(content, payload.document_type, profile, aggregate, current_ckb)
     apply_delivery_review(review_result, hard_findings)
     if payload.document_type == "tailored_resume":
         review_result = add_resume_quality_status(review_result, content, resume_plan or {})
+    review_result = normalise_saved_review(review_result, content=content, ckb=current_ckb,
+                                         plan=(resume_plan or {}) if payload.document_type == "tailored_resume" else {})
     retry_count = int((selection_bundle or {}).get("telemetry", {}).get("generator_retries", 0))
     retry_count += int(review_result.get("telemetry", {}).get("reviewer_retries", 0))
     trace = build_generation_trace(
@@ -3532,7 +3574,8 @@ def generate_document(
         trace["runtime"]["status"] = "completed_low_confidence"
     document.content = content
     document.structured_content_json = json.dumps(selection_bundle or cover_letter_plan or resume_plan or {}, ensure_ascii=False)
-    document.reviewer_json = json.dumps(review_result, ensure_ascii=False)
+    document.reviewer_json = json.dumps(normalise_saved_review(review_result, content=content, ckb=current_ckb,
+                                                              plan=(resume_plan or {}) if payload.document_type == "tailored_resume" else {}), ensure_ascii=False)
     document.trace_json = json.dumps(trace, ensure_ascii=False)
     session.add(document)
     if payload.document_type == "selection_criteria":

@@ -1,0 +1,12 @@
+{
+  "provenance": "Wholly invented regression samples; no applicant document or job advertisement is reproduced.",
+  "cv_summary": "Catalogued cardboard comet tokens for the imaginary Cloudberry Observatory.",
+  "cv_dayforce": "Logged make-believe telescope bookings in Dayforce at the imaginary Cloudberry Observatory.",
+  "letter_closing": "The paper rocket is ready.The lantern test is complete.",
+  "dayforce_finding": {
+    "type": "generation_under_utilized",
+    "description": "Dayforce appears in Work Experience but is missing from the Technical Skills list. Consider keeping the tool visible in the skills list.",
+    "location": "Technical Skills",
+    "recommended_action": "Check consistency between the skills list and the body."
+  }
+}
