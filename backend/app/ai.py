@@ -1,9 +1,12 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from contextvars import ContextVar
 import json
+import logging
 import re
+from time import perf_counter
 
-from openai import OpenAI, OpenAIError
+import httpx
+from openai import DefaultHttpxClient, OpenAI, OpenAIError
 from .config import settings
 from .evidence_matcher import matched_evidence_pack, normalise_match_result, validate_match_result
 from .government_writing_rules import government_writing_rules
@@ -102,21 +105,206 @@ class AIServiceError(Exception):
 
 
 class EvidenceMatchCompletenessError(AIServiceError):
-    def __init__(self, criteria_id: str, attempts: int):
+    def __init__(self, criteria_id: str, attempts: int, run_id: str | None = None):
         self.criteria_id = criteria_id
         self.status = "needs_manual_review"
         self.attempts = attempts
+        self.run_id = run_id
+        self.diagnostic_category = "invalid_response_format"
         super().__init__(
             f"Evidence matching for criterion {criteria_id} is incomplete after {attempts} attempts; "
             "status=needs_manual_review. Generation is blocked."
         )
 
 
+class EvidenceMatchDiagnosticError(AIServiceError):
+    def __init__(self, category: str, run_id: str | None, criteria_id: str | None = None):
+        self.diagnostic_category = category
+        self.run_id = run_id
+        self.criteria_id = criteria_id
+        super().__init__(category)
+
+
+evidence_diagnostics = logging.getLogger("uvicorn.error.job_assistant.evidence_match")
+
+_EVIDENCE_LOG_FIELDS = {
+    "event", "run_id", "application_id", "criterion_id", "criterion_index", "criterion_type",
+    "criterion_characters", "application_attempt", "application_attempts", "sdk_retry_count",
+    "provider", "model", "prompt_characters", "evidence_count", "started_at", "elapsed_ms",
+    "http_status", "exception_type", "provider_error_code", "finish_reason", "prompt_tokens",
+    "completion_tokens", "cache_hit_tokens", "cache_miss_tokens", "reasoning_tokens",
+    "response_characters", "json_parseable", "verdict_count", "missing_id_count",
+    "duplicate_id_count", "unknown_id_count", "order_correct", "outcome", "provider_request_id",
+    "response_id", "criterion_count", "completed_criteria", "failed_criterion_id", "status",
+    "failure_category", "provider_http_requests", "duration_ms",
+}
+
+
+def safe_evidence_log(values: dict) -> None:
+    try:
+        evidence_diagnostics.info(json.dumps(
+            {
+                key: values.get(key)[:120] if isinstance(values.get(key), str)
+                else values.get(key) if isinstance(values.get(key), (int, float, bool, type(None))) else None
+                for key in sorted(_EVIDENCE_LOG_FIELDS)
+            },
+            ensure_ascii=True, separators=(",", ":"),
+        ))
+    except Exception:
+        pass
+
+
+_evidence_attempt_context: ContextVar[dict | None] = ContextVar("evidence_attempt_context", default=None)
+
+
+def begin_evidence_provider_attempts(values: dict):
+    return _evidence_attempt_context.set({**values, "attempts": []})
+
+
+def end_evidence_provider_attempts(token, **values) -> int:
+    context = _evidence_attempt_context.get() or {}
+    attempts = context.get("attempts") or []
+    try:
+        for index, attempt in enumerate(attempts):
+            enriched = {**{key: value for key, value in context.items() if key != "attempts"}, **attempt}
+            if index == len(attempts) - 1:
+                enriched.update(values)
+            safe_evidence_log({"event": "evidence_match_provider_attempt", **enriched})
+    finally:
+        _evidence_attempt_context.reset(token)
+    return len(attempts)
+
+
+class EvidenceAttemptTransport(httpx.BaseTransport):
+    def __init__(self, inner: httpx.BaseTransport):
+        self.inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        started = perf_counter()
+        record = {
+            "sdk_retry_count": int(request.headers.get("x-stainless-retry-count", "0") or 0),
+            "http_status": None, "exception_type": None, "provider_request_id": None,
+        }
+        try:
+            response = self.inner.handle_request(request)
+            record.update(
+                http_status=response.status_code,
+                provider_request_id=(response.headers.get("x-request-id") or response.headers.get("request-id")
+                                     or response.headers.get("x-ds-request-id")),
+            )
+            return response
+        except Exception as error:
+            record["exception_type"] = type(error).__name__
+            raise
+        finally:
+            record["elapsed_ms"] = round((perf_counter() - started) * 1000)
+            context = _evidence_attempt_context.get()
+            if context is not None:
+                context["attempts"].append(record)
+
+    def close(self) -> None:
+        self.inner.close()
+
+
+def instrument_default_http_client(client):
+    original_transport = None
+    original_mounts = None
+    transport_changed = False
+    mounts_changed = False
+    try:
+        original_transport = getattr(client, "_transport", None)
+        original_mounts = getattr(client, "_mounts", None)
+        if original_transport is None or original_mounts is None:
+            raise AttributeError("HTTP client transport internals are unavailable.")
+        client._transport = EvidenceAttemptTransport(original_transport)
+        transport_changed = True
+        client._mounts = {
+            pattern: EvidenceAttemptTransport(transport) if transport is not None else None
+            for pattern, transport in original_mounts.items()
+        }
+        mounts_changed = True
+    except Exception as error:
+        try:
+            if mounts_changed:
+                client._mounts = original_mounts
+        except Exception:
+            pass
+        try:
+            if transport_changed:
+                client._transport = original_transport
+        except Exception:
+            pass
+        safe_evidence_log({
+            "event": "evidence_match_instrumentation_failed", "exception_type": type(error).__name__,
+        })
+    return client
+
+
+def _diagnostic_http_client():
+    if _evidence_attempt_context.get() is None:
+        return None
+    return instrument_default_http_client(DefaultHttpxClient())
+
+
+_EVIDENCE_MESSAGES = {
+    "timeout": (504, "Evidence matching timed out before the application diagnosis finished. No Pack credit was charged. Retry the entire diagnosis."),
+    "output_too_long": (502, "The evidence-matching response exceeded the safe output limit, so the application diagnosis could not finish. No Pack credit was charged. Retrying is likely to fail again; contact the beta operator with this reference."),
+    "invalid_response_format": (502, "The AI provider returned an invalid evidence-matching response. No Pack credit was charged. Retry the entire diagnosis."),
+    "configuration_error": (503, "Evidence matching is not configured correctly. No Pack credit was charged. Contact the beta operator and retry the entire diagnosis after the configuration is corrected."),
+    "rate_limited_or_busy": (503, "The AI provider is temporarily busy or rate-limiting requests. No Pack credit was charged. Wait a few minutes, then retry the entire diagnosis."),
+    "network_error": (503, "The application could not reach the AI provider. No Pack credit was charged. Wait a few minutes, then retry the entire diagnosis."),
+    "provider_unavailable": (503, "The AI provider account or service is unavailable. No Pack credit was charged. Contact the beta operator, then retry the entire diagnosis after service is restored."),
+    "criterion_failed": (502, "Evidence matching could not complete all job criteria. No Pack credit was charged. Retry the entire diagnosis."),
+}
+
+
+def evidence_error_detail(error, run_id: str) -> tuple[int, dict]:
+    category = getattr(error, "diagnostic_category", "criterion_failed")
+    status, message = _EVIDENCE_MESSAGES.get(category, _EVIDENCE_MESSAGES["criterion_failed"])
+    return status, {"code": category, "message": f"{message} Ref: {run_id[:8]}"}
+
+
+def _evidence_error_category(error: Exception) -> str:
+    finish_reason = provider_response_telemetry().get("finish_reason")
+    if finish_reason == "length":
+        return "output_too_long"
+    status = getattr(error, "status_code", None)
+    if status in {401, 403}:
+        return "configuration_error"
+    if status == 402:
+        return "provider_unavailable"
+    if status == 429 or isinstance(status, int) and status >= 500:
+        return "rate_limited_or_busy"
+    name = type(error).__name__.casefold()
+    if "timeout" in name:
+        return "timeout"
+    if "connection" in name or "connect" in name:
+        return "network_error"
+    if isinstance(error, (json.JSONDecodeError, ValueError)) or isinstance(error, AIServiceError):
+        return "invalid_response_format"
+    if isinstance(error, RuntimeError) and ("API_" in str(error) or "AI_PROVIDER" in str(error)):
+        return "configuration_error"
+    return "criterion_failed"
+
+
 _provider_response_telemetry: ContextVar[dict] = ContextVar("provider_response_telemetry", default={})
+_evidence_match_run_telemetry: ContextVar[dict] = ContextVar("evidence_match_run_telemetry", default={})
 
 
 def provider_response_telemetry() -> dict:
     return dict(_provider_response_telemetry.get())
+
+
+def evidence_match_run_telemetry() -> dict:
+    return dict(_evidence_match_run_telemetry.get())
+
+
+def reset_evidence_match_run_telemetry() -> None:
+    _evidence_match_run_telemetry.set({})
+
+
+def _present_fields(**values) -> dict:
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def _json_object(value: str) -> dict:
@@ -133,7 +321,8 @@ def _openai_draft(prompt: str) -> str:
     _provider_response_telemetry.set({})
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
-    client = OpenAI(api_key=settings.openai_api_key)
+    http_client = _diagnostic_http_client()
+    client = OpenAI(api_key=settings.openai_api_key, **({"http_client": http_client} if http_client else {}))
     response = client.responses.create(model=settings.openai_model, input=prompt)
     content = response.output_text
     usage = getattr(response, "usage", None)
@@ -142,6 +331,10 @@ def _openai_draft(prompt: str) -> str:
         "finish_reason": None,
         "response_characters": len(content or ""),
         "completion_tokens": getattr(usage, "output_tokens", None) if usage else None,
+        **_present_fields(
+            prompt_tokens=getattr(usage, "input_tokens", None) if usage else None,
+            response_id=getattr(response, "id", None), provider_request_id=getattr(response, "_request_id", None),
+        ),
     })
     return content
 
@@ -150,11 +343,13 @@ def _deepseek_draft(prompt: str) -> str:
     _provider_response_telemetry.set({})
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured.")
+    http_client = _diagnostic_http_client()
     client = OpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
         timeout=settings.ai_request_timeout_seconds,
         max_retries=1,
+        **({"http_client": http_client} if http_client else {}),
     )
     response = client.chat.completions.create(
         model=settings.deepseek_model,
@@ -168,18 +363,29 @@ def _deepseek_draft(prompt: str) -> str:
     )
     content = response.choices[0].message.content
     usage = getattr(response, "usage", None)
+    completion_details = getattr(usage, "completion_tokens_details", None) if usage else None
     _provider_response_telemetry.set({
         "provider": "deepseek", "model": getattr(response, "model", None) or settings.deepseek_model,
         "finish_reason": getattr(response.choices[0], "finish_reason", None),
         "response_characters": len(content or ""),
         "completion_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+        **_present_fields(
+            prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
+            cache_hit_tokens=getattr(usage, "prompt_cache_hit_tokens", None) if usage else None,
+            cache_miss_tokens=getattr(usage, "prompt_cache_miss_tokens", None) if usage else None,
+            reasoning_tokens=getattr(completion_details, "reasoning_tokens", None) if completion_details else None,
+            response_id=getattr(response, "id", None), provider_request_id=getattr(response, "_request_id", None),
+        ),
     })
     if not content:
         raise AIServiceError("DeepSeek returned an empty draft. Please try again.")
     return content
 
 
-def match_evidence_batch(ckb_json: str, job_model_json: str) -> dict:
+def match_evidence_batch(
+    ckb_json: str, job_model_json: str, *, run_id: str | None = None, application_id: int | None = None,
+) -> dict:
+    _evidence_match_run_telemetry.set({"completed_criteria": 0, "provider_http_requests": 0})
     try:
         ckb = json.loads(ckb_json or "[]")
         job_model = json.loads(job_model_json or "{}")
@@ -193,11 +399,15 @@ def match_evidence_batch(ckb_json: str, job_model_json: str) -> dict:
     raw_matches = []
     statuses = []
     provider = settings.ai_provider.strip().lower()
-    for criterion in job_model.get("criteria") or []:
+    for criterion_index, criterion in enumerate(job_model.get("criteria") or [], start=1):
         criteria_id = str(criterion.get("criteria_id") or "")
         if re.fullmatch(r"\s*skills and credentials from the job description\s*", str(criterion.get("criteria_text") or ""), re.IGNORECASE):
             raw_matches.append({"criteria_id": criteria_id, "matched_evidence": [], "match_type": "insufficient", "coverage": "weak"})
             statuses.append({"criteria_id": criteria_id, "status": "skipped_placeholder", "attempts": 0})
+            previous_requests = evidence_match_run_telemetry().get("provider_http_requests", 0)
+            _evidence_match_run_telemetry.set({
+                "completed_criteria": criterion_index, "provider_http_requests": previous_requests,
+            })
             continue
         prompt = f"""Judge every Career Knowledge Base item against this one job criterion. Do not select only the strongest candidates.
 
@@ -216,7 +426,21 @@ Return exactly one evidence_verdict for every evidence_id above, in the same ord
 Return JSON only:
 {{"criteria_id":"{criteria_id}","evidence_verdicts":[{{"evidence_id":"EV...","verdict":"direct|partial|insufficient","support_quote":"exact source substring or empty","matched_requirement_terms":["exact criterion term"]}}]}}"""
         parsed = None
+        provider_http_requests = 0
+        last_failure_category = "invalid_response_format"
+        criterion_log = {
+            "run_id": run_id, "application_id": application_id, "criterion_id": criteria_id,
+            "criterion_index": criterion_index, "criterion_type": criterion.get("requirement_type"),
+            "criterion_characters": len(str(criterion.get("criteria_text") or "")),
+            "provider": provider,
+            "model": settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+            "prompt_characters": len(prompt), "evidence_count": len(evidence_ids),
+        }
         for attempt in range(1, 4):
+            token = begin_evidence_provider_attempts({
+                **criterion_log, "application_attempt": attempt,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            })
             try:
                 if provider == "deepseek":
                     raw = _deepseek_draft(prompt)
@@ -231,18 +455,93 @@ Return JSON only:
                     raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
                 candidate = _json_object(raw)
             except (OpenAIError, json.JSONDecodeError) as error:
+                category = _evidence_error_category(error)
+                provider_http_requests += end_evidence_provider_attempts(
+                    token, outcome=category, json_parseable=False,
+                    provider_error_code=getattr(error, "code", None), **provider_response_telemetry(),
+                )
                 if attempt == 3:
-                    raise AIServiceError("Evidence matching failed. Please try again.") from error
+                    safe_evidence_log({
+                        "event": "evidence_match_criterion_complete", **criterion_log,
+                        "application_attempts": attempt,
+                        "provider_http_requests": provider_http_requests, "status": "failed",
+                        "failure_category": category,
+                    })
+                    previous_requests = evidence_match_run_telemetry().get("provider_http_requests", 0)
+                    _evidence_match_run_telemetry.set({
+                        "completed_criteria": criterion_index - 1,
+                        "provider_http_requests": previous_requests + provider_http_requests,
+                        "failed_criterion_id": criteria_id,
+                    })
+                    raise EvidenceMatchDiagnosticError(category, run_id, criteria_id) from error
                 continue
+            except (AIServiceError, RuntimeError, ValueError) as error:
+                category = _evidence_error_category(error)
+                provider_http_requests += end_evidence_provider_attempts(
+                    token, outcome=category, json_parseable=False,
+                    provider_error_code=getattr(error, "code", None), **provider_response_telemetry(),
+                )
+                safe_evidence_log({
+                    "event": "evidence_match_criterion_complete", **criterion_log,
+                    "application_attempts": attempt,
+                    "provider_http_requests": provider_http_requests, "status": "failed",
+                    "failure_category": category,
+                })
+                previous_requests = evidence_match_run_telemetry().get("provider_http_requests", 0)
+                _evidence_match_run_telemetry.set({
+                    "completed_criteria": criterion_index - 1,
+                    "provider_http_requests": previous_requests + provider_http_requests,
+                    "failed_criterion_id": criteria_id,
+                })
+                raise EvidenceMatchDiagnosticError(category, run_id, criteria_id) from error
             verdicts = candidate.get("evidence_verdicts") or []
             returned_ids = [str(item.get("evidence_id") or "") for item in verdicts if isinstance(item, dict)]
             valid_verdicts = all(item.get("verdict") in {"direct", "partial", "insufficient"} for item in verdicts if isinstance(item, dict))
             if candidate.get("criteria_id") == criteria_id and returned_ids == evidence_ids and len(verdicts) == len(evidence_ids) and valid_verdicts:
+                provider_http_requests += end_evidence_provider_attempts(
+                    token, outcome="success", json_parseable=True, **provider_response_telemetry(),
+                    verdict_count=len(verdicts), missing_id_count=0, duplicate_id_count=0,
+                    unknown_id_count=0, order_correct=True,
+                )
                 parsed = candidate
                 statuses.append({"criteria_id": criteria_id, "status": "complete", "attempts": attempt})
+                safe_evidence_log({
+                    "event": "evidence_match_criterion_complete", **criterion_log,
+                    "application_attempts": attempt,
+                    "provider_http_requests": provider_http_requests, "status": "complete",
+                })
+                previous_requests = evidence_match_run_telemetry().get("provider_http_requests", 0)
+                _evidence_match_run_telemetry.set({
+                    "completed_criteria": criterion_index,
+                    "provider_http_requests": previous_requests + provider_http_requests,
+                })
                 break
+            last_failure_category = (
+                "output_too_long" if provider_response_telemetry().get("finish_reason") == "length"
+                else "invalid_response_format"
+            )
+            provider_http_requests += end_evidence_provider_attempts(
+                token, outcome=last_failure_category, json_parseable=True, **provider_response_telemetry(),
+                verdict_count=len(verdicts), missing_id_count=len(set(evidence_ids) - set(returned_ids)),
+                duplicate_id_count=len(returned_ids) - len(set(returned_ids)),
+                unknown_id_count=len(set(returned_ids) - set(evidence_ids)), order_correct=returned_ids == evidence_ids,
+            )
         if parsed is None:
-            raise EvidenceMatchCompletenessError(criteria_id, 3)
+            safe_evidence_log({
+                "event": "evidence_match_criterion_complete", **criterion_log,
+                "application_attempts": 3,
+                "provider_http_requests": provider_http_requests, "status": "failed",
+                "failure_category": last_failure_category,
+            })
+            previous_requests = evidence_match_run_telemetry().get("provider_http_requests", 0)
+            _evidence_match_run_telemetry.set({
+                "completed_criteria": criterion_index - 1,
+                "provider_http_requests": previous_requests + provider_http_requests,
+                "failed_criterion_id": criteria_id,
+            })
+            if last_failure_category == "output_too_long":
+                raise EvidenceMatchDiagnosticError(last_failure_category, run_id, criteria_id)
+            raise EvidenceMatchCompletenessError(criteria_id, 3, run_id)
         matched = [item for item in parsed["evidence_verdicts"] if item["verdict"] != "insufficient"]
         raw_matches.append({
             "criteria_id": criteria_id,
