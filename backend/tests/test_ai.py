@@ -39,7 +39,7 @@ class GenerateDraftTests(unittest.TestCase):
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"status":"pass"}'), finish_reason="length")],
             usage=SimpleNamespace(completion_tokens=321),
         )
-        with patch.object(ai, "OpenAI") as client:
+        with patch.object(ai.settings, "deepseek_api_key", "synthetic-key"), patch.object(ai, "OpenAI") as client:
             client.return_value.chat.completions.create.return_value = response
             result = ai._deepseek_draft("private prompt")
 
@@ -54,7 +54,7 @@ class GenerateDraftTests(unittest.TestCase):
         response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="ok"), finish_reason=None)], usage=None,
         )
-        with patch.object(ai, "OpenAI") as client:
+        with patch.object(ai.settings, "deepseek_api_key", "synthetic-key"), patch.object(ai, "OpenAI") as client:
             client.return_value.chat.completions.create.return_value = response
             ai._deepseek_draft("private prompt")
 
