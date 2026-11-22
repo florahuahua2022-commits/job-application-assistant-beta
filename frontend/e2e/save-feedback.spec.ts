@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const retry = "未能确认保存，输入已保留，请重试。";
-const uncertain = "未能确认保存。职位可能已创建，请先检查已保存职位；确认没有保存后，点击“确认没有保存，重新保存”，再点击 Save Job。";
+const uncertain = "The save result could not be confirmed. The job may already have been saved. Check the saved job list before trying again to avoid creating a duplicate.";
 const waiting = "正在保存…";
 const waking = "正在确认保存，免费服务唤醒可能需要约一分钟，请稍候。";
 

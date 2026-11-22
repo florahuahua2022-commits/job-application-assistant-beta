@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, update
 from sqlmodel import Session, delete, select
-from .ai import AIServiceError, build_evidence_pack, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume
+from .ai import AIServiceError, EvidenceMatchCompletenessError, EvidenceMatchDiagnosticError, build_evidence_pack, evidence_error_detail, evidence_match_run_telemetry, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, reset_evidence_match_run_telemetry, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume, safe_evidence_log
 from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
 from .ats_verification import verify_resume_artifact, verify_document_export
@@ -514,7 +514,7 @@ def invalidate_application_decisions(session: Session, user_id: UUID | None) -> 
 
 def prepare_application_decision(
     session: Session, application: JobApplication, master_resume: Resume,
-    profile: ApplicantProfile | None, user_id: UUID | None,
+    profile: ApplicantProfile | None, user_id: UUID | None, run_id: str | None = None,
 ) -> dict:
     require_current_resume_snapshot(session, application, user_id)
     integrity_issue = master_resume_integrity_issue(master_resume)
@@ -542,7 +542,10 @@ def prepare_application_decision(
     matches = json.loads(application.evidence_matches_json or "{}")
     if not match_cache_is_current(matches, job_model, ckb):
         matches = normalise_match_result(
-            match_evidence_batch(json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False)), job_model, ckb,
+            match_evidence_batch(
+                json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False),
+                run_id=run_id, application_id=application.id,
+            ), job_model, ckb,
         )
         application.evidence_matches_json = json.dumps(matches, ensure_ascii=False)
         application.application_decision_json = "{}"
@@ -1755,19 +1758,47 @@ def diagnose_application(
     session: Session = Depends(get_session),
     user_id: UUID | None = Depends(get_current_user),
 ):
+    run_id = str(uuid4())
+    reset_evidence_match_run_telemetry()
+    started = perf_counter()
+    status = "failed"
+    failure_category = None
     application = get_for_user(session, JobApplication, application_id, user_id)
     master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True) if application else None
     if not application or not master_resume:
         raise HTTPException(400, "Create a Master Resume and job application first.")
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     try:
-        decision = prepare_application_decision(session, application, master_resume, profile, user_id)
+        decision = prepare_application_decision(session, application, master_resume, profile, user_id, run_id)
+    except (EvidenceMatchDiagnosticError, EvidenceMatchCompletenessError) as error:
+        failure_category = error.diagnostic_category
+        code, detail = evidence_error_detail(error, run_id)
+        raise HTTPException(code, detail=detail) from error
     except (RuntimeError, ValueError, json.JSONDecodeError) as error:
+        failure_category = "input_error"
         raise HTTPException(400, str(error)) from error
     except AIServiceError as error:
+        failure_category = "ai_service_error"
         raise HTTPException(502, str(error)) from error
-    session.add(application); session.commit()
-    return decision
+    else:
+        status = "complete"
+        session.add(application); session.commit()
+        return decision
+    finally:
+        try:
+            job_model = json.loads(application.job_model_json or "{}")
+            if not isinstance(job_model, dict):
+                job_model = {}
+            criteria = job_model.get("criteria") or []
+            safe_evidence_log({
+                "event": "application_diagnosis_complete", "run_id": run_id,
+                "application_id": application_id, "criterion_count": len(criteria),
+                "status": status, "failure_category": failure_category,
+                "duration_ms": round((perf_counter() - started) * 1000),
+                **evidence_match_run_telemetry(),
+            })
+        except Exception:
+            pass
 
 
 @app.post("/applications/{application_id}/decision/confirm")

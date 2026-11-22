@@ -42,7 +42,7 @@ class ApplicationDecisionApiTests(unittest.TestCase):
         }).json()
 
     @staticmethod
-    def no_match(ckb_json, job_model_json):
+    def no_match(ckb_json, job_model_json, *, run_id=None, application_id=None):
         import json
         model = json.loads(job_model_json)
         return {"schema_version": "1.0", "matches": [{
