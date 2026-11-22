@@ -1786,16 +1786,19 @@ def diagnose_application(
         return decision
     finally:
         try:
-            criteria = json.loads(application.job_model_json or "{}").get("criteria") or []
-        except (TypeError, json.JSONDecodeError):
-            criteria = []
-        safe_evidence_log({
-            "event": "application_diagnosis_complete", "run_id": run_id,
-            "application_id": application_id, "criterion_count": len(criteria),
-            "status": status, "failure_category": failure_category,
-            "duration_ms": round((perf_counter() - started) * 1000),
-            **evidence_match_run_telemetry(),
-        })
+            job_model = json.loads(application.job_model_json or "{}")
+            if not isinstance(job_model, dict):
+                job_model = {}
+            criteria = job_model.get("criteria") or []
+            safe_evidence_log({
+                "event": "application_diagnosis_complete", "run_id": run_id,
+                "application_id": application_id, "criterion_count": len(criteria),
+                "status": status, "failure_category": failure_category,
+                "duration_ms": round((perf_counter() - started) * 1000),
+                **evidence_match_run_telemetry(),
+            })
+        except Exception:
+            pass
 
 
 @app.post("/applications/{application_id}/decision/confirm")

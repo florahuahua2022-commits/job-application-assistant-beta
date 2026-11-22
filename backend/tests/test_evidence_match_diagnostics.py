@@ -363,6 +363,36 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
         completed = [event for event in self.events() if event["event"] == "application_diagnosis_complete"]
         self.assertEqual(completed[-1]["failure_category"], "ai_service_error")
 
+    def test_non_object_job_model_does_not_mask_original_input_error(self):
+        session = SimpleNamespace(exec=lambda _query: SimpleNamespace(first=lambda: None))
+        for application_id, job_model_json in enumerate(("[]", '"x"', "null", "123"), start=10):
+            with self.subTest(job_model_json=job_model_json):
+                application = SimpleNamespace(id=application_id, job_model_json=job_model_json)
+                with patch.object(main, "get_for_user", return_value=application), patch.object(
+                    main, "application_master_resume", return_value=SimpleNamespace(id=1),
+                ), patch.object(
+                    main, "prepare_application_decision", side_effect=ValueError("Synthetic invalid decision."),
+                ), self.assertRaises(HTTPException) as raised:
+                    main.diagnose_application(application_id, session=session, user_id=None)
+
+                self.assertEqual(raised.exception.status_code, 400)
+                self.assertEqual(raised.exception.detail, "Synthetic invalid decision.")
+
+    def test_completion_log_failure_does_not_mask_original_http_error(self):
+        application = SimpleNamespace(id=14, job_model_json="{}")
+        session = SimpleNamespace(exec=lambda _query: SimpleNamespace(first=lambda: None))
+        with patch.object(main, "get_for_user", return_value=application), patch.object(
+            main, "application_master_resume", return_value=SimpleNamespace(id=1),
+        ), patch.object(
+            main, "prepare_application_decision", side_effect=ValueError("Synthetic original error."),
+        ), patch.object(
+            main, "safe_evidence_log", side_effect=RuntimeError("Synthetic logging failure."),
+        ), self.assertRaises(HTTPException) as raised:
+            main.diagnose_application(14, session=session, user_id=None)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(raised.exception.detail, "Synthetic original error.")
+
     def test_match_result_and_application_attempt_count_are_unchanged_with_diagnostics(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Synthetic reporting fact."}]'
         model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Synthetic reporting"}]}'
