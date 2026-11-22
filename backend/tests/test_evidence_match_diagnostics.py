@@ -260,7 +260,7 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(provider.call_count, expected_calls)
                 self.assertEqual(raised.exception.diagnostic_category, category)
 
-    def test_length_failure_is_classified_without_changing_three_application_attempts(self):
+    def test_length_failure_does_not_repeat_an_unsplittable_request(self):
         ckb = '[{"evidence_id":"EV001","source_text":"Synthetic fact."}]'
         model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Synthetic criterion"}]}'
 
@@ -273,7 +273,7 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
         ) as provider, self.assertRaises(ai.EvidenceMatchDiagnosticError) as raised:
             ai.match_evidence_batch(ckb, model, run_id="run-length")
 
-        self.assertEqual(provider.call_count, 3)
+        self.assertEqual(provider.call_count, 1)
         self.assertEqual(raised.exception.diagnostic_category, "output_too_long")
 
     def test_provider_usage_and_response_ids_are_logged_without_response_content(self):
@@ -305,6 +305,8 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
             (SimpleNamespace(diagnostic_category="network_error"), 503, "Wait a few minutes"),
             (SimpleNamespace(diagnostic_category="provider_unavailable"), 503, "account or service is unavailable"),
             (SimpleNamespace(diagnostic_category="criterion_failed"), 502, "all job criteria"),
+            (SimpleNamespace(diagnostic_category="diagnosis_request_budget_exceeded"), 503, "more AI requests than allowed"),
+            (SimpleNamespace(diagnostic_category="provider_circuit_open"), 503, "repeated AI provider failures"),
         ]
         for error, expected_status, phrase in cases:
             with self.subTest(category=error.diagnostic_category):
@@ -314,6 +316,69 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
                 self.assertIn(phrase, detail["message"])
                 self.assertIn("No Pack credit was charged.", detail["message"])
                 self.assertTrue(detail["message"].endswith("Ref: 12345678"))
+
+    def test_request_budget_blocks_before_transport_and_caps_timeout_to_deadline(self):
+        clock = iter((100.0, 100.0, 100.0, 100.0)).__next__
+        state = ai.EvidenceMatchRunState(criterion_count=1, run_id="run-budget", clock=clock, deadline_seconds=5)
+        seen = []
+        transport = ai.EvidenceAttemptTransport(httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200, request=request)))
+        token = ai.begin_evidence_provider_attempts({"run_state": state})
+        try:
+            with httpx.Client(transport=transport, timeout=90) as client:
+                client.get("https://synthetic.invalid")
+                self.assertEqual(seen[0].extensions["timeout"]["read"], 10.0)
+                state.request_budget = 1
+                with self.assertRaises(ai.EvidenceMatchDiagnosticError) as raised:
+                    client.get("https://synthetic.invalid")
+        finally:
+            ai.end_evidence_provider_attempts(token)
+        self.assertEqual(raised.exception.diagnostic_category, "diagnosis_request_budget_exceeded")
+        self.assertEqual(len(seen), 1)
+
+    def test_transport_timeout_extension_tolerates_none_values(self):
+        clock = iter((100.0, 100.0)).__next__
+        state = ai.EvidenceMatchRunState(criterion_count=1, run_id="run-none-timeout", clock=clock)
+        seen = []
+        transport = ai.EvidenceAttemptTransport(
+            httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200, request=request)),
+        )
+        request = httpx.Request("GET", "https://synthetic.invalid")
+        request.extensions["timeout"] = {"connect": None, "read": 90.0}
+        token = ai.begin_evidence_provider_attempts({"run_state": state})
+        try:
+            response = transport.handle_request(request)
+        finally:
+            ai.end_evidence_provider_attempts(token)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen[0].extensions["timeout"], {"connect": None, "read": 90.0})
+
+    def test_deadline_is_checked_again_before_sdk_retry(self):
+        times = iter((0.0, 0.0, 121.0)).__next__
+        state = ai.EvidenceMatchRunState(criterion_count=1, run_id="run-deadline", clock=times)
+        seen = []
+
+        def busy(request):
+            seen.append(request)
+            return httpx.Response(500, request=request, json={"error": {"message": "synthetic busy"}})
+
+        client = ai.DefaultHttpxClient(transport=httpx.MockTransport(busy))
+        token = ai.begin_evidence_provider_attempts({"run_state": state})
+        try:
+            provider = ai.OpenAI(
+                api_key="synthetic-key", base_url="https://synthetic.invalid",
+                max_retries=1, http_client=ai.instrument_default_http_client(client),
+            )
+            with self.assertRaises(ai.OpenAIError) as raised:
+                provider.chat.completions.create(
+                    model="synthetic-model", messages=[{"role": "user", "content": "synthetic"}],
+                )
+        finally:
+            ai.end_evidence_provider_attempts(token)
+            client.close()
+
+        self.assertEqual(raised.exception.__cause__.diagnostic_category, "timeout")
+        self.assertEqual(len(seen), 1)
 
     def test_diagnosis_route_keeps_safe_detail_shape_and_logs_completion(self):
         application = SimpleNamespace(id=7, job_model_json='{"criteria":[{"criteria_id":"C1"}]}')

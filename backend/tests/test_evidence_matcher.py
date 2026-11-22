@@ -121,6 +121,23 @@ class EvidenceMatcherTests(unittest.TestCase):
         self.assertFalse(match_cache_is_current(current, {**self.job_model, "position_title": "Changed"}, self.ckb))
         self.assertFalse(match_cache_is_current(current, self.job_model, [*self.ckb, {"evidence_id": "NEW", "source_text": "New fact"}]))
 
+    def test_new_cache_versions_are_checked_but_legacy_full_cache_remains_valid(self):
+        legacy = normalise_match_result({"matches": []}, self.job_model, self.ckb)
+        self.assertTrue(match_cache_is_current(legacy, self.job_model, self.ckb))
+        current = normalise_match_result({
+            "matches": [], "prompt_version": "compact-v2", "contract_version": "compact-v1",
+            "provider": "deepseek", "model": "synthetic-model",
+        }, self.job_model, self.ckb)
+        self.assertTrue(match_cache_is_current(current, self.job_model, self.ckb, prompt_version="compact-v2", contract_version="compact-v1", provider="deepseek", model="synthetic-model"))
+        self.assertFalse(match_cache_is_current(current, self.job_model, self.ckb, prompt_version="changed", contract_version="compact-v1", provider="deepseek", model="synthetic-model"))
+
+    def test_normalisation_preserves_optional_criterion_statuses(self):
+        result = normalise_match_result({"matches": [], "criterion_statuses": [{
+            "criteria_id": "C1", "status": "complete", "attempts": 1, "zero_relevant_evidence": True,
+        }]}, self.job_model, self.ckb)
+        self.assertEqual(result["criterion_statuses"][0]["criteria_id"], "C1")
+        self.assertTrue(result["criterion_statuses"][0]["zero_relevant_evidence"])
+
     def test_named_sap_requirement_cannot_be_supported_without_exact_sap_token(self):
         criterion = {"criteria_id": "CDB2979FE64", "criteria_text": "SAP experience would be preferred"}
         source = "Used a records management system and Dayforce."

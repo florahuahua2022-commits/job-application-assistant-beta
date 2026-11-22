@@ -34,13 +34,28 @@ def _fingerprint(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def match_cache_is_current(result: dict[str, Any], job_model: dict[str, Any], ckb: list[dict[str, Any]]) -> bool:
-    return bool(
+def match_cache_is_current(
+    result: dict[str, Any], job_model: dict[str, Any], ckb: list[dict[str, Any]], *,
+    prompt_version: str | None = None, contract_version: str | None = None,
+    provider: str | None = None, model: str | None = None,
+) -> bool:
+    base = bool(
         result.get("schema_version") == MATCH_SCHEMA_VERSION
         and result.get("matcher_rules_version") == MATCHER_RULES_VERSION
         and result.get("job_model_fingerprint") == _fingerprint(job_model)
         and result.get("ckb_fingerprint") == _fingerprint(ckb)
     )
+    if not base:
+        return False
+    # Explicitly preserve already-normalised exhaustive-v1 caches.
+    if not result.get("prompt_version") and not result.get("contract_version"):
+        return True
+    return all((
+        result.get("prompt_version") == prompt_version,
+        result.get("contract_version") == contract_version,
+        result.get("provider") == provider,
+        result.get("model") == model,
+    ))
 
 
 def _requirement_atoms(value: str) -> list[str]:
@@ -108,6 +123,7 @@ def _ground_support(criterion: dict[str, Any], raw_support: list[dict[str, Any]]
         supported_union.update(supported)
         grounded.append({
             "evidence_id": evidence_id,
+            **({"verdict": item["verdict"]} if item.get("verdict") in {"direct", "partial"} else {}),
             "support_quote": quote,
             "matched_requirement_terms": [str(value) for value in item.get("matched_requirement_terms") or []],
             "supported_atoms": supported,
@@ -173,7 +189,7 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
                 "reasoning": "No supportable evidence was matched.",
             })
     used = {evidence_id for item in normalised for evidence_id in item["matched_evidence"]}
-    return {
+    result = {
         "schema_version": MATCH_SCHEMA_VERSION,
         "matcher_rules_version": MATCHER_RULES_VERSION,
         "job_model_fingerprint": _fingerprint(job_model),
@@ -182,6 +198,10 @@ def normalise_match_result(raw: dict[str, Any], job_model: dict[str, Any], ckb: 
         "advertised_skill_tags": match_advertised_tags(job_model, {"matches": normalised}, ckb),
         "unused_evidence": sorted(valid_evidence - used),
     }
+    for key in ("prompt_version", "contract_version", "provider", "model", "criterion_statuses"):
+        if key in raw:
+            result[key] = raw[key]
+    return result
 
 
 def validate_match_result(result: dict[str, Any], job_model: dict[str, Any], ckb: list[dict[str, Any]]) -> list[str]:

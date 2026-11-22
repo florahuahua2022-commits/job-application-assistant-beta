@@ -1,9 +1,13 @@
 from datetime import date, datetime, timezone
 from contextvars import ContextVar
+from contextvars import copy_context
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 import json
 import logging
 import re
-from time import perf_counter
+from threading import Lock
+from time import monotonic, perf_counter
 
 import httpx
 from openai import DefaultHttpxClient, OpenAI, OpenAIError
@@ -136,7 +140,9 @@ _EVIDENCE_LOG_FIELDS = {
     "response_characters", "json_parseable", "verdict_count", "missing_id_count",
     "duplicate_id_count", "unknown_id_count", "order_correct", "outcome", "provider_request_id",
     "response_id", "criterion_count", "completed_criteria", "failed_criterion_id", "status",
-    "failure_category", "provider_http_requests", "duration_ms",
+    "failure_category", "provider_http_requests", "duration_ms", "cache_hit_ratio", "request_count",
+    "request_budget", "zero_relevant_evidence", "output_budget_warning", "near_output_limit",
+    "circuit_open", "budget_exceeded", "schedule_mode",
 }
 
 
@@ -155,6 +161,34 @@ def safe_evidence_log(values: dict) -> None:
 
 
 _evidence_attempt_context: ContextVar[dict | None] = ContextVar("evidence_attempt_context", default=None)
+
+
+@dataclass
+class EvidenceMatchRunState:
+    criterion_count: int
+    run_id: str | None = None
+    clock: object = monotonic
+    deadline_seconds: float = 120.0
+    request_count: int = 0
+    request_budget: int = field(init=False)
+    started: float = field(init=False)
+    lock: Lock = field(default_factory=Lock)
+    output_budget_warning: bool = False
+    near_output_limit: bool = False
+
+    def __post_init__(self):
+        self.request_budget = self.criterion_count + 3
+        self.started = self.clock()
+
+    def reserve(self) -> float:
+        with self.lock:
+            remaining = self.deadline_seconds - (self.clock() - self.started)
+            if remaining <= 0:
+                raise EvidenceMatchDiagnosticError("timeout", self.run_id)
+            if self.request_count >= self.request_budget:
+                raise EvidenceMatchDiagnosticError("diagnosis_request_budget_exceeded", self.run_id)
+            self.request_count += 1
+            return max(10.0, min(90.0, remaining + 5.0))
 
 
 def begin_evidence_provider_attempts(values: dict):
@@ -186,6 +220,14 @@ class EvidenceAttemptTransport(httpx.BaseTransport):
             "http_status": None, "exception_type": None, "provider_request_id": None,
         }
         try:
+            context = _evidence_attempt_context.get() or {}
+            state = context.get("run_state")
+            if state is not None:
+                timeout = state.reserve()
+                request.extensions["timeout"] = {
+                    key: None if value is None else min(float(value), timeout)
+                    for key, value in (request.extensions.get("timeout") or {}).items()
+                }
             response = self.inner.handle_request(request)
             record.update(
                 http_status=response.status_code,
@@ -255,6 +297,8 @@ _EVIDENCE_MESSAGES = {
     "network_error": (503, "The application could not reach the AI provider. No Pack credit was charged. Wait a few minutes, then retry the entire diagnosis."),
     "provider_unavailable": (503, "The AI provider account or service is unavailable. No Pack credit was charged. Contact the beta operator, then retry the entire diagnosis after service is restored."),
     "criterion_failed": (502, "Evidence matching could not complete all job criteria. No Pack credit was charged. Retry the entire diagnosis."),
+    "diagnosis_request_budget_exceeded": (503, "Evidence matching used more AI requests than allowed for one diagnosis, so it was stopped to limit cost. No Pack credit was charged. Retry the entire diagnosis later; if it happens again, contact the beta operator with this reference."),
+    "provider_circuit_open": (503, "Evidence matching was stopped after repeated AI provider failures. No Pack credit was charged. Wait a few minutes, then retry the entire diagnosis."),
 }
 
 
@@ -265,6 +309,9 @@ def evidence_error_detail(error, run_id: str) -> tuple[int, dict]:
 
 
 def _evidence_error_category(error: Exception) -> str:
+    diagnostic = _evidence_diagnostic_cause(error)
+    if diagnostic is not None:
+        return diagnostic.diagnostic_category
     finish_reason = provider_response_telemetry().get("finish_reason")
     if finish_reason == "length":
         return "output_too_long"
@@ -285,6 +332,15 @@ def _evidence_error_category(error: Exception) -> str:
     if isinstance(error, RuntimeError) and ("API_" in str(error) or "AI_PROVIDER" in str(error)):
         return "configuration_error"
     return "criterion_failed"
+
+
+def _evidence_diagnostic_cause(error: Exception) -> EvidenceMatchDiagnosticError | None:
+    current = error
+    while current is not None:
+        if isinstance(current, EvidenceMatchDiagnosticError):
+            return current
+        current = current.__cause__
+    return None
 
 
 _provider_response_telemetry: ContextVar[dict] = ContextVar("provider_response_telemetry", default={})
@@ -339,7 +395,7 @@ def _openai_draft(prompt: str) -> str:
     return content
 
 
-def _deepseek_draft(prompt: str) -> str:
+def _deepseek_draft(prompt: str, max_tokens: int = 4000) -> str:
     _provider_response_telemetry.set({})
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured.")
@@ -358,7 +414,7 @@ def _deepseek_draft(prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
         stream=False,
-        max_tokens=4000,
+        max_tokens=max_tokens,
         extra_body={"thinking": {"type": "disabled"}},
     )
     content = response.choices[0].message.content
@@ -384,6 +440,8 @@ def _deepseek_draft(prompt: str) -> str:
 
 def match_evidence_batch(
     ckb_json: str, job_model_json: str, *, run_id: str | None = None, application_id: int | None = None,
+    contract: str = "compact", max_tokens: int = 4000, _run_state: EvidenceMatchRunState | None = None,
+    _single: bool = False, _allow_shards: bool = True, _include_validated_verdicts: bool = False,
 ) -> dict:
     _evidence_match_run_telemetry.set({"completed_criteria": 0, "provider_http_requests": 0})
     try:
@@ -393,8 +451,92 @@ def match_evidence_batch(
         raise ValueError("CKB or Job Model JSON is invalid.") from error
     if not isinstance(ckb, list) or not isinstance(job_model, dict):
         raise ValueError("CKB or Job Model has the wrong structure.")
+    if contract not in {"compact", "full"}:
+        raise ValueError("Evidence match contract must be 'compact' or 'full'.")
+    run_state = _run_state or EvidenceMatchRunState(len(job_model.get("criteria") or []), run_id=run_id)
     if not job_model.get("criteria"):
         return normalise_match_result({"matches": []}, job_model, ckb)
+    criteria = list(job_model.get("criteria") or [])
+    if len(criteria) > 1 and not _single:
+        results: dict[int, tuple[dict, dict]] = {}
+
+        def run_one(index: int) -> tuple[dict, dict]:
+            single_model = {**job_model, "criteria": [criteria[index]]}
+            result = match_evidence_batch(
+                ckb_json, json.dumps(single_model, ensure_ascii=False), run_id=run_id,
+                application_id=application_id, contract=contract, max_tokens=max_tokens,
+                _run_state=run_state, _single=True,
+            )
+            return result, provider_response_telemetry()
+
+        for index in range(min(2, len(criteria))):
+            results[index] = run_one(index)
+        second_usage = results[1][1] if len(criteria) > 1 else {}
+        hit, miss = second_usage.get("cache_hit_tokens"), second_usage.get("cache_miss_tokens")
+        ratio = hit / (hit + miss) if isinstance(hit, (int, float)) and isinstance(miss, (int, float)) and hit + miss else None
+        concurrent = len(criteria) > 2 and ratio is not None and ratio >= 0.85
+        first_error = None
+        consecutive_failures = 0
+        if concurrent:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="evidence-match") as executor:
+                pending: dict = {}
+                next_index = 2
+
+                def submit(index: int):
+                    context = copy_context()
+                    pending[executor.submit(context.run, run_one, index)] = index
+
+                while next_index < len(criteria) and len(pending) < 2:
+                    submit(next_index); next_index += 1
+                while pending:
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        index = pending.pop(future)
+                        try:
+                            results[index] = future.result()
+                            consecutive_failures = 0
+                        except Exception as error:
+                            first_error = first_error or error
+                            category = getattr(error, "diagnostic_category", None)
+                            if category not in {"timeout", "diagnosis_request_budget_exceeded"}:
+                                consecutive_failures += 1
+                        if consecutive_failures >= 2 and getattr(first_error, "diagnostic_category", None) not in {
+                            "timeout", "diagnosis_request_budget_exceeded",
+                        }:
+                            for active in pending:
+                                active.cancel()
+                            raise EvidenceMatchDiagnosticError("provider_circuit_open", run_id, str(criteria[index].get("criteria_id") or "")) from first_error
+                        if first_error is None and next_index < len(criteria):
+                            submit(next_index); next_index += 1
+        else:
+            for index in range(2, len(criteria)):
+                try:
+                    results[index] = run_one(index)
+                    consecutive_failures = 0
+                except Exception as error:
+                    first_error = first_error or error
+                    break
+        if first_error:
+            raise first_error
+        ordered_matches = [results[index][0]["matches"][0] for index in range(len(criteria))]
+        ordered_statuses = [results[index][0]["criterion_statuses"][0] for index in range(len(criteria))]
+        combined = normalise_match_result({
+            "matches": ordered_matches, "criterion_statuses": ordered_statuses,
+            "prompt_version": "compact-v2", "contract_version": f"{contract}-v1",
+            "provider": settings.ai_provider.strip().lower(),
+            "model": settings.deepseek_model if settings.ai_provider.strip().lower() == "deepseek" else settings.openai_model,
+        }, job_model, ckb)
+        errors = validate_match_result(combined, job_model, ckb)
+        if errors:
+            raise AIServiceError(errors[0])
+        _evidence_match_run_telemetry.set({
+            "completed_criteria": len(criteria), "provider_http_requests": run_state.request_count,
+            "request_count": run_state.request_count, "request_budget": run_state.request_budget,
+            "cache_hit_ratio": ratio, "schedule_mode": "concurrent" if concurrent else "serial",
+            "output_budget_warning": run_state.output_budget_warning,
+            "near_output_limit": run_state.near_output_limit,
+        })
+        return combined
     evidence_ids = [str(item.get("evidence_id")) for item in ckb if item.get("evidence_id")]
     raw_matches = []
     statuses = []
@@ -409,22 +551,53 @@ def match_evidence_batch(
                 "completed_criteria": criterion_index, "provider_http_requests": previous_requests,
             })
             continue
-        prompt = f"""Judge every Career Knowledge Base item against this one job criterion. Do not select only the strongest candidates.
-
-CRITERION:
-{json.dumps(criterion, ensure_ascii=False)}
-
-CAREER KNOWLEDGE BASE:
-{json.dumps(ckb, ensure_ascii=False)}
-
-Return exactly one evidence_verdict for every evidence_id above, in the same order. Never omit, duplicate or invent an ID.
-- verdict direct: the evidence clearly supports the criterion.
+        stable_ckb = json.dumps(ckb, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        stable_criterion = json.dumps(criterion, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        full_contract = contract == "full"
+        verdict_rules = """- verdict direct: the evidence clearly supports the criterion.
 - verdict partial: the evidence supports only part of the criterion or is genuinely adjacent.
-- verdict insufficient: it does not support the criterion.
+- verdict insufficient: it does not support the criterion.""" if full_contract else """- verdict direct: the evidence clearly supports the criterion.
+- verdict partial: the evidence supports only part of the criterion or is genuinely adjacent."""
+        output_rule = (
+            "Return exactly one evidence_verdict for every evidence_id above, in the same order."
+            if full_contract else "Return only direct or partial evidence_verdict items. Omit insufficient evidence."
+        )
+        verdict_example = "direct|partial|insufficient" if full_contract else "direct|partial"
+        quote_example = "exact source substring or empty" if full_contract else "exact source substring"
+        prompt = f"""EVIDENCE MATCH PROMPT VERSION: compact-v2
+Judge every Career Knowledge Base item against this one job criterion. Do not select only the strongest candidates.
+{verdict_rules}
 - direct and partial require one exact contiguous support_quote copied from that evidence. Never paraphrase it.
 
+CAREER KNOWLEDGE BASE:
+{stable_ckb}
+
+CRITERION:
+{stable_criterion}
+
+{output_rule} Never duplicate or invent an ID.
+
 Return JSON only:
-{{"criteria_id":"{criteria_id}","evidence_verdicts":[{{"evidence_id":"EV...","verdict":"direct|partial|insufficient","support_quote":"exact source substring or empty","matched_requirement_terms":["exact criterion term"]}}]}}"""
+{{"criteria_id":"{criteria_id}","evidence_verdicts":[{{"evidence_id":"EV...","verdict":"{verdict_example}","support_quote":"{quote_example}","matched_requirement_terms":["exact criterion term"]}}]}}"""
+
+        def shard_candidate() -> dict:
+            if len(ckb) <= 30:
+                raise EvidenceMatchDiagnosticError("output_too_long", run_id, criteria_id)
+            combined = []
+            for offset in range(0, len(ckb), 30):
+                chunk = ckb[offset:offset + 30]
+                chunk_result = match_evidence_batch(
+                    json.dumps(chunk, ensure_ascii=False),
+                    json.dumps({**job_model, "criteria": [criterion]}, ensure_ascii=False),
+                    run_id=run_id, application_id=application_id, contract="compact", max_tokens=max_tokens,
+                    _run_state=run_state, _single=True, _allow_shards=False,
+                    _include_validated_verdicts=True,
+                )
+                combined.extend(
+                    item for item in chunk_result.get("_validated_verdicts") or []
+                    if item.get("verdict") != "insufficient"
+                )
+            return {"criteria_id": criteria_id, "evidence_verdicts": combined}
         parsed = None
         provider_http_requests = 0
         last_failure_category = "invalid_response_format"
@@ -437,30 +610,44 @@ Return JSON only:
             "prompt_characters": len(prompt), "evidence_count": len(evidence_ids),
         }
         for attempt in range(1, 4):
+            attempt_closed = False
             token = begin_evidence_provider_attempts({
                 **criterion_log, "application_attempt": attempt,
                 "started_at": datetime.now(timezone.utc).isoformat(),
+                "run_state": run_state,
             })
             try:
+                _provider_response_telemetry.set({})
                 if provider == "deepseek":
-                    raw = _deepseek_draft(prompt)
+                    raw = _deepseek_draft(prompt) if max_tokens == 4000 else _deepseek_draft(prompt, max_tokens=max_tokens)
                 elif provider == "openai":
                     try:
                         raw = _openai_draft(prompt)
                     except OpenAIError:
                         if not settings.ai_fallback_to_deepseek:
                             raise
-                        raw = _deepseek_draft(prompt)
+                        raw = _deepseek_draft(prompt) if max_tokens == 4000 else _deepseek_draft(prompt, max_tokens=max_tokens)
                 else:
                     raise ValueError("AI_PROVIDER must be either 'openai' or 'deepseek'.")
-                candidate = _json_object(raw)
+                if raw is not None:
+                    candidate = _json_object(raw)
+            except EvidenceMatchDiagnosticError:
+                end_evidence_provider_attempts(token, outcome="stopped", json_parseable=False)
+                raise
             except (OpenAIError, json.JSONDecodeError) as error:
+                diagnostic = _evidence_diagnostic_cause(error)
+                if diagnostic is not None:
+                    end_evidence_provider_attempts(token, outcome="stopped", json_parseable=False)
+                    raise diagnostic from error
                 category = _evidence_error_category(error)
                 provider_http_requests += end_evidence_provider_attempts(
                     token, outcome=category, json_parseable=False,
                     provider_error_code=getattr(error, "code", None), **provider_response_telemetry(),
                 )
-                if attempt == 3:
+                attempt_closed = True
+                if category == "output_too_long" and _allow_shards:
+                    candidate = shard_candidate()
+                elif attempt == 3:
                     safe_evidence_log({
                         "event": "evidence_match_criterion_complete", **criterion_log,
                         "application_attempts": attempt,
@@ -474,7 +661,8 @@ Return JSON only:
                         "failed_criterion_id": criteria_id,
                     })
                     raise EvidenceMatchDiagnosticError(category, run_id, criteria_id) from error
-                continue
+                else:
+                    continue
             except (AIServiceError, RuntimeError, ValueError) as error:
                 category = _evidence_error_category(error)
                 provider_http_requests += end_evidence_provider_attempts(
@@ -494,17 +682,51 @@ Return JSON only:
                     "failed_criterion_id": criteria_id,
                 })
                 raise EvidenceMatchDiagnosticError(category, run_id, criteria_id) from error
-            verdicts = candidate.get("evidence_verdicts") or []
-            returned_ids = [str(item.get("evidence_id") or "") for item in verdicts if isinstance(item, dict)]
-            valid_verdicts = all(item.get("verdict") in {"direct", "partial", "insufficient"} for item in verdicts if isinstance(item, dict))
-            if candidate.get("criteria_id") == criteria_id and returned_ids == evidence_ids and len(verdicts) == len(evidence_ids) and valid_verdicts:
-                provider_http_requests += end_evidence_provider_attempts(
-                    token, outcome="success", json_parseable=True, **provider_response_telemetry(),
-                    verdict_count=len(verdicts), missing_id_count=0, duplicate_id_count=0,
-                    unknown_id_count=0, order_correct=True,
+            verdicts = candidate.get("evidence_verdicts")
+            verdicts = verdicts if isinstance(verdicts, list) else None
+            structurally_valid = verdicts is not None and all(isinstance(item, dict) for item in verdicts)
+            if structurally_valid and not full_contract:
+                required_fields = {"evidence_id", "verdict", "support_quote", "matched_requirement_terms"}
+                structurally_valid = all(
+                    required_fields <= set(item) and isinstance(item.get("matched_requirement_terms"), list)
+                    for item in verdicts
                 )
+            verdicts = verdicts or []
+            returned_ids = [str(item.get("evidence_id") or "") for item in verdicts if isinstance(item, dict)]
+            allowed_verdicts = {"direct", "partial", "insufficient"} if contract == "full" else {"direct", "partial"}
+            valid_verdicts = structurally_valid and all(item.get("verdict") in allowed_verdicts for item in verdicts)
+            ids_valid = (
+                returned_ids == evidence_ids if contract == "full" else
+                len(returned_ids) == len(set(returned_ids)) and set(returned_ids) <= set(evidence_ids)
+            )
+            if candidate.get("criteria_id") == criteria_id and ids_valid and valid_verdicts:
+                if not attempt_closed:
+                    provider_http_requests += end_evidence_provider_attempts(
+                        token, outcome="success", json_parseable=True, **provider_response_telemetry(),
+                        verdict_count=len(verdicts), missing_id_count=0, duplicate_id_count=0,
+                        unknown_id_count=0, order_correct=True,
+                    )
+                if contract == "compact":
+                    by_id = {str(item["evidence_id"]): item for item in verdicts}
+                    candidate["evidence_verdicts"] = [by_id.get(evidence_id, {
+                        "evidence_id": evidence_id, "verdict": "insufficient",
+                        "support_quote": "", "matched_requirement_terms": [],
+                    }) for evidence_id in evidence_ids]
                 parsed = candidate
-                statuses.append({"criteria_id": criteria_id, "status": "complete", "attempts": attempt})
+                completion = provider_response_telemetry().get("completion_tokens")
+                if isinstance(completion, (int, float)) and completion >= max_tokens * 0.60:
+                    run_state.output_budget_warning = True
+                    run_state.near_output_limit = completion >= max_tokens * 0.95
+                zero = not verdicts if contract == "compact" else not any(item.get("verdict") != "insufficient" for item in verdicts)
+                statuses.append({
+                    "criteria_id": criteria_id, "status": "complete", "attempts": attempt,
+                    **({"zero_relevant_evidence": True} if zero else {}),
+                })
+                if zero:
+                    safe_evidence_log({
+                        "event": "zero_relevant_evidence", **criterion_log,
+                        "application_attempts": attempt, "zero_relevant_evidence": True,
+                    })
                 safe_evidence_log({
                     "event": "evidence_match_criterion_complete", **criterion_log,
                     "application_attempts": attempt,
@@ -526,6 +748,17 @@ Return JSON only:
                 duplicate_id_count=len(returned_ids) - len(set(returned_ids)),
                 unknown_id_count=len(set(returned_ids) - set(evidence_ids)), order_correct=returned_ids == evidence_ids,
             )
+            if contract == "compact" and attempt == 2 and _allow_shards and len(ckb) > 30:
+                candidate = shard_candidate()
+                verdicts = candidate["evidence_verdicts"]
+                by_id = {str(item["evidence_id"]): item for item in verdicts}
+                candidate["evidence_verdicts"] = [by_id.get(evidence_id, {
+                    "evidence_id": evidence_id, "verdict": "insufficient",
+                    "support_quote": "", "matched_requirement_terms": [],
+                }) for evidence_id in evidence_ids]
+                parsed = candidate
+                statuses.append({"criteria_id": criteria_id, "status": "complete", "attempts": attempt, "sharded": True})
+                break
         if parsed is None:
             safe_evidence_log({
                 "event": "evidence_match_criterion_complete", **criterion_log,
@@ -551,15 +784,28 @@ Return JSON only:
             "reasoning": "Complete evidence-by-evidence assessment.",
             "evidence_support": [{
                 "evidence_id": item["evidence_id"],
+                "verdict": item["verdict"],
                 "support_quote": item.get("support_quote") or "",
                 "matched_requirement_terms": item.get("matched_requirement_terms") or [],
             } for item in matched],
         })
-    normalised = normalise_match_result({"matches": raw_matches}, job_model, ckb)
-    normalised["criterion_statuses"] = statuses
+    normalised = normalise_match_result({
+        "matches": raw_matches, "criterion_statuses": statuses,
+        "prompt_version": "compact-v2", "contract_version": f"{contract}-v1",
+        "provider": provider,
+        "model": settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+    }, job_model, ckb)
+    _evidence_match_run_telemetry.set({
+        **evidence_match_run_telemetry(), "provider_http_requests": run_state.request_count,
+        "request_count": run_state.request_count, "request_budget": run_state.request_budget,
+        "output_budget_warning": run_state.output_budget_warning,
+        "near_output_limit": run_state.near_output_limit,
+    })
     errors = validate_match_result(normalised, job_model, ckb)
     if errors:
         raise AIServiceError(errors[0])
+    if _include_validated_verdicts:
+        normalised["_validated_verdicts"] = parsed["evidence_verdicts"]
     return normalised
 
 
