@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -326,6 +327,36 @@ class PackCreditEngineTests(unittest.TestCase):
             usage = session.exec(select(GenerationUsage).where(GenerationUsage.pack_id == pack_id)).one()
             self.assertEqual(usage.status, "released")
             self.assertEqual(session.get(PackCreditAccount, user_id).balance, 2)
+
+    def test_evidence_match_failures_release_reserved_credits(self):
+        failures = (
+            (409, "diagnosis_already_running"),
+            (503, "diagnosis_request_budget_exceeded"),
+            (503, "provider_circuit_open"),
+            (504, "timeout"),
+        )
+        for status_code, code in failures:
+            with self.subTest(code=code), Session(self.engine) as session:
+                user_id, pack_id = uuid4(), uuid4()
+                application = JobApplication(
+                    user_id=user_id, company="Example", position_title="Officer",
+                    job_description="General duties",
+                    application_requirements_json=json.dumps(empty_application_requirements("General duties")),
+                )
+                session.add(application); session.commit(); session.refresh(application)
+                payload = GenerateRequest(
+                    application_id=application.id, document_type="tailored_resume", pack_id=pack_id,
+                )
+                failure = HTTPException(status_code, detail={"code": code, "message": "Synthetic failure"})
+                with patch.object(settings, "deployment_mode", "online"), patch(
+                    "app.main.generate_document", side_effect=failure,
+                ):
+                    with self.assertRaises(HTTPException):
+                        finish_generation_request(payload, session, user_id, f"{pack_id}:tailored_resume")
+
+                usage = session.exec(select(GenerationUsage).where(GenerationUsage.pack_id == pack_id)).one()
+                self.assertEqual(usage.status, "released")
+                self.assertEqual(session.get(PackCreditAccount, user_id).balance, 2)
 
     def test_released_pack_id_cannot_restart_generation_without_a_new_reservation(self):
         user_id, pack_id = uuid4(), uuid4()

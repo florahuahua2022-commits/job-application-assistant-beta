@@ -1,5 +1,6 @@
 import json
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -42,7 +43,10 @@ class ApplicationDecisionApiTests(unittest.TestCase):
         }).json()
 
     @staticmethod
-    def no_match(ckb_json, job_model_json, *, run_id=None, application_id=None):
+    def no_match(
+        ckb_json, job_model_json, *, run_id=None, application_id=None,
+        contract=None, max_tokens=None,
+    ):
         import json
         model = json.loads(job_model_json)
         return {"schema_version": "1.0", "matches": [{
@@ -258,6 +262,117 @@ Experience in construction or mining (preferred).
         self.assertEqual(diagnosed.status_code, 200, diagnosed.text)
         self.assertEqual(generated.status_code, 200, generated.text)
         self.assertEqual(matcher.call_count, 1)
+        self.assertEqual(matcher.call_args.kwargs["contract"], "full")
+        self.assertEqual(matcher.call_args.kwargs["max_tokens"], 6000)
+
+    def test_diagnosis_refreshes_only_evidence_match_cache_after_lock(self):
+        application = self.create_application("Project reporting experience.")
+        original_refresh = Session.refresh
+        refreshed = []
+
+        def record_refresh(session, instance, attribute_names=None, **kwargs):
+            if isinstance(instance, JobApplication):
+                refreshed.append(attribute_names)
+            return original_refresh(session, instance, attribute_names=attribute_names, **kwargs)
+
+        with patch.object(Session, "refresh", new=record_refresh), patch(
+            "app.main.match_evidence_batch", side_effect=self.no_match,
+        ):
+            response = self.client.post(f"/applications/{application['id']}/decision")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(["evidence_matches_json"], refreshed)
+
+    def test_generation_refreshes_only_evidence_match_cache_after_lock(self):
+        application = self.create_application("Project reporting experience.")
+        draft = "Cover Letter: Project Officer\n\nPrepared monthly reports."
+        original_refresh = Session.refresh
+        refreshed = []
+
+        def record_refresh(session, instance, attribute_names=None, **kwargs):
+            if isinstance(instance, JobApplication):
+                refreshed.append(attribute_names)
+            return original_refresh(session, instance, attribute_names=attribute_names, **kwargs)
+
+        with patch.object(Session, "refresh", new=record_refresh), patch(
+            "app.main.match_evidence_batch", side_effect=self.no_match,
+        ) as matcher, patch("app.main.generate_draft", return_value=draft), patch(
+            "app.main.repair_cover_letter", return_value=(draft, {"status": "pass", "results": []}),
+        ):
+            response = self.client.post("/generate", json={
+                "application_id": application["id"], "document_type": "cover_letter",
+            })
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(["evidence_matches_json"], refreshed)
+        self.assertEqual(matcher.call_args.kwargs["contract"], "full")
+        self.assertEqual(matcher.call_args.kwargs["max_tokens"], 6000)
+
+    def test_diagnosis_enters_lock_without_uncommitted_application_changes(self):
+        application = self.create_application("Project reporting experience.")
+        dirty = []
+
+        @contextmanager
+        def inspect_lock(session, _user_id, application_id):
+            target = next(
+                item for item in session.identity_map.values()
+                if isinstance(item, JobApplication) and item.id == application_id
+            )
+            dirty.append(session.is_modified(target, include_collections=False))
+            yield
+
+        with patch("app.main.diagnosis_lock", side_effect=inspect_lock), patch(
+            "app.main.match_evidence_batch", side_effect=self.no_match,
+        ):
+            response = self.client.post(f"/applications/{application['id']}/decision")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(dirty, [False])
+
+    def test_generation_commits_expanded_company_before_entering_lock(self):
+        application = self.client.post("/applications", json={
+            "company": "ABC", "position_title": "Project Officer",
+            "job_description": "Project Officer at Example Abc. Submit your CV and cover letter.",
+            "selection_criteria": "Selection Criteria\n1. Project reporting experience.",
+        }).json()
+        with Session(self.engine) as session:
+            stored = session.get(JobApplication, application["id"])
+            stored.company = "ABC"
+            session.add(stored)
+            session.commit()
+        draft = "Cover Letter: Project Officer\n\nPrepared monthly reports."
+        dirty = []
+        events = []
+        original_commit = Session.commit
+
+        def record_commit(session):
+            events.append("commit")
+            return original_commit(session)
+
+        @contextmanager
+        def inspect_lock(session, _user_id, application_id):
+            target = next(
+                item for item in session.identity_map.values()
+                if isinstance(item, JobApplication) and item.id == application_id
+            )
+            dirty.append(session.is_modified(target, include_collections=False))
+            self.assertEqual(events[-1], "commit")
+            yield
+
+        with patch.object(Session, "commit", new=record_commit), patch(
+            "app.main.expand_abbreviated_company",
+            side_effect=lambda company, _text: events.append("expanded") or "Example Abc",
+        ), patch("app.main.diagnosis_lock", side_effect=inspect_lock), patch(
+            "app.main.match_evidence_batch", side_effect=self.no_match,
+        ), patch("app.main.generate_draft", return_value=draft), patch(
+            "app.main.repair_cover_letter", return_value=(draft, {"status": "pass", "results": []}),
+        ):
+            response = self.client.post("/generate", json={
+                "application_id": application["id"], "document_type": "cover_letter",
+            })
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(dirty, [False])
 
 
 if __name__ == "__main__":

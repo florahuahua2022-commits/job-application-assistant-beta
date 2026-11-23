@@ -14,12 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, update
 from sqlmodel import Session, delete, select
-from .ai import AIServiceError, EvidenceMatchCompletenessError, EvidenceMatchDiagnosticError, build_evidence_pack, evidence_error_detail, evidence_match_run_telemetry, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, reset_evidence_match_run_telemetry, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume, safe_evidence_log
+from .ai import AIServiceError, EVIDENCE_MATCH_PROMPT_VERSION, EvidenceMatchCompletenessError, EvidenceMatchDiagnosticError, build_evidence_pack, configured_evidence_match_contract, evidence_error_detail, evidence_match_max_tokens, evidence_match_run_telemetry, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, reset_evidence_match_run_telemetry, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume, safe_evidence_log
 from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
 from .ats_verification import verify_resume_artifact, verify_document_export
 from .applicant_profile import applicant_profile_prompt, confirmed_availability_wording, availability_issues, polish_availability
 from .delivery_checks import delivery_issues, aggregate_experience, profile_missing_fields, apply_delivery_review
+from .diagnosis_lock import DiagnosisAlreadyRunning, diagnosis_lock
 from .generation_trace import build_generation_trace, build_trace_bundle
 from .auth import get_current_user, require_admin_user
 from .backup import create_backup, list_backups, read_backup, restore_backup
@@ -540,17 +541,39 @@ def prepare_application_decision(
             session.commit()
     ckb, _ = application_ckb(session, application, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
-    if not match_cache_is_current(matches, job_model, ckb):
-        matches = normalise_match_result(
-            match_evidence_batch(
-                json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False),
-                run_id=run_id, application_id=application.id,
-            ), job_model, ckb,
-        )
-        application.evidence_matches_json = json.dumps(matches, ensure_ascii=False)
-        application.application_decision_json = "{}"
-        application.selection_plan_json = "{}"
-        application.selection_confirmations_json = "[]"
+    provider = settings.ai_provider.strip().lower()
+    contract = configured_evidence_match_contract()
+    match_max_tokens = evidence_match_max_tokens(contract)
+    if not match_cache_is_current(
+        matches, job_model, ckb, prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1",
+        provider=provider, model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+    ):
+        try:
+            with diagnosis_lock(session, user_id, application.id):
+                session.refresh(application, attribute_names=["evidence_matches_json"])
+                matches = json.loads(application.evidence_matches_json or "{}")
+                if not match_cache_is_current(
+                    matches, job_model, ckb, prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1",
+                    provider=provider, model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+                ):
+                    matches = normalise_match_result(
+                        match_evidence_batch(
+                            json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False),
+                            run_id=run_id, application_id=application.id,
+                            contract=contract, max_tokens=match_max_tokens,
+                        ), job_model, ckb,
+                    )
+                    application.evidence_matches_json = json.dumps(matches, ensure_ascii=False)
+                    application.application_decision_json = "{}"
+                    application.selection_plan_json = "{}"
+                    application.selection_confirmations_json = "[]"
+                    session.add(application)
+                    session.commit()
+        except DiagnosisAlreadyRunning as error:
+            raise HTTPException(409, detail={
+                "code": "diagnosis_already_running",
+                "message": "A diagnosis for this job is already running. Wait for it to finish, then check the result. No Pack credit was charged.",
+            }) from error
     previous = json.loads(application.application_decision_json or "{}")
     decision = build_application_decision(job_model, requirements, matches, ckb, profile, previous)
     errors = validate_application_decision(decision)
@@ -1763,6 +1786,8 @@ def diagnose_application(
     started = perf_counter()
     status = "failed"
     failure_category = None
+    contract = configured_evidence_match_contract()
+    match_max_tokens = evidence_match_max_tokens(contract)
     application = get_for_user(session, JobApplication, application_id, user_id)
     master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True) if application else None
     if not application or not master_resume:
@@ -1790,11 +1815,13 @@ def diagnose_application(
             if not isinstance(job_model, dict):
                 job_model = {}
             criteria = job_model.get("criteria") or []
+            elapsed_ms = round((perf_counter() - started) * 1000)
             safe_evidence_log({
                 "event": "application_diagnosis_complete", "run_id": run_id,
                 "application_id": application_id, "criterion_count": len(criteria),
                 "status": status, "failure_category": failure_category,
-                "duration_ms": round((perf_counter() - started) * 1000),
+                "duration_ms": elapsed_ms, "elapsed_ms": elapsed_ms,
+                "contract": contract, "max_tokens": match_max_tokens,
                 **evidence_match_run_telemetry(),
             })
         except Exception:
@@ -3283,7 +3310,11 @@ def generate_document(
     if integrity_issue:
         raise HTTPException(409, stale_resume_snapshot_detail(session, application, user_id)
                             or master_resume_review_detail(master_resume) or integrity_issue)
-    application.company = expand_abbreviated_company(application.company, application.job_description)
+    expanded_company = expand_abbreviated_company(application.company, application.job_description)
+    if expanded_company != application.company:
+        application.company = expanded_company
+        session.add(application)
+        session.commit()
     profile = session.exec(select_for_user(ApplicantProfile, user_id).order_by(ApplicantProfile.id)).first()
     used_experiences = "[]"
     used_closing_styles = "[]"
@@ -3322,13 +3353,43 @@ def generate_document(
         parsed_ckb = json.loads(ckb_source_json)
         parsed_job_model = json.loads(job_model_json)
         parsed_matches = json.loads(evidence_matches_json or "{}")
-        if not match_cache_is_current(parsed_matches, parsed_job_model, parsed_ckb):
-            evidence_matches_json = json.dumps(normalise_match_result(
-                match_evidence_batch(ckb_source_json, job_model_json), parsed_job_model, parsed_ckb,
-            ), ensure_ascii=False)
-            application.evidence_matches_json = evidence_matches_json
-            application.selection_plan_json = "{}"
-            application.selection_confirmations_json = "[]"
+        provider = settings.ai_provider.strip().lower()
+        contract = configured_evidence_match_contract()
+        match_max_tokens = evidence_match_max_tokens(contract)
+        if not match_cache_is_current(
+            parsed_matches, parsed_job_model, parsed_ckb,
+            prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1", provider=provider,
+            model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+        ):
+            try:
+                with diagnosis_lock(session, user_id, application.id):
+                    session.refresh(application, attribute_names=["evidence_matches_json"])
+                    locked_matches = json.loads(application.evidence_matches_json or "{}")
+                    if match_cache_is_current(
+                        locked_matches, parsed_job_model, parsed_ckb,
+                        prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1", provider=provider,
+                        model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+                    ):
+                        evidence_matches_json = application.evidence_matches_json
+                    else:
+                        evidence_matches_json = json.dumps(normalise_match_result(
+                            match_evidence_batch(
+                                ckb_source_json, job_model_json,
+                                run_id=str(uuid4()), application_id=application.id,
+                                contract=contract, max_tokens=match_max_tokens,
+                            ),
+                            parsed_job_model, parsed_ckb,
+                        ), ensure_ascii=False)
+                        application.evidence_matches_json = evidence_matches_json
+                        application.selection_plan_json = "{}"
+                        application.selection_confirmations_json = "[]"
+                        session.add(application)
+                        session.commit()
+            except DiagnosisAlreadyRunning as error:
+                raise HTTPException(409, detail={
+                    "code": "diagnosis_already_running",
+                    "message": "A diagnosis for this job is already running. Wait for it to finish, then check the result. No Pack credit was charged.",
+                }) from error
             decision = build_application_decision(
                 parsed_job_model, stored_requirements, json.loads(evidence_matches_json), parsed_ckb, profile, decision,
             )
@@ -3417,6 +3478,9 @@ def generate_document(
             content = polish_availability(auto_polish_tailored_resume(content, include_references=bool(re.search(r"(?i)\b(?:references|referees)\b", application.job_description + " " + (profile.preferences_notes or "" if profile else "")))), "not_specified")
         if payload.document_type == "cover_letter":
             content = auto_polish_cover_letter(content, profile, application.job_description, application.company)
+    except EvidenceMatchDiagnosticError as error:
+        status_code, detail = evidence_error_detail(error, error.run_id or str(uuid4()))
+        raise HTTPException(status_code, detail=detail)
     except (RuntimeError, ValueError) as error:
         raise HTTPException(400, str(error))
     except AIServiceError as error:

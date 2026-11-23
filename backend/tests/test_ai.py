@@ -1,4 +1,6 @@
 import json
+import re
+import threading
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -991,7 +993,7 @@ November 2017 - January 2019
             '{"criteria_id":"C2","evidence_verdicts":[{"evidence_id":"EV001","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]},{"evidence_id":"EV002","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]}]}',
         ]
         with patch.object(ai, "_openai_draft", side_effect=responses) as call:
-            result = ai.match_evidence_batch(ckb, job_model)
+            result = ai.match_evidence_batch(ckb, job_model, contract="full")
 
         self.assertEqual(call.call_count, 2)
         self.assertTrue(all(evidence_id in call.call_args_list[0].args[0] for evidence_id in ("EV001", "EV002")))
@@ -1008,7 +1010,7 @@ November 2017 - January 2019
             '{"criteria_id":"C2","evidence_verdicts":[{"evidence_id":"EV001","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]},{"evidence_id":"EV002","verdict":"direct","support_quote":"Maintained records.","matched_requirement_terms":["Records"]}]}',
         ]
         with patch.object(ai, "_openai_draft", side_effect=responses) as call:
-            result = ai.match_evidence_batch(ckb, job_model)
+            result = ai.match_evidence_batch(ckb, job_model, contract="full")
 
         self.assertEqual(call.call_count, 3)
         self.assertEqual([item["attempts"] for item in result["criterion_statuses"]], [2, 1])
@@ -1019,7 +1021,7 @@ November 2017 - January 2019
         incomplete = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]}]}'
 
         with patch.object(ai, "_openai_draft", return_value=incomplete) as call, self.assertRaises(ai.EvidenceMatchCompletenessError) as raised:
-            ai.match_evidence_batch(ckb, job_model)
+            ai.match_evidence_batch(ckb, job_model, contract="full")
 
         self.assertEqual(call.call_count, 3)
         self.assertEqual(raised.exception.criteria_id, "C1")
@@ -1036,6 +1038,453 @@ November 2017 - January 2019
         call.assert_not_called()
         self.assertEqual(result["matches"][0]["matched_evidence"], [])
         self.assertEqual(result["criterion_statuses"], [{"criteria_id": "PLACEHOLDER", "status": "skipped_placeholder", "attempts": 0}])
+
+    def test_compact_matcher_fills_insufficient_and_matches_full_contract(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."},{"evidence_id":"EV002","source_text":"Completed a degree."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        compact = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]}]}'
+        full = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]},{"evidence_id":"EV002","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]}]}'
+        with patch.object(ai, "_openai_draft", return_value=compact):
+            compact_result = ai.match_evidence_batch(ckb, model, contract="compact")
+        with patch.object(ai, "_openai_draft", return_value=full):
+            full_result = ai.match_evidence_batch(ckb, model, contract="full")
+
+        for key in ("matches", "advertised_skill_tags", "unused_evidence"):
+            self.assertEqual(compact_result[key], full_result[key])
+
+    def test_compact_prompt_has_stable_cache_first_order(self):
+        ckb = '[{"source_text":"Prepared reports.","evidence_id":"EV001"}]'
+        model = '{"criteria":[{"criteria_text":"Reporting","criteria_id":"C1"}]}'
+        with patch.object(
+            ai, "_openai_draft",
+            return_value='{"criteria_id":"C1","evidence_verdicts":[]}',
+        ) as provider:
+            ai.match_evidence_batch(ckb, model, contract="compact")
+
+        prompt = provider.call_args.args[0]
+        self.assertLess(prompt.index("CAREER KNOWLEDGE BASE:"), prompt.index("CRITERION:"))
+        self.assertLess(prompt.index("CRITERION:"), prompt.index("Return JSON only:"))
+        self.assertIn(
+            '[{"evidence_id":"EV001","source_text":"Prepared reports."}]', prompt,
+        )
+
+    def test_full_prompt_and_validation_keep_legacy_contract(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."},{"evidence_id":"EV002","source_text":"Other fact."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        response = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":["Reporting"]},{"evidence_id":"EV002","verdict":"insufficient"}]}'
+        with patch.object(ai, "_openai_draft", return_value=response) as provider:
+            result = ai.match_evidence_batch(ckb, model, contract="full")
+
+        prompt = provider.call_args.args[0]
+        self.assertIn("verdict insufficient: it does not support the criterion", prompt)
+        self.assertIn("same order", prompt)
+        self.assertIn('"verdict":"direct|partial|insufficient"', prompt)
+        self.assertIn('"support_quote":"exact source substring or empty"', prompt)
+        self.assertEqual(result["matches"][0]["matched_evidence"], ["EV001"])
+
+    def test_default_contract_is_full_with_six_thousand_output_tokens(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        response = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"insufficient"}]}'
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai.settings, "evidence_match_contract", "full", create=True,
+        ), patch.object(ai, "_deepseek_draft", return_value=response) as provider:
+            result = ai.match_evidence_batch(ckb, model)
+
+        self.assertEqual(provider.call_args.kwargs["max_tokens"], 6000)
+        self.assertEqual(result["contract_version"], "full-v1")
+
+    def test_empty_job_model_still_records_default_contract_metadata(self):
+        result = ai.match_evidence_batch('[]', '{"criteria":[]}')
+
+        self.assertEqual(result["prompt_version"], "compact-v2")
+        self.assertEqual(result["contract_version"], "full-v1")
+
+    def test_setting_can_select_compact_contract_with_four_thousand_tokens(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        response = '{"criteria_id":"C1","evidence_verdicts":[]}'
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai.settings, "evidence_match_contract", "compact", create=True,
+        ), patch.object(ai, "_deepseek_draft", return_value=response) as provider:
+            result = ai.match_evidence_batch(ckb, model)
+
+        self.assertEqual(provider.call_args.kwargs, {})
+        self.assertEqual(result["contract_version"], "compact-v1")
+
+    def test_full_output_budget_threshold_uses_six_thousand_tokens(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        response = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"insufficient"}]}'
+
+        def provider(*args, **kwargs):
+            ai._provider_response_telemetry.set({"completion_tokens": 3700})
+            return response
+
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai.settings, "evidence_match_contract", "full", create=True,
+        ), patch.object(ai, "_deepseek_draft", side_effect=provider):
+            ai.match_evidence_batch(ckb, model)
+
+        telemetry = ai.evidence_match_run_telemetry()
+        self.assertTrue(telemetry["output_budget_warning"])
+        self.assertFalse(telemetry["near_output_limit"])
+
+    def test_full_length_response_shards_with_full_contract_and_six_thousand_tokens(self):
+        ckb_items = [
+            {"evidence_id": f"EV{index:03d}", "source_text": f"Synthetic evidence {index}."}
+            for index in range(31)
+        ]
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+
+        def provider(prompt, **kwargs):
+            calls.append(kwargs.get("max_tokens", 4000))
+            if len(calls) == 1:
+                ai._provider_response_telemetry.set({"finish_reason": "length", "completion_tokens": 6000})
+                return "not-json"
+            ids = re.findall(r'"evidence_id":"(EV\d+)"', prompt)
+            return json.dumps({"criteria_id": "C1", "evidence_verdicts": [
+                {"evidence_id": evidence_id, "verdict": "insufficient"} for evidence_id in ids
+            ]})
+
+        calls = []
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai.settings, "evidence_match_contract", "full", create=True,
+        ), patch.object(ai, "_deepseek_draft", side_effect=provider):
+            result = ai.match_evidence_batch(json.dumps(ckb_items), model)
+
+        self.assertEqual(calls, [6000, 6000, 6000])
+        self.assertEqual(result["contract_version"], "full-v1")
+
+    def test_full_contract_shards_after_two_invalid_formats(self):
+        ckb_items = [
+            {"evidence_id": f"EV{index:03d}", "source_text": f"Synthetic evidence {index}."}
+            for index in range(31)
+        ]
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+
+        def provider(prompt, **kwargs):
+            calls.append(kwargs.get("max_tokens", 4000))
+            if len(calls) <= 2:
+                return '{"criteria_id":"wrong","evidence_verdicts":[]}'
+            ids = re.findall(r'"evidence_id":"(EV\d+)"', prompt)
+            return json.dumps({"criteria_id": "C1", "evidence_verdicts": [
+                {"evidence_id": evidence_id, "verdict": "insufficient"} for evidence_id in ids
+            ]})
+
+        calls = []
+        with patch.object(ai.settings, "ai_provider", "deepseek"), patch.object(
+            ai.settings, "evidence_match_contract", "full",
+        ), patch.object(ai, "_deepseek_draft", side_effect=provider):
+            result = ai.match_evidence_batch(json.dumps(ckb_items), model)
+
+        self.assertEqual(calls, [6000, 6000, 6000, 6000])
+        self.assertEqual(result["contract_version"], "full-v1")
+
+    def test_compact_prompt_omits_legacy_insufficient_instructions(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        with patch.object(ai, "_openai_draft", return_value='{"criteria_id":"C1","evidence_verdicts":[]}') as provider:
+            ai.match_evidence_batch(ckb, model, contract="compact")
+
+        prompt = provider.call_args.args[0]
+        self.assertNotIn("verdict insufficient", prompt)
+        self.assertNotIn("same order", prompt)
+
+    def test_compact_support_quote_still_requires_source_substring(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        response = '{"criteria_id":"C1","evidence_verdicts":[{"evidence_id":"EV001","verdict":"direct","support_quote":"Invented quote.","matched_requirement_terms":["Reporting"]}]}'
+        with patch.object(ai, "_openai_draft", return_value=response):
+            result = ai.match_evidence_batch(ckb, model, contract="compact")
+
+        self.assertEqual(result["matches"][0]["matched_evidence"], [])
+
+    def test_compact_matcher_rejects_unknown_duplicate_invalid_and_missing_fields(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        invalid_verdicts = (
+            [{"evidence_id":"UNKNOWN","verdict":"direct","support_quote":"x","matched_requirement_terms":[]}],
+            [{"evidence_id":"EV001","verdict":"direct","support_quote":"Prepared reports.","matched_requirement_terms":[]}, {"evidence_id":"EV001","verdict":"partial","support_quote":"Prepared reports.","matched_requirement_terms":[]}],
+            [{"evidence_id":"EV001","verdict":"insufficient","support_quote":"","matched_requirement_terms":[]}],
+            [{"evidence_id":"EV001","verdict":"direct","matched_requirement_terms":[]}],
+        )
+        for verdicts in invalid_verdicts:
+            response = json.dumps({"criteria_id":"C1","evidence_verdicts":verdicts})
+            with self.subTest(verdicts=verdicts), patch.object(ai, "_openai_draft", return_value=response), self.assertRaises(ai.EvidenceMatchCompletenessError):
+                ai.match_evidence_batch(ckb, model, contract="compact")
+
+    def test_zero_relevant_evidence_is_explicit_status(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Procurement"}]}'
+        with patch.object(ai, "_openai_draft", return_value='{"criteria_id":"C1","evidence_verdicts":[]}'):
+            result = ai.match_evidence_batch(ckb, model, contract="compact")
+        self.assertTrue(result["criterion_statuses"][0]["zero_relevant_evidence"])
+        self.assertEqual(result["matches"][0]["matched_evidence"], [])
+
+    def test_matcher_warms_two_criteria_then_uses_two_workers_after_cache_hit(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+            for index in range(1, 5)
+        ]})
+        threads = []
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            threads.append((criterion_id, threading.current_thread().name))
+            ai._provider_response_telemetry.set({
+                "cache_hit_tokens": 900 if criterion_id == "C2" else 0,
+                "cache_miss_tokens": 100,
+            })
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response):
+            result = ai.match_evidence_batch(ckb, model, contract="compact")
+
+        self.assertEqual([item["criteria_id"] for item in result["matches"]], ["C1", "C2", "C3", "C4"])
+        self.assertTrue(all(name == "MainThread" for criterion, name in threads if criterion in {"C1", "C2"}))
+        self.assertTrue(all(name.startswith("evidence-match") for criterion, name in threads if criterion in {"C3", "C4"}))
+        self.assertEqual(ai.evidence_match_run_telemetry()["schedule_mode"], "concurrent")
+
+    def test_matcher_stays_serial_when_cache_usage_is_unknown(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+            for index in range(1, 4)
+        ]})
+        threads = []
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            threads.append(threading.current_thread().name)
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response):
+            ai.match_evidence_batch(ckb, model, contract="compact")
+
+        self.assertEqual(threads, ["MainThread"] * 3)
+        self.assertEqual(ai.evidence_match_run_telemetry()["schedule_mode"], "serial")
+
+    def test_length_response_splits_large_evidence_once(self):
+        ckb_items = [
+            {"evidence_id": f"EV{index:03d}", "source_text": f"Synthetic evidence {index}."}
+            for index in range(31)
+        ]
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        calls = 0
+
+        def response(prompt):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                ai._provider_response_telemetry.set({"finish_reason": "length", "completion_tokens": 4000})
+                return "not-json"
+            return '{"criteria_id":"C1","evidence_verdicts":[]}'
+
+        with patch.object(ai, "_openai_draft", side_effect=response):
+            result = ai.match_evidence_batch(json.dumps(ckb_items), model, contract="compact")
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(result["matches"][0]["matched_evidence"], [])
+
+    def test_success_above_sixty_percent_warns_without_forcing_next_criterion_to_shard(self):
+        ckb = json.dumps([
+            {"evidence_id": f"EV{index:03d}", "source_text": f"Synthetic evidence {index}."}
+            for index in range(31)
+        ])
+        model = json.dumps({"criteria": [
+            {"criteria_id": "C1", "criteria_text": "Requirement one"},
+            {"criteria_id": "C2", "criteria_text": "Requirement two"},
+        ]})
+        calls = []
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            calls.append(criterion_id)
+            ai._provider_response_telemetry.set({
+                "completion_tokens": 2600 if criterion_id == "C1" else 10,
+                "cache_hit_tokens": 900 if criterion_id == "C2" else 0,
+                "cache_miss_tokens": 100,
+            })
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response):
+            result = ai.match_evidence_batch(ckb, model, contract="compact")
+
+        self.assertEqual(calls, ["C1", "C2"])
+        self.assertEqual(len(result["matches"]), 2)
+        self.assertTrue(ai.evidence_match_run_telemetry()["output_budget_warning"])
+
+    def test_shard_merge_preserves_each_evidence_verdict(self):
+        ckb_items = [
+            {"evidence_id": f"EV{index:03d}", "source_text": f"Prepared reporting item {index}."}
+            for index in range(31)
+        ]
+        model = '{"criteria":[{"criteria_id":"C1","criteria_text":"Reporting"}]}'
+        invalid = '{"criteria_id":"wrong","evidence_verdicts":[]}'
+        first_shard = json.dumps({"criteria_id": "C1", "evidence_verdicts": [
+            {"evidence_id": "EV000", "verdict": "direct", "support_quote": "Prepared reporting item 0.", "matched_requirement_terms": ["Reporting"]},
+            {"evidence_id": "EV001", "verdict": "partial", "support_quote": "Prepared reporting item 1.", "matched_requirement_terms": ["Reporting"]},
+        ]})
+        second_shard = '{"criteria_id":"C1","evidence_verdicts":[]}'
+        with patch.object(ai, "_openai_draft", side_effect=[invalid, invalid, first_shard, second_shard]):
+            sharded = ai.match_evidence_batch(json.dumps(ckb_items), model, contract="compact")
+        with patch.object(ai, "_openai_draft", return_value=first_shard):
+            direct = ai.match_evidence_batch(json.dumps(ckb_items), model, contract="compact")
+
+        verdicts = {item["evidence_id"]: item["verdict"] for item in sharded["matches"][0]["evidence_support"]}
+        self.assertEqual(verdicts, {"EV000": "direct", "EV001": "partial"})
+        coverage_rank = {"weak": 0, "partial": 1, "strong": 2}
+        self.assertLessEqual(
+            coverage_rank[sharded["matches"][0]["coverage"]],
+            coverage_rank[direct["matches"][0]["coverage"]],
+        )
+
+    def test_multi_criterion_result_runs_full_model_validation(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": "C1", "criteria_text": "Reporting"},
+            {"criteria_id": "C2", "criteria_text": "Records"},
+        ]})
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response), patch.object(
+            ai, "validate_match_result", side_effect=[[], [], ["synthetic invalid combined result"]],
+        ), self.assertRaisesRegex(ai.AIServiceError, "synthetic invalid combined result"):
+            ai.match_evidence_batch(ckb, model, contract="compact")
+
+    def test_two_consecutive_criterion_failures_open_circuit(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+            for index in range(1, 6)
+        ]})
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            if criterion_id in {"C3", "C4", "C5"}:
+                raise RuntimeError("synthetic provider failure")
+            ai._provider_response_telemetry.set({
+                "cache_hit_tokens": 900 if criterion_id == "C2" else 0,
+                "cache_miss_tokens": 100,
+            })
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response), self.assertRaises(
+            ai.EvidenceMatchDiagnosticError,
+        ) as raised:
+            ai.match_evidence_batch(ckb, model, run_id="run-circuit", contract="compact")
+
+        self.assertEqual(raised.exception.diagnostic_category, "provider_circuit_open")
+
+    def test_serial_run_stops_on_timeout_without_starting_next_criterion(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+            for index in range(1, 5)
+        ]})
+        calls = []
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            calls.append(criterion_id)
+            if criterion_id == "C3":
+                raise ai.EvidenceMatchDiagnosticError("timeout", "run-timeout", criterion_id)
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response), self.assertRaises(
+            ai.EvidenceMatchDiagnosticError,
+        ) as raised:
+            ai.match_evidence_batch(ckb, model, run_id="run-timeout", contract="compact")
+
+        self.assertEqual(raised.exception.diagnostic_category, "timeout")
+        self.assertEqual(calls, ["C1", "C2", "C3"])
+
+    def test_serial_run_stops_on_request_budget_without_opening_circuit(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+            for index in range(1, 5)
+        ]})
+        calls = []
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            calls.append(criterion_id)
+            if criterion_id == "C3":
+                raise ai.EvidenceMatchDiagnosticError(
+                    "diagnosis_request_budget_exceeded", "run-budget", criterion_id,
+                )
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response), self.assertRaises(
+            ai.EvidenceMatchDiagnosticError,
+        ) as raised:
+            ai.match_evidence_batch(ckb, model, run_id="run-budget", contract="compact")
+
+        self.assertEqual(raised.exception.diagnostic_category, "diagnosis_request_budget_exceeded")
+        self.assertEqual(calls, ["C1", "C2", "C3"])
+
+    def test_serial_run_stops_on_first_provider_failure(self):
+        ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+        model = json.dumps({"criteria": [
+            {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+            for index in range(1, 5)
+        ]})
+        calls = []
+
+        def response(prompt):
+            criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+            calls.append(criterion_id)
+            if criterion_id == "C3":
+                raise RuntimeError("synthetic provider failure")
+            return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+        with patch.object(ai, "_openai_draft", side_effect=response), self.assertRaises(
+            ai.EvidenceMatchDiagnosticError,
+        ) as raised:
+            ai.match_evidence_batch(ckb, model, run_id="run-provider", contract="compact")
+
+        self.assertEqual(raised.exception.diagnostic_category, "criterion_failed")
+        self.assertEqual(calls, ["C1", "C2", "C3"])
+
+    def test_concurrent_run_keeps_global_stop_category_and_starts_no_new_criterion(self):
+        for category in ("timeout", "diagnosis_request_budget_exceeded"):
+            with self.subTest(category=category):
+                ckb = '[{"evidence_id":"EV001","source_text":"Prepared reports."}]'
+                model = json.dumps({"criteria": [
+                    {"criteria_id": f"C{index}", "criteria_text": f"Requirement {index}"}
+                    for index in range(1, 6)
+                ]})
+                calls = []
+                c4_started = threading.Event()
+
+                def response(prompt):
+                    criterion_id = re.search(r'"criteria_id":"(C\d+)"', prompt).group(1)
+                    calls.append(criterion_id)
+                    ai._provider_response_telemetry.set({
+                        "cache_hit_tokens": 900 if criterion_id == "C2" else 0,
+                        "cache_miss_tokens": 100,
+                    })
+                    if criterion_id == "C4":
+                        c4_started.set()
+                        threading.Event().wait(0.05)
+                    if criterion_id == "C3":
+                        c4_started.wait(1)
+                        raise ai.EvidenceMatchDiagnosticError(category, f"run-{category}", criterion_id)
+                    return json.dumps({"criteria_id": criterion_id, "evidence_verdicts": []})
+
+                with patch.object(ai, "_openai_draft", side_effect=response), self.assertRaises(
+                    ai.EvidenceMatchDiagnosticError,
+                ) as raised:
+                    ai.match_evidence_batch(ckb, model, run_id=f"run-{category}", contract="compact")
+
+                self.assertEqual(raised.exception.diagnostic_category, category)
+                self.assertEqual(set(calls), {"C1", "C2", "C3", "C4"})
 
     def test_replaces_date_placeholder_with_written_current_date(self):
         expected = f"{ai.date.today().day} {ai.date.today().strftime('%B %Y')}"
