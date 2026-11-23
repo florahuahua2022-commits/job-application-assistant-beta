@@ -43,7 +43,10 @@ class ApplicationDecisionApiTests(unittest.TestCase):
         }).json()
 
     @staticmethod
-    def no_match(ckb_json, job_model_json, *, run_id=None, application_id=None):
+    def no_match(
+        ckb_json, job_model_json, *, run_id=None, application_id=None,
+        contract=None, max_tokens=None,
+    ):
         import json
         model = json.loads(job_model_json)
         return {"schema_version": "1.0", "matches": [{
@@ -259,6 +262,8 @@ Experience in construction or mining (preferred).
         self.assertEqual(diagnosed.status_code, 200, diagnosed.text)
         self.assertEqual(generated.status_code, 200, generated.text)
         self.assertEqual(matcher.call_count, 1)
+        self.assertEqual(matcher.call_args.kwargs["contract"], "full")
+        self.assertEqual(matcher.call_args.kwargs["max_tokens"], 6000)
 
     def test_diagnosis_refreshes_only_evidence_match_cache_after_lock(self):
         application = self.create_application("Project reporting experience.")
@@ -291,7 +296,7 @@ Experience in construction or mining (preferred).
 
         with patch.object(Session, "refresh", new=record_refresh), patch(
             "app.main.match_evidence_batch", side_effect=self.no_match,
-        ), patch("app.main.generate_draft", return_value=draft), patch(
+        ) as matcher, patch("app.main.generate_draft", return_value=draft), patch(
             "app.main.repair_cover_letter", return_value=(draft, {"status": "pass", "results": []}),
         ):
             response = self.client.post("/generate", json={
@@ -300,6 +305,8 @@ Experience in construction or mining (preferred).
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn(["evidence_matches_json"], refreshed)
+        self.assertEqual(matcher.call_args.kwargs["contract"], "full")
+        self.assertEqual(matcher.call_args.kwargs["max_tokens"], 6000)
 
     def test_diagnosis_enters_lock_without_uncommitted_application_changes(self):
         application = self.create_application("Project reporting experience.")

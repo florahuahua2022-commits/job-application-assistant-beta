@@ -142,8 +142,21 @@ _EVIDENCE_LOG_FIELDS = {
     "response_id", "criterion_count", "completed_criteria", "failed_criterion_id", "status",
     "failure_category", "provider_http_requests", "duration_ms", "cache_hit_ratio", "request_count",
     "request_budget", "zero_relevant_evidence", "output_budget_warning", "near_output_limit",
-    "circuit_open", "budget_exceeded", "schedule_mode",
+    "circuit_open", "budget_exceeded", "schedule_mode", "contract", "max_tokens",
 }
+
+EVIDENCE_MATCH_PROMPT_VERSION = "compact-v2"
+
+
+def configured_evidence_match_contract() -> str:
+    contract = settings.evidence_match_contract.strip().lower()
+    if contract not in {"compact", "full"}:
+        raise ValueError("EVIDENCE_MATCH_CONTRACT must be either 'compact' or 'full'.")
+    return contract
+
+
+def evidence_match_max_tokens(contract: str) -> int:
+    return 6000 if contract == "full" else 4000
 
 
 def safe_evidence_log(values: dict) -> None:
@@ -440,10 +453,15 @@ def _deepseek_draft(prompt: str, max_tokens: int = 4000) -> str:
 
 def match_evidence_batch(
     ckb_json: str, job_model_json: str, *, run_id: str | None = None, application_id: int | None = None,
-    contract: str = "compact", max_tokens: int = 4000, _run_state: EvidenceMatchRunState | None = None,
+    contract: str | None = None, max_tokens: int | None = None, _run_state: EvidenceMatchRunState | None = None,
     _single: bool = False, _allow_shards: bool = True, _include_validated_verdicts: bool = False,
 ) -> dict:
-    _evidence_match_run_telemetry.set({"completed_criteria": 0, "provider_http_requests": 0})
+    contract = configured_evidence_match_contract() if contract is None else contract
+    max_tokens = evidence_match_max_tokens(contract) if max_tokens is None else max_tokens
+    _evidence_match_run_telemetry.set({
+        "completed_criteria": 0, "provider_http_requests": 0,
+        "contract": contract, "max_tokens": max_tokens,
+    })
     try:
         ckb = json.loads(ckb_json or "[]")
         job_model = json.loads(job_model_json or "{}")
@@ -455,7 +473,12 @@ def match_evidence_batch(
         raise ValueError("Evidence match contract must be 'compact' or 'full'.")
     run_state = _run_state or EvidenceMatchRunState(len(job_model.get("criteria") or []), run_id=run_id)
     if not job_model.get("criteria"):
-        return normalise_match_result({"matches": []}, job_model, ckb)
+        provider = settings.ai_provider.strip().lower()
+        return normalise_match_result({
+            "matches": [], "prompt_version": EVIDENCE_MATCH_PROMPT_VERSION,
+            "contract_version": f"{contract}-v1", "provider": provider,
+            "model": settings.deepseek_model if provider == "deepseek" else settings.openai_model,
+        }, job_model, ckb)
     criteria = list(job_model.get("criteria") or [])
     if len(criteria) > 1 and not _single:
         results: dict[int, tuple[dict, dict]] = {}
@@ -522,7 +545,7 @@ def match_evidence_batch(
         ordered_statuses = [results[index][0]["criterion_statuses"][0] for index in range(len(criteria))]
         combined = normalise_match_result({
             "matches": ordered_matches, "criterion_statuses": ordered_statuses,
-            "prompt_version": "compact-v2", "contract_version": f"{contract}-v1",
+            "prompt_version": EVIDENCE_MATCH_PROMPT_VERSION, "contract_version": f"{contract}-v1",
             "provider": settings.ai_provider.strip().lower(),
             "model": settings.deepseek_model if settings.ai_provider.strip().lower() == "deepseek" else settings.openai_model,
         }, job_model, ckb)
@@ -535,6 +558,7 @@ def match_evidence_batch(
             "cache_hit_ratio": ratio, "schedule_mode": "concurrent" if concurrent else "serial",
             "output_budget_warning": run_state.output_budget_warning,
             "near_output_limit": run_state.near_output_limit,
+            "contract": contract, "max_tokens": max_tokens,
         })
         return combined
     evidence_ids = [str(item.get("evidence_id")) for item in ckb if item.get("evidence_id")]
@@ -564,7 +588,7 @@ def match_evidence_batch(
         )
         verdict_example = "direct|partial|insufficient" if full_contract else "direct|partial"
         quote_example = "exact source substring or empty" if full_contract else "exact source substring"
-        prompt = f"""EVIDENCE MATCH PROMPT VERSION: compact-v2
+        prompt = f"""EVIDENCE MATCH PROMPT VERSION: {EVIDENCE_MATCH_PROMPT_VERSION}
 Judge every Career Knowledge Base item against this one job criterion. Do not select only the strongest candidates.
 {verdict_rules}
 - direct and partial require one exact contiguous support_quote copied from that evidence. Never paraphrase it.
@@ -589,13 +613,13 @@ Return JSON only:
                 chunk_result = match_evidence_batch(
                     json.dumps(chunk, ensure_ascii=False),
                     json.dumps({**job_model, "criteria": [criterion]}, ensure_ascii=False),
-                    run_id=run_id, application_id=application_id, contract="compact", max_tokens=max_tokens,
+                    run_id=run_id, application_id=application_id, contract=contract, max_tokens=max_tokens,
                     _run_state=run_state, _single=True, _allow_shards=False,
                     _include_validated_verdicts=True,
                 )
                 combined.extend(
                     item for item in chunk_result.get("_validated_verdicts") or []
-                    if item.get("verdict") != "insufficient"
+                    if contract == "full" or item.get("verdict") != "insufficient"
                 )
             return {"criteria_id": criteria_id, "evidence_verdicts": combined}
         parsed = None
@@ -608,6 +632,7 @@ Return JSON only:
             "provider": provider,
             "model": settings.deepseek_model if provider == "deepseek" else settings.openai_model,
             "prompt_characters": len(prompt), "evidence_count": len(evidence_ids),
+            "contract": contract, "max_tokens": max_tokens,
         }
         for attempt in range(1, 4):
             attempt_closed = False
@@ -748,7 +773,7 @@ Return JSON only:
                 duplicate_id_count=len(returned_ids) - len(set(returned_ids)),
                 unknown_id_count=len(set(returned_ids) - set(evidence_ids)), order_correct=returned_ids == evidence_ids,
             )
-            if contract == "compact" and attempt == 2 and _allow_shards and len(ckb) > 30:
+            if attempt == 2 and _allow_shards and len(ckb) > 30:
                 candidate = shard_candidate()
                 verdicts = candidate["evidence_verdicts"]
                 by_id = {str(item["evidence_id"]): item for item in verdicts}
@@ -791,7 +816,7 @@ Return JSON only:
         })
     normalised = normalise_match_result({
         "matches": raw_matches, "criterion_statuses": statuses,
-        "prompt_version": "compact-v2", "contract_version": f"{contract}-v1",
+        "prompt_version": EVIDENCE_MATCH_PROMPT_VERSION, "contract_version": f"{contract}-v1",
         "provider": provider,
         "model": settings.deepseek_model if provider == "deepseek" else settings.openai_model,
     }, job_model, ckb)
@@ -800,6 +825,7 @@ Return JSON only:
         "request_count": run_state.request_count, "request_budget": run_state.request_budget,
         "output_budget_warning": run_state.output_budget_warning,
         "near_output_limit": run_state.near_output_limit,
+        "contract": contract, "max_tokens": max_tokens,
     })
     errors = validate_match_result(normalised, job_model, ckb)
     if errors:

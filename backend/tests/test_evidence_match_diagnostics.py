@@ -397,6 +397,9 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
         completed = [event for event in self.events() if event["event"] == "application_diagnosis_complete"]
         self.assertEqual((completed[-1]["application_id"], completed[-1]["failure_category"]), (7, "timeout"))
         self.assertEqual(len(completed[-1]["run_id"]), 36)
+        self.assertEqual(completed[-1]["contract"], "full")
+        self.assertEqual(completed[-1]["max_tokens"], 6000)
+        self.assertIsInstance(completed[-1]["elapsed_ms"], (int, float))
 
     def test_non_match_value_error_keeps_original_400_detail(self):
         application = SimpleNamespace(id=8, job_model_json="{}")
@@ -472,6 +475,8 @@ class EvidenceMatchDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["matches"][0]["matched_evidence"], ["EV001"])
         complete = [event for event in self.events() if event.get("event") == "evidence_match_criterion_complete"]
         self.assertEqual(complete[0]["application_attempts"], 2)
+        self.assertEqual(complete[0]["contract"], "full")
+        self.assertEqual(complete[0]["max_tokens"], 6000)
 
 
 if __name__ == "__main__":

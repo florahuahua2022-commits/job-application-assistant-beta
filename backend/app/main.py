@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, update
 from sqlmodel import Session, delete, select
-from .ai import AIServiceError, EvidenceMatchCompletenessError, EvidenceMatchDiagnosticError, build_evidence_pack, evidence_error_detail, evidence_match_run_telemetry, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, reset_evidence_match_run_telemetry, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume, safe_evidence_log
+from .ai import AIServiceError, EVIDENCE_MATCH_PROMPT_VERSION, EvidenceMatchCompletenessError, EvidenceMatchDiagnosticError, build_evidence_pack, configured_evidence_match_contract, evidence_error_detail, evidence_match_max_tokens, evidence_match_run_telemetry, generate_draft, generate_selection_criteria_bundle, match_evidence_batch, provider_response_telemetry, repair_cover_letter, repair_selection_criteria_bundle, repair_tailored_resume, reset_evidence_match_run_telemetry, review_application_pack, review_cover_letter, review_selection_criteria_batch, review_tailored_resume, safe_evidence_log
 from .application_requirements import confirm_application_requirements, correct_application_requirements, load_application_requirements, material_requirements_unknown, parse_application_requirements, requirements_source_changed, validate_application_requirements
 from .application_decision import build_application_decision, decision_inputs, decision_is_current, validate_application_decision
 from .ats_verification import verify_resume_artifact, verify_document_export
@@ -542,8 +542,10 @@ def prepare_application_decision(
     ckb, _ = application_ckb(session, application, master_resume, user_id)
     matches = json.loads(application.evidence_matches_json or "{}")
     provider = settings.ai_provider.strip().lower()
+    contract = configured_evidence_match_contract()
+    match_max_tokens = evidence_match_max_tokens(contract)
     if not match_cache_is_current(
-        matches, job_model, ckb, prompt_version="compact-v2", contract_version="compact-v1",
+        matches, job_model, ckb, prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1",
         provider=provider, model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
     ):
         try:
@@ -551,13 +553,14 @@ def prepare_application_decision(
                 session.refresh(application, attribute_names=["evidence_matches_json"])
                 matches = json.loads(application.evidence_matches_json or "{}")
                 if not match_cache_is_current(
-                    matches, job_model, ckb, prompt_version="compact-v2", contract_version="compact-v1",
+                    matches, job_model, ckb, prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1",
                     provider=provider, model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
                 ):
                     matches = normalise_match_result(
                         match_evidence_batch(
                             json.dumps(ckb, ensure_ascii=False), json.dumps(job_model, ensure_ascii=False),
                             run_id=run_id, application_id=application.id,
+                            contract=contract, max_tokens=match_max_tokens,
                         ), job_model, ckb,
                     )
                     application.evidence_matches_json = json.dumps(matches, ensure_ascii=False)
@@ -1783,6 +1786,8 @@ def diagnose_application(
     started = perf_counter()
     status = "failed"
     failure_category = None
+    contract = configured_evidence_match_contract()
+    match_max_tokens = evidence_match_max_tokens(contract)
     application = get_for_user(session, JobApplication, application_id, user_id)
     master_resume = application_master_resume(session, application, user_id, auto_update_pristine=True) if application else None
     if not application or not master_resume:
@@ -1810,11 +1815,13 @@ def diagnose_application(
             if not isinstance(job_model, dict):
                 job_model = {}
             criteria = job_model.get("criteria") or []
+            elapsed_ms = round((perf_counter() - started) * 1000)
             safe_evidence_log({
                 "event": "application_diagnosis_complete", "run_id": run_id,
                 "application_id": application_id, "criterion_count": len(criteria),
                 "status": status, "failure_category": failure_category,
-                "duration_ms": round((perf_counter() - started) * 1000),
+                "duration_ms": elapsed_ms, "elapsed_ms": elapsed_ms,
+                "contract": contract, "max_tokens": match_max_tokens,
                 **evidence_match_run_telemetry(),
             })
         except Exception:
@@ -3347,9 +3354,11 @@ def generate_document(
         parsed_job_model = json.loads(job_model_json)
         parsed_matches = json.loads(evidence_matches_json or "{}")
         provider = settings.ai_provider.strip().lower()
+        contract = configured_evidence_match_contract()
+        match_max_tokens = evidence_match_max_tokens(contract)
         if not match_cache_is_current(
             parsed_matches, parsed_job_model, parsed_ckb,
-            prompt_version="compact-v2", contract_version="compact-v1", provider=provider,
+            prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1", provider=provider,
             model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
         ):
             try:
@@ -3358,7 +3367,7 @@ def generate_document(
                     locked_matches = json.loads(application.evidence_matches_json or "{}")
                     if match_cache_is_current(
                         locked_matches, parsed_job_model, parsed_ckb,
-                        prompt_version="compact-v2", contract_version="compact-v1", provider=provider,
+                        prompt_version=EVIDENCE_MATCH_PROMPT_VERSION, contract_version=f"{contract}-v1", provider=provider,
                         model=settings.deepseek_model if provider == "deepseek" else settings.openai_model,
                     ):
                         evidence_matches_json = application.evidence_matches_json
@@ -3367,6 +3376,7 @@ def generate_document(
                             match_evidence_batch(
                                 ckb_source_json, job_model_json,
                                 run_id=str(uuid4()), application_id=application.id,
+                                contract=contract, max_tokens=match_max_tokens,
                             ),
                             parsed_job_model, parsed_ckb,
                         ), ensure_ascii=False)
